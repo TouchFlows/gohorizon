@@ -147,13 +147,12 @@ func TestPruneDropsHistoryPastTheHandoffWindows(t *testing.T) {
 	now := time.Date(2026, 11, 20, 12, 0, 0, 0, time.UTC)
 
 	records := []struct {
-		id   string
-		at   time.Time
-		note string
+		id string
+		at time.Time
 	}{
-		{"fresh", now.Add(-time.Hour), "within both windows"},
-		{"raw-expired", now.Add(-rawRetention - time.Hour), "id expired, aggregate stays"},
-		{"minute-expired", now.Add(-minuteRetention - time.Hour), "both expired"},
+		{"fresh", now.Add(-time.Hour)},
+		{"raw-expired", now.Add(-rawRetention - time.Hour)},
+		{"minute-expired", now.Add(-minuteRetention - time.Hour)},
 	}
 	for _, record := range records {
 		if err := store.RecordJob(ctx, record.id, "emails", "processed", 10, record.at); err != nil {
