@@ -372,15 +372,14 @@ func TestServiceConsumesTelemetryEndToEnd(t *testing.T) {
 	}
 }
 
-// TestServicePrunesMetricsOnStartupAndWhileRunning seeds the database a previous run
-// would have left behind, then proves the running service removes what is past the
-// retention windows on startup and again on its schedule.
-func TestServicePrunesMetricsOnStartupAndWhileRunning(t *testing.T) {
+// TestServicePrunesMetricsOnStartup seeds history a previous run left behind and proves
+// the startup pass removes it. The schedule is an hour away, so only the startup pass
+// can be responsible.
+func TestServicePrunesMetricsOnStartup(t *testing.T) {
 	old := time.Now().Add(-8 * 24 * time.Hour)
 	running := startService(t, func(service *Service) {
-		service.pruneInterval = 50 * time.Millisecond
-		// History a previous run left behind: one bucket past the 7-day window, one
-		// inside it.
+		service.pruneInterval = time.Hour
+		// One bucket past the 7-day window, one inside it.
 		if err := service.store.RecordJob(context.Background(), "old-event", "emails", "processed", 10, old); err != nil {
 			t.Fatalf("seed old metric: %v", err)
 		}
@@ -403,27 +402,29 @@ func TestServicePrunesMetricsOnStartupAndWhileRunning(t *testing.T) {
 		t.Fatalf("buckets = %+v, want only the bucket inside the retention window", buckets)
 	}
 	if buckets[0].Start.Equal(old.Truncate(time.Minute)) {
-		t.Error("the 8-day-old bucket survived the startup prune")
+		t.Fatal("the 8-day-old bucket survived the startup prune")
 	}
+	if buckets[0].Processed != 1 || buckets[0].DurationMS != 10 {
+		t.Errorf("bucket = %+v, want the in-window job kept", buckets[0])
+	}
+}
 
-	// The startup pass is done, so a bucket written now can only disappear through the
-	// scheduled pass.
-	loopOld := time.Now().Add(-9 * 24 * time.Hour)
-	if err := running.service.store.RecordJob(running.ctx, "loop-old", "emails", "processed", 10, loopOld); err != nil {
+// TestServicePrunesMetricsOnSchedule proves the periodic pass: the database is empty at
+// startup, so the bucket written afterwards can only be removed by the schedule.
+func TestServicePrunesMetricsOnSchedule(t *testing.T) {
+	running := startService(t, func(service *Service) {
+		service.pruneInterval = 50 * time.Millisecond
+	})
+
+	old := time.Now().Add(-9 * 24 * time.Hour)
+	if err := running.service.store.RecordJob(running.ctx, "loop-old", "emails", "processed", 10, old); err != nil {
 		t.Fatalf("seed metric for the scheduled pass: %v", err)
 	}
+
 	waitUntil(t, 5*time.Second, func() bool {
-		buckets, err := running.service.store.Buckets(context.Background(), "emails", loopOld.Add(-time.Hour), loopOld.Add(time.Hour))
+		buckets, err := running.service.store.Buckets(context.Background(), "emails", old.Add(-time.Hour), old.Add(time.Hour))
 		return err == nil && len(buckets) == 0
 	}, "the scheduled prune to remove a bucket written after startup")
-
-	buckets, err = running.service.store.Buckets(running.ctx, "emails", from, time.Now())
-	if err != nil {
-		t.Fatalf("read metrics history: %v", err)
-	}
-	if len(buckets) != 1 || buckets[0].Processed != 1 || buckets[0].DurationMS != 10 {
-		t.Errorf("buckets = %+v, want the in-window job untouched by the schedule", buckets)
-	}
 }
 
 func TestNewDegradesWhenCapabilitiesAreUnavailable(t *testing.T) {
