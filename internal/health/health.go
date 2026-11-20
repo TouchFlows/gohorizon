@@ -20,7 +20,8 @@ type Lock struct {
 }
 
 // Telemetry is the ingestion path: counters since start plus whether it is failing
-// right now. A failing ingestion path degrades the report but never the workers.
+// right now. It is body-only for monitoring: a failing ingestion path neither
+// degrades the report status nor affects the workers.
 type Telemetry struct {
 	Events     int    `json:"events"`
 	Duplicates int    `json:"duplicates"`

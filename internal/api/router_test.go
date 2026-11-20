@@ -59,9 +59,9 @@ func TestHealthExposesTelemetryCounters(t *testing.T) {
 	}
 }
 
-func TestHealthReportsFailingIngestion(t *testing.T) {
+func TestFailingIngestionIsVisibleWithoutFailingTheEndpoint(t *testing.T) {
 	provider := stubProvider{report: health.Report{
-		Status: "degraded",
+		Status: "ok",
 		Telemetry: health.Telemetry{
 			Errors:    7,
 			Failing:   true,
@@ -72,13 +72,15 @@ func TestHealthReportsFailingIngestion(t *testing.T) {
 	recorder := httptest.NewRecorder()
 	NewRouter(provider, discardLogger()).ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/api/v1/health", nil))
 
-	if recorder.Code != http.StatusServiceUnavailable {
-		t.Fatalf("status = %d, want 503 for a degraded report", recorder.Code)
+	// A failed check here would get a supervisor with healthy workers restarted.
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 while only ingestion is failing", recorder.Code)
 	}
 
 	var payload struct {
 		Status    string `json:"status"`
 		Telemetry struct {
+			Errors    int    `json:"errors"`
 			Failing   bool   `json:"failing"`
 			LastError string `json:"last_error"`
 		} `json:"telemetry"`
@@ -86,7 +88,21 @@ func TestHealthReportsFailingIngestion(t *testing.T) {
 	if err := json.Unmarshal(recorder.Body.Bytes(), &payload); err != nil {
 		t.Fatalf("decode body: %v", err)
 	}
-	if !payload.Telemetry.Failing || payload.Telemetry.LastError == "" {
+	if !payload.Telemetry.Failing || payload.Telemetry.LastError == "" || payload.Telemetry.Errors != 7 {
 		t.Errorf("telemetry = %+v, want the live failure visible", payload.Telemetry)
+	}
+}
+
+func TestHealthStillReportsLockDegradation(t *testing.T) {
+	provider := stubProvider{report: health.Report{
+		Status: "degraded",
+		Lock:   health.Lock{Degraded: true, LastError: "lock renewal failed"},
+	}}
+
+	recorder := httptest.NewRecorder()
+	NewRouter(provider, discardLogger()).ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/api/v1/health", nil))
+
+	if recorder.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want 503 for a degraded report", recorder.Code)
 	}
 }

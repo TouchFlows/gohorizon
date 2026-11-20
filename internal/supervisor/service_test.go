@@ -160,8 +160,10 @@ func TestReportSurfacesFailingTelemetryIngestion(t *testing.T) {
 	if !report.Telemetry.Failing || report.Telemetry.Errors == 0 || report.Telemetry.LastError == "" {
 		t.Fatalf("telemetry = %+v, want the ingestion failure visible", report.Telemetry)
 	}
-	if report.Status != "degraded" {
-		t.Errorf("status = %q, want degraded while ingestion is failing", report.Status)
+	// Admitting the failure in the body is enough: a failing status here would let a
+	// health check restart or kill a supervisor whose workers are healthy.
+	if report.Status != "ok" {
+		t.Errorf("status = %q, want ok while only ingestion is failing", report.Status)
 	}
 }
 

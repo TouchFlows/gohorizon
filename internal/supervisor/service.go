@@ -263,7 +263,9 @@ func (s *Service) Report() health.Report {
 		Failing:    stats.Failing,
 		LastError:  stats.LastError,
 	}
-	if !held || stats.Failing {
+	// Ingestion is reported in the body but never degrades the status: a failed health
+	// check would restart or kill a supervisor whose workers are fine.
+	if !held {
 		report.Status = "degraded"
 	}
 
