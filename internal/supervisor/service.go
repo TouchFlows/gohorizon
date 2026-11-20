@@ -26,9 +26,10 @@ const (
 	lockRenew   = 10 * time.Second
 	lockTimeout = 5 * time.Second
 
-	// pruneInterval bounds how far the metrics database can outgrow its retention
-	// windows between two prune passes.
-	pruneInterval = time.Hour
+	// defaultPruneInterval bounds how far the metrics database can outgrow its
+	// retention windows between two prune passes. It is a field on the service so a
+	// test can watch the scheduled pass without waiting an hour.
+	defaultPruneInterval = time.Hour
 )
 
 // ErrLocked is returned when another instance owns the supervisor lock. Startup
@@ -42,8 +43,10 @@ type Service struct {
 	consumer *telemetry.Consumer
 	store    *metrics.Store
 	managers []*process.Manager
-	started  time.Time
-	owner    string
+
+	pruneInterval time.Duration
+	started       time.Time
+	owner         string
 
 	mu       sync.Mutex
 	lockHeld bool
@@ -85,11 +88,12 @@ func New(ctx context.Context, cfg *config.Config, log *slog.Logger) (*Service, e
 	}
 
 	s := &Service{
-		cfg:     cfg,
-		log:     log,
-		client:  client,
-		started: time.Now(),
-		owner:   fmt.Sprintf("%s-%d", version.Version, time.Now().UnixNano()),
+		cfg:           cfg,
+		log:           log,
+		client:        client,
+		started:       time.Now(),
+		owner:         fmt.Sprintf("%s-%d", version.Version, time.Now().UnixNano()),
+		pruneInterval: defaultPruneInterval,
 	}
 
 	for i := range app.Supervisors {
@@ -180,13 +184,18 @@ func (s *Service) Close() error {
 }
 
 // pruneLoop keeps the metrics database from growing without bound: it prunes on startup
-// and then hourly (docs/adr/0007). It is a no-op when history is disabled.
+// and then every pruneInterval (an hour in production, docs/adr/0007). It is a no-op
+// when history is disabled.
 func (s *Service) pruneLoop(ctx context.Context) {
 	if s.store == nil {
 		return
 	}
+	interval := s.pruneInterval
+	if interval <= 0 {
+		interval = defaultPruneInterval
+	}
 	s.pruneOnce(ctx)
-	ticker := time.NewTicker(pruneInterval)
+	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	for {
 		select {

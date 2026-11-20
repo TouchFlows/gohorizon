@@ -332,10 +332,10 @@ func TestServiceConsumesTelemetryEndToEnd(t *testing.T) {
 	}
 }
 
-// TestServicePrunesOldMetricsAtStartup seeds the database a previous run would have
-// left behind, then proves the running service removes what is past the retention
-// windows before it is asked to do anything.
-func TestServicePrunesOldMetricsAtStartup(t *testing.T) {
+// TestServicePrunesMetricsOnStartupAndWhileRunning seeds the database a previous run
+// would have left behind, then proves the running service removes what is past the
+// retention windows on startup and again on its schedule.
+func TestServicePrunesMetricsOnStartupAndWhileRunning(t *testing.T) {
 	const address = "127.0.0.1:6379"
 
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
@@ -377,6 +377,7 @@ func TestServicePrunesOldMetricsAtStartup(t *testing.T) {
 	if service.store == nil {
 		t.Fatal("metrics history was not opened, so pruning cannot run")
 	}
+	service.pruneInterval = 50 * time.Millisecond
 	stream := service.client.Keys().Events()
 
 	runCtx, stop := context.WithCancel(ctx)
@@ -415,6 +416,25 @@ func TestServicePrunesOldMetricsAtStartup(t *testing.T) {
 	}
 	if buckets[0].Processed != 1 || buckets[0].DurationMS != 10 {
 		t.Errorf("bucket = %+v, want the in-window job kept", buckets[0])
+	}
+
+	// The startup pass is done, so a bucket written now can only disappear through the
+	// scheduled pass.
+	loopOld := time.Now().Add(-9 * 24 * time.Hour)
+	if err := service.store.RecordJob(ctx, "loop-old", "emails", "processed", 10, loopOld); err != nil {
+		t.Fatalf("seed metric for the scheduled pass: %v", err)
+	}
+	waitUntil(t, 5*time.Second, func() bool {
+		buckets, err := service.store.Buckets(context.Background(), "emails", loopOld.Add(-time.Hour), loopOld.Add(time.Hour))
+		return err == nil && len(buckets) == 0
+	}, "the scheduled prune to remove a bucket written after startup")
+
+	buckets, err = service.store.Buckets(ctx, "emails", from, time.Now())
+	if err != nil {
+		t.Fatalf("read metrics history: %v", err)
+	}
+	if len(buckets) != 1 || buckets[0].Processed != 1 {
+		t.Errorf("buckets = %+v, want the in-window job untouched by the schedule", buckets)
 	}
 }
 
