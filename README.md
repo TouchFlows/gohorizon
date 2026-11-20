@@ -27,7 +27,7 @@ Milestone 1 (proof of concept) in progress. Implemented:
   buckets and closed hours into daily ones before pruning event ids, minutes, hours and
   days past their windows. The windows follow handoff §9 and are configurable under
   `storage.retention` (defaults: raw 72 h, minutes 7 d, hours 30 d, days 365 d).
-  `GET /api/v1/metrics` reads the minute level back.
+  `GET /api/v1/metrics?resolution=…` reads any of the three levels back.
 - Queue depth: every 15 seconds the service runs `gohorizon:inspect` for the queues
   its supervisors launch and reports each queue's `pending`, `reserved` and `delayed`
   counts on `GET /api/v1/health`. Counts a driver cannot report are `null`, and a
@@ -37,12 +37,13 @@ Milestone 1 (proof of concept) in progress. Implemented:
 - `gohorizon/laravel` package: configuration, job lifecycle telemetry to a Redis Stream,
   `gohorizon:capabilities`, `gohorizon:inspect`.
 
-`GET /api/v1/metrics?queue=default[&from=…&to=…]` returns the persisted minute buckets
-for one queue as `{queue, from, to, buckets: [{start, processed, released, failed,
-timed_out, duration_ms}]}`, oldest first. The range is `[from, to)` in RFC 3339 and
-defaults to the last hour; a missing queue or a malformed range is a 400, unavailable
-history is a 503, and a store failure is a 500 that keeps the database path out of the
-response.
+`GET /api/v1/metrics?queue=default[&resolution=minute|hourly|daily][&from=…&to=…]`
+returns one queue's persisted buckets as `{queue, resolution, from, to, buckets: [{start,
+processed, released, failed, timed_out, duration_ms}]}`, oldest first. `resolution`
+defaults to `minute`; the range is `[from, to)` in RFC 3339 and defaults to the last
+hour of minutes, the last 24 hours of hours, or the last 30 days of days. A missing
+queue, an unknown resolution or a malformed range is a 400, unavailable history is a
+503, and a store failure is a 500 that keeps the database path out of the response.
 
 Not implemented yet: the React dashboard, authentication, balancing, failed-job
 administration, Prometheus exposition.

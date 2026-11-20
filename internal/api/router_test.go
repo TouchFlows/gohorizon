@@ -22,15 +22,16 @@ type stubProvider struct {
 	err     error
 
 	// The last metrics query, so a test can check what the handler parsed.
-	queue string
-	from  time.Time
-	to    time.Time
+	resolution metrics.Resolution
+	queue      string
+	from       time.Time
+	to         time.Time
 }
 
 func (s *stubProvider) Report() health.Report { return s.report }
 
-func (s *stubProvider) Buckets(_ context.Context, queue string, from, to time.Time) ([]metrics.Bucket, error) {
-	s.queue, s.from, s.to = queue, from, to
+func (s *stubProvider) Buckets(_ context.Context, resolution metrics.Resolution, queue string, from, to time.Time) ([]metrics.Bucket, error) {
+	s.resolution, s.queue, s.from, s.to = resolution, queue, from, to
 	return s.buckets, s.err
 }
 
@@ -180,16 +181,19 @@ func TestMetricsReadsPersistedBuckets(t *testing.T) {
 	}
 
 	var payload struct {
-		Queue   string           `json:"queue"`
-		From    time.Time        `json:"from"`
-		To      time.Time        `json:"to"`
-		Buckets []metrics.Bucket `json:"buckets"`
+		Queue      string             `json:"queue"`
+		Resolution metrics.Resolution `json:"resolution"`
+		From       time.Time          `json:"from"`
+		To         time.Time          `json:"to"`
+		Buckets    []metrics.Bucket   `json:"buckets"`
 	}
 	if err := json.Unmarshal(recorder.Body.Bytes(), &payload); err != nil {
 		t.Fatalf("decode body: %v", err)
 	}
-	if payload.Queue != "default" || !payload.From.Equal(start) || !payload.To.Equal(start.Add(time.Hour)) {
-		t.Errorf("payload range = %q %s..%s, want the queried range", payload.Queue, payload.From, payload.To)
+	if payload.Queue != "default" || payload.Resolution != metrics.ResolutionMinute ||
+		!payload.From.Equal(start) || !payload.To.Equal(start.Add(time.Hour)) {
+		t.Errorf("payload = %q %q %s..%s, want the queried minute range",
+			payload.Queue, payload.Resolution, payload.From, payload.To)
 	}
 	if len(payload.Buckets) != 1 {
 		t.Fatalf("buckets = %+v, want one", payload.Buckets)
@@ -212,8 +216,8 @@ func TestMetricsDefaultsToTheLastHour(t *testing.T) {
 	if provider.queue != "emails" {
 		t.Errorf("queue = %q, want emails", provider.queue)
 	}
-	if window := provider.to.Sub(provider.from); window != defaultHistoryWindow {
-		t.Errorf("window = %s, want %s", window, defaultHistoryWindow)
+	if window := provider.to.Sub(provider.from); window != defaultHistoryWindows[metrics.ResolutionMinute] {
+		t.Errorf("window = %s, want an hour", window)
 	}
 
 	// No history yet is an empty array, not null.
@@ -228,10 +232,60 @@ func TestMetricsDefaultsToTheLastHour(t *testing.T) {
 	}
 }
 
+func TestMetricsReadsTheRequestedResolution(t *testing.T) {
+	for _, resolution := range []metrics.Resolution{metrics.ResolutionHourly, metrics.ResolutionDaily} {
+		t.Run(string(resolution), func(t *testing.T) {
+			provider := &stubProvider{}
+			recorder := get(t, provider, "/api/v1/metrics?queue=default&resolution="+string(resolution))
+
+			if recorder.Code != http.StatusOK {
+				t.Fatalf("status = %d, want 200", recorder.Code)
+			}
+			if provider.resolution != resolution {
+				t.Errorf("store read resolution = %q, want %q", provider.resolution, resolution)
+			}
+
+			var payload struct {
+				Resolution metrics.Resolution `json:"resolution"`
+			}
+			if err := json.Unmarshal(recorder.Body.Bytes(), &payload); err != nil {
+				t.Fatalf("decode body: %v", err)
+			}
+			if payload.Resolution != resolution {
+				t.Errorf("payload resolution = %q, want %q", payload.Resolution, resolution)
+			}
+		})
+	}
+}
+
+func TestMetricsDefaultsTheWindowToTheResolution(t *testing.T) {
+	for _, tc := range []struct {
+		resolution metrics.Resolution
+		window     time.Duration
+	}{
+		{metrics.ResolutionMinute, time.Hour},
+		{metrics.ResolutionHourly, 24 * time.Hour},
+		{metrics.ResolutionDaily, 30 * 24 * time.Hour},
+	} {
+		t.Run(string(tc.resolution), func(t *testing.T) {
+			provider := &stubProvider{}
+			recorder := get(t, provider, "/api/v1/metrics?queue=default&resolution="+string(tc.resolution))
+
+			if recorder.Code != http.StatusOK {
+				t.Fatalf("status = %d, want 200", recorder.Code)
+			}
+			if window := provider.to.Sub(provider.from); window != tc.window {
+				t.Errorf("window = %s, want %s", window, tc.window)
+			}
+		})
+	}
+}
+
 func TestMetricsRejectsMalformedQueries(t *testing.T) {
 	targets := []string{
 		"/api/v1/metrics",
 		"/api/v1/metrics?queue=",
+		"/api/v1/metrics?queue=default&resolution=weekly",
 		"/api/v1/metrics?queue=default&from=yesterday",
 		"/api/v1/metrics?queue=default&to=not-a-time",
 		"/api/v1/metrics?queue=default&from=2026-11-20T22:00:00Z&to=2026-11-20T21:00:00Z",

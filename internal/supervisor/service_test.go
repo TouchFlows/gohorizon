@@ -322,7 +322,7 @@ func TestBucketsReadsPersistedHistory(t *testing.T) {
 	}
 
 	service := &Service{store: store}
-	buckets, err := service.Buckets(context.Background(), "emails", at.Add(-time.Hour), time.Now())
+	buckets, err := service.Buckets(context.Background(), metrics.ResolutionMinute, "emails", at.Add(-time.Hour), time.Now())
 	if err != nil {
 		t.Fatalf("Buckets: %v", err)
 	}
@@ -330,8 +330,24 @@ func TestBucketsReadsPersistedHistory(t *testing.T) {
 		t.Fatalf("buckets = %+v, want the recorded job", buckets)
 	}
 
+	// The resolution reaches the store: a closed hour is readable as hourly history.
+	closed := at.Add(-time.Hour)
+	if err := store.RecordJob(context.Background(), "event-2", "emails", "failed", 80, closed); err != nil {
+		t.Fatalf("seed closed-hour metric: %v", err)
+	}
+	if err := store.Rollup(context.Background(), time.Now()); err != nil {
+		t.Fatalf("Rollup: %v", err)
+	}
+	hours, err := service.Buckets(context.Background(), metrics.ResolutionHourly, "emails", closed.Add(-24*time.Hour), time.Now())
+	if err != nil {
+		t.Fatalf("hourly Buckets: %v", err)
+	}
+	if len(hours) != 1 || hours[0].Failed != 1 || hours[0].DurationMS != 80 {
+		t.Errorf("hours = %+v, want the closed-hour job", hours)
+	}
+
 	// A service whose store never opened says so instead of answering "no jobs".
-	if _, err := (&Service{}).Buckets(context.Background(), "emails", time.Now().Add(-time.Hour), time.Now()); !errors.Is(err, metrics.ErrDisabled) {
+	if _, err := (&Service{}).Buckets(context.Background(), metrics.ResolutionMinute, "emails", time.Now().Add(-time.Hour), time.Now()); !errors.Is(err, metrics.ErrDisabled) {
 		t.Errorf("error = %v, want ErrDisabled", err)
 	}
 }

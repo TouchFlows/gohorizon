@@ -19,12 +19,16 @@ import (
 // persisted per-queue history.
 type Provider interface {
 	Report() health.Report
-	Buckets(ctx context.Context, queue string, from, to time.Time) ([]metrics.Bucket, error)
+	Buckets(ctx context.Context, resolution metrics.Resolution, queue string, from, to time.Time) ([]metrics.Bucket, error)
 }
 
-// defaultHistoryWindow is the range the metrics endpoint answers when no `from` is
-// given: the last hour of minute buckets.
-const defaultHistoryWindow = time.Hour
+// defaultHistoryWindows is the range the metrics endpoint answers when no `from` is
+// given, per resolution: an hour of minutes, a day of hours, a month of days.
+var defaultHistoryWindows = map[metrics.Resolution]time.Duration{
+	metrics.ResolutionMinute: time.Hour,
+	metrics.ResolutionHourly: 24 * time.Hour,
+	metrics.ResolutionDaily:  30 * 24 * time.Hour,
+}
 
 func NewRouter(provider Provider, log *slog.Logger) http.Handler {
 	r := chi.NewRouter()
@@ -48,14 +52,16 @@ func NewRouter(provider Provider, log *slog.Logger) http.Handler {
 // metricsResponse carries the store's buckets unchanged; their JSON tags are the wire
 // shape, so there is no second copy of the same fields to keep in step.
 type metricsResponse struct {
-	Queue   string           `json:"queue"`
-	From    time.Time        `json:"from"`
-	To      time.Time        `json:"to"`
-	Buckets []metrics.Bucket `json:"buckets"`
+	Queue      string             `json:"queue"`
+	Resolution metrics.Resolution `json:"resolution"`
+	From       time.Time          `json:"from"`
+	To         time.Time          `json:"to"`
+	Buckets    []metrics.Bucket   `json:"buckets"`
 }
 
-// metricsHistory reads one queue's persisted minute buckets for [from, to) from the
-// existing store. It is read-only; the dashboard consumes it later (docs/adr/0007).
+// metricsHistory reads one queue's persisted history for [from, to) at the requested
+// resolution (minute when omitted) from the existing store. It is read-only; the
+// dashboard consumes it later (docs/adr/0007).
 func metricsHistory(provider Provider, log *slog.Logger) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		query := r.URL.Query()
@@ -64,6 +70,17 @@ func metricsHistory(provider Provider, log *slog.Logger) http.HandlerFunc {
 		if queue == "" {
 			writeError(w, http.StatusBadRequest, "queue is required")
 			return
+		}
+
+		resolution := metrics.ResolutionMinute
+		if raw := strings.TrimSpace(query.Get("resolution")); raw != "" {
+			switch candidate := metrics.Resolution(raw); candidate {
+			case metrics.ResolutionMinute, metrics.ResolutionHourly, metrics.ResolutionDaily:
+				resolution = candidate
+			default:
+				writeError(w, http.StatusBadRequest, "resolution must be minute, hourly or daily")
+				return
+			}
 		}
 
 		to := time.Now().UTC()
@@ -76,7 +93,7 @@ func metricsHistory(provider Provider, log *slog.Logger) http.HandlerFunc {
 			to = parsed.UTC()
 		}
 
-		from := to.Add(-defaultHistoryWindow)
+		from := to.Add(-defaultHistoryWindows[resolution])
 		if raw := query.Get("from"); raw != "" {
 			parsed, err := time.Parse(time.RFC3339, raw)
 			if err != nil {
@@ -90,7 +107,7 @@ func metricsHistory(provider Provider, log *slog.Logger) http.HandlerFunc {
 			return
 		}
 
-		buckets, err := provider.Buckets(r.Context(), queue, from, to)
+		buckets, err := provider.Buckets(r.Context(), resolution, queue, from, to)
 		if err != nil {
 			if errors.Is(err, metrics.ErrDisabled) {
 				writeError(w, http.StatusServiceUnavailable, err.Error())
@@ -105,7 +122,7 @@ func metricsHistory(provider Provider, log *slog.Logger) http.HandlerFunc {
 		if buckets == nil {
 			buckets = []metrics.Bucket{} // an empty range is [], never null
 		}
-		writeJSON(w, http.StatusOK, metricsResponse{Queue: queue, From: from, To: to, Buckets: buckets})
+		writeJSON(w, http.StatusOK, metricsResponse{Queue: queue, Resolution: resolution, From: from, To: to, Buckets: buckets})
 	}
 }
 

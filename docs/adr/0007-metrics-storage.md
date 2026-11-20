@@ -40,8 +40,8 @@ Two constraints shape the storage:
    healthy workers down (contrast the capabilities preflight, which protects job
    correctness and therefore does refuse to start).
 6. **No dashboard coupling.** This package formats nothing. `GET /api/v1/metrics`
-   serves one queue's `Buckets` over `[from, to)`, read-only; the dashboard remains a
-   later slice.
+   serves one queue's `Buckets` over `[from, to)` at the requested `resolution`
+   (minute by default), read-only; the dashboard remains a later slice.
 7. **Bounded growth follows handoff §9.** `Rollup` folds closed minute buckets into
    hourly buckets and closed hourly buckets into daily ones; `Prune` then deletes event
    ids and each aggregate level past its window. Both run at startup and then hourly,
@@ -61,7 +61,7 @@ Two constraints shape the storage:
 - History survives a restart, including the dedupe record, so a replayed stream entry is
   not counted twice.
 - Per-queue aggregates exist at minute, hour and day resolution for the handoff's
-  balancing and dashboard work; `GET /api/v1/metrics` currently serves the minute level.
+  balancing and dashboard work; `GET /api/v1/metrics?resolution=` serves all three.
 - The database is bounded: ids live 72 hours, minute buckets 7 days. An event
   redelivered after its id was pruned would be counted again, but the stream's own
   `telemetry.retention` window is far shorter than 72 hours in practice.
