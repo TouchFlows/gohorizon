@@ -2,8 +2,8 @@
 // publishes to the Redis Stream.
 //
 // This is observation, never an execution ledger (handoff §14.7): the consumer
-// validates, deduplicates and acknowledges events, and keeps counters. Persisting
-// them (metrics history) and the dashboard are later slices.
+// validates, deduplicates and acknowledges events, counts them, and hands job metrics
+// to a durable sink (docs/adr/0007). The dashboard is a later slice.
 package telemetry
 
 import (
@@ -46,7 +46,9 @@ type Event struct {
 }
 
 type jobPayload struct {
-	Outcome string `json:"outcome"`
+	Queue      string `json:"queue"`
+	Outcome    string `json:"outcome"`
+	DurationMS int64  `json:"duration_ms"`
 }
 
 type workerPayload struct {
@@ -88,6 +90,8 @@ func (e Event) validate() error {
 			add("%s requires a job object", TypeJobFinished)
 		} else if !outcomes[e.Job.Outcome] {
 			add("job.outcome %q is not one of processed, released, failed, timed_out", e.Job.Outcome)
+		} else if strings.TrimSpace(e.Job.Queue) == "" {
+			add("%s requires job.queue: metrics are aggregated per queue", TypeJobFinished)
 		}
 	case TypeWorkerStopped:
 		if e.WorkerEvent == nil {

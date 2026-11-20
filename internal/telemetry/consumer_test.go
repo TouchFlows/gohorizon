@@ -3,6 +3,7 @@ package telemetry
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"strings"
@@ -314,6 +315,99 @@ func TestWorkerStoppedDeliversItsReasonOnce(t *testing.T) {
 	want := "gohorizon:production:production:default-supervisor:1a2b3c4d timed_out"
 	if len(got) != 1 || got[0] != want {
 		t.Errorf("hook calls = %v, want exactly [%q]", got, want)
+	}
+}
+
+type recordingSink struct {
+	mu   sync.Mutex
+	jobs []string
+	err  error
+}
+
+func (r *recordingSink) RecordJob(_ context.Context, eventID, queue, outcome string, durationMS int64, _ time.Time) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.err != nil {
+		return r.err
+	}
+	r.jobs = append(r.jobs, fmt.Sprintf("%s %s %s %d", eventID, queue, outcome, durationMS))
+	return nil
+}
+
+func (r *recordingSink) recorded() []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]string(nil), r.jobs...)
+}
+
+func (r *recordingSink) fail(err error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.err = err
+}
+
+func TestJobEventsReachTheSinkOnce(t *testing.T) {
+	sink := &recordingSink{}
+	consumer, err := New(&fakeStream{}, Spec{
+		Application: "production",
+		Environment: "production",
+		Logger:      slog.New(slog.NewTextHandler(io.Discard, nil)),
+		Sink:        sink,
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	entries := []redis.StreamMessage{payloadEntry("1-0", "evt-1")}
+	if err := consumer.handle(context.Background(), entries); err != nil {
+		t.Fatalf("handle: %v", err)
+	}
+	if err := consumer.handle(context.Background(), entries); err != nil {
+		t.Fatalf("handle duplicate: %v", err)
+	}
+
+	want := []string{"evt-1 emails processed 1841"}
+	if got := sink.recorded(); len(got) != 1 || got[0] != want[0] {
+		t.Errorf("sink records = %v, want %v once", got, want)
+	}
+	if stats := consumer.Stats(); stats.Events != 1 || stats.Duplicates != 1 {
+		t.Errorf("stats = %+v, want one event and one duplicate", stats)
+	}
+}
+
+func TestJobMetricsSurviveASinkFailure(t *testing.T) {
+	stream := &fakeStream{pending: []redis.StreamMessage{payloadEntry("1-0", "evt-1")}}
+	sink := &recordingSink{err: errors.New("disk is full")}
+	consumer, err := New(stream, Spec{
+		Application: "production",
+		Environment: "production",
+		Logger:      slog.New(slog.NewTextHandler(io.Discard, nil)),
+		Sink:        sink,
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	if err := consumer.handle(context.Background(), []redis.StreamMessage{payloadEntry("1-0", "evt-1")}); err == nil {
+		t.Fatal("handle reported success although the sink failed")
+	}
+	if got := stream.ackedIDs(); len(got) != 0 {
+		t.Fatalf("acked = %v, want nothing acknowledged while the metric is unsaved", got)
+	}
+	if stats := consumer.Stats(); stats.Errors == 0 || !stats.Failing {
+		t.Errorf("stats = %+v, want the failure counted and visible", stats)
+	}
+
+	// The storage comes back: the pending entry is replayed and recorded, because the
+	// event was never marked as seen before the write succeeded.
+	sink.fail(nil)
+	consumer.drain(context.Background())
+
+	if got := sink.recorded(); len(got) != 1 {
+		t.Errorf("sink records = %v, want the retried job recorded once", got)
+	}
+	if got := stream.ackedIDs(); len(got) != 1 || got[0] != "1-0" {
+		t.Errorf("acked = %v, want the entry acknowledged after the retry", got)
 	}
 }
 

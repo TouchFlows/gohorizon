@@ -21,12 +21,15 @@ Milestone 1 (proof of concept) in progress. Implemented:
 - Telemetry ingestion: a consumer group on the events stream that deduplicates by
   event id, acknowledges what it handles and retries Redis failures without touching
   the workers. Its counters and live failure state are on `GET /api/v1/health`.
+- Historical metrics: every consumed `job.finished` event is aggregated into per-queue
+  minute buckets in SQLite at `storage.path`, deduplicated by event id, so history
+  survives a restart. Reading it over HTTP is a later slice.
 - Read-only `GET /api/v1/health`.
 - `gohorizon/laravel` package: configuration, job lifecycle telemetry to a Redis Stream,
   `gohorizon:capabilities`, `gohorizon:inspect`.
 
-Not implemented yet: persisting consumed telemetry (historical metrics), the React
-dashboard, authentication, balancing, failed-job administration.
+Not implemented yet: the metrics API and React dashboard, authentication, balancing,
+failed-job administration, Prometheus exposition.
 
 ## Layout
 
@@ -37,6 +40,7 @@ internal/redis         key ownership and the typed Redis client
 internal/process       worker state machine, launch specs, process manager
 internal/adapter       gohorizon:capabilities probe and launch preflight
 internal/telemetry     events stream consumer, dedupe and counters
+internal/metrics       SQLite per-queue aggregates (historical metrics)
 internal/supervisor    lock + managers + health report
 internal/api           HTTP routes
 packages/laravel       Composer package (gohorizon/laravel)

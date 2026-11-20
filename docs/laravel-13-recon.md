@@ -152,9 +152,10 @@ database, not through the queue transport.
 
 ## Open items for the next slice
 
-- Persisting consumed telemetry: the Go consumer now reads the stream, deduplicates by
-  event id and acknowledges, but keeps counters only (metrics history is a later
-  slice).
+- Persisting consumed telemetry: the consumer aggregates every `job.finished` event
+  into per-queue minute buckets in SQLite (`storage.path`) and records event ids so a
+  replay is not counted twice (ADR 0007). Exposing that history over HTTP and the
+  retention windows are later slices.
 - Adapter-side `queue:work --json` ingestion as a fallback for applications that will
   not install the package.
 Wired so far: `retry_after` and `pcntl` are validated against `--timeout` through

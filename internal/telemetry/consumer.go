@@ -45,6 +45,17 @@ type Spec struct {
 	// consumer goroutine while the event is acknowledged, so it must not block or
 	// panic: a slow hook delays ingestion, never a job.
 	OnWorkerStopped func(worker, reason string)
+
+	// Sink persists job metrics. It must be idempotent by event id: a failed batch is
+	// retried, and a crash can replay an entry that was already handled. A sink error
+	// leaves the batch unacknowledged and is counted, so history loss is visible and
+	// retried instead of silent.
+	Sink JobSink
+}
+
+// JobSink receives one finished job. *metrics.Store implements it.
+type JobSink interface {
+	RecordJob(ctx context.Context, eventID, queue, outcome string, durationMS int64, at time.Time) error
 }
 
 // Stats is what the consumer has observed. Failing describes right now, not history.
@@ -192,12 +203,22 @@ func (c *Consumer) handle(ctx context.Context, messages []redis.StreamMessage) e
 			continue
 		}
 
-		if !c.seen.add(event.ID) {
+		if c.seen.has(event.ID) {
 			c.count(func(n *Stats) { n.Duplicates++ })
 			acked = append(acked, message.ID)
 			continue
 		}
 
+		if event.Type == TypeJobFinished && c.spec.Sink != nil {
+			if err := c.spec.Sink.RecordJob(ctx, event.ID, event.Job.Queue, event.Job.Outcome, event.Job.DurationMS, event.At); err != nil {
+				c.failed(err)
+				// Nothing in this batch is acknowledged: the drain path retries it, and
+				// the sink's idempotency keeps the retry from counting twice.
+				return err
+			}
+		}
+
+		c.seen.add(event.ID)
 		c.count(func(n *Stats) { n.Events++ })
 		if event.Type == TypeWorkerStopped && c.spec.OnWorkerStopped != nil {
 			c.spec.OnWorkerStopped(event.Worker, event.WorkerEvent.Reason)
@@ -291,7 +312,13 @@ func newSeenSet(capacity int) *seenSet {
 	return &seenSet{capacity: capacity, index: make(map[string]struct{}, capacity)}
 }
 
-// add reports whether the id is new.
+// has reports whether the id is still in the window.
+func (s *seenSet) has(id string) bool {
+	_, ok := s.index[id]
+	return ok
+}
+
+// add records the id and reports whether it was new.
 func (s *seenSet) add(id string) bool {
 	if _, ok := s.index[id]; ok {
 		return false

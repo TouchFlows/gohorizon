@@ -203,10 +203,10 @@ func waitUntil(t *testing.T, timeout time.Duration, condition func() bool, descr
 	t.Fatalf("timed out after %s waiting for %s", timeout, description)
 }
 
-// TestConsumerDeliversStopReasonToTheOwningManager runs the real service: a worker is
-// spawned, a worker.stopped entry is published to Redis, the consumer reads it, and
-// the exit is classified by that reason instead of by the exit status.
-func TestConsumerDeliversStopReasonToTheOwningManager(t *testing.T) {
+// TestServiceConsumesTelemetryEndToEnd runs the real service: a worker is spawned, a
+// worker.stopped entry classifies its exit by the reported reason, and a job.finished
+// entry is persisted into the metrics history the service opened.
+func TestServiceConsumesTelemetryEndToEnd(t *testing.T) {
 	const address = "127.0.0.1:6379"
 
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
@@ -302,6 +302,32 @@ func TestConsumerDeliversStopReasonToTheOwningManager(t *testing.T) {
 	}
 	if !strings.Contains(classified.LastExitReason, "max_jobs") {
 		t.Errorf("last exit reason = %q, want the reason Laravel reported", classified.LastExitReason)
+	}
+
+	// The same consumer persists job metrics through the store New opened, so the
+	// history exists without the dashboard (docs/adr/0007).
+	jobPayload := fmt.Sprintf(
+		`{"schema":1,"id":"%s","type":"job.finished","application":%q,"environment":"production",`+
+			`"worker":%q,"at":%q,"job":{"queue":"emails","outcome":"processed","duration_ms":1500}}`,
+		"e2e-job-"+strconv.FormatInt(time.Now().UnixNano(), 36),
+		cfg.Applications[0].ID, worker.Name, time.Now().UTC().Format(time.RFC3339Nano),
+	)
+	if _, err := raw.XAdd(ctx, &goredis.XAddArgs{Stream: stream, Values: map[string]any{"payload": jobPayload}}).Result(); err != nil {
+		t.Fatalf("publish job.finished: %v", err)
+	}
+
+	waitUntil(t, 10*time.Second, func() bool {
+		buckets, err := service.store.Buckets(context.Background(), "emails",
+			time.Now().Add(-time.Hour), time.Now().Add(time.Hour))
+		return err == nil && len(buckets) == 1 && buckets[0].Processed == 1
+	}, "the job metric to be persisted")
+
+	buckets, err := service.store.Buckets(ctx, "emails", time.Now().Add(-time.Hour), time.Now().Add(time.Hour))
+	if err != nil {
+		t.Fatalf("read metrics history: %v", err)
+	}
+	if buckets[0].DurationMS != 1500 {
+		t.Errorf("duration = %d, want the reported 1500ms", buckets[0].DurationMS)
 	}
 }
 

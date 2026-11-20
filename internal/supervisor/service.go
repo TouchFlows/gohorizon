@@ -14,6 +14,7 @@ import (
 	"github.com/gohorizon/gohorizon/internal/adapter"
 	"github.com/gohorizon/gohorizon/internal/config"
 	"github.com/gohorizon/gohorizon/internal/health"
+	"github.com/gohorizon/gohorizon/internal/metrics"
 	"github.com/gohorizon/gohorizon/internal/process"
 	"github.com/gohorizon/gohorizon/internal/redis"
 	"github.com/gohorizon/gohorizon/internal/telemetry"
@@ -35,6 +36,7 @@ type Service struct {
 	log      *slog.Logger
 	client   *redis.Client
 	consumer *telemetry.Consumer
+	store    *metrics.Store
 	managers []*process.Manager
 	started  time.Time
 	owner    string
@@ -120,25 +122,58 @@ func New(ctx context.Context, cfg *config.Config, log *slog.Logger) (*Service, e
 		s.managers = append(s.managers, manager)
 	}
 
+	// Metrics history is durable but never a reason to refuse supervision: if the
+	// database cannot be opened, history is disabled with a warning and the workers
+	// start anyway (docs/adr/0007).
+	var store *metrics.Store
+	if cfg.Storage.Driver == "sqlite" {
+		opened, openErr := metrics.Open(cfg.Storage.Path)
+		if openErr != nil {
+			log.Warn("metrics history disabled: the storage database could not be opened",
+				"path", cfg.Storage.Path, "error", openErr)
+		} else {
+			store = opened
+		}
+	} else {
+		log.Warn("metrics history disabled: storage.driver is not sqlite", "driver", cfg.Storage.Driver)
+	}
+
 	// The consumer feeds WorkerStopping reasons back to the managers, so an exit is
 	// classified by what Laravel reported instead of by the exit status alone
-	// (docs/adr/0002 item 5). It is built last because it needs the managers.
-	consumer, err := telemetry.New(client, telemetry.Spec{
+	// (docs/adr/0002 item 5), and persists job metrics. It is built last because it
+	// needs the managers.
+	spec := telemetry.Spec{
 		Application:     app.ID,
 		Environment:     app.Environment,
 		Logger:          log,
 		OnWorkerStopped: s.noteStopReason,
-	})
+	}
+	if store != nil {
+		spec.Sink = store
+	}
+	consumer, err := telemetry.New(client, spec)
 	if err != nil {
+		if store != nil {
+			_ = store.Close()
+		}
 		client.Close()
 		return nil, err
 	}
 	s.consumer = consumer
+	s.store = store
 
 	return s, nil
 }
 
-func (s *Service) Close() error { return s.client.Close() }
+func (s *Service) Close() error {
+	err := s.client.Close()
+	if s.store != nil {
+		if storeErr := s.store.Close(); storeErr != nil && err == nil {
+			err = storeErr
+		}
+	}
+	return err
+}
 
 // noteStopReason hands a reported WorkerStopping reason to the manager that owns the
 // worker. An unmatched reason belongs to a worker this instance no longer tracks.
