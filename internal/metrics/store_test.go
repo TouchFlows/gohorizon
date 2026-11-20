@@ -2,12 +2,10 @@ package metrics
 
 import (
 	"context"
-	"database/sql"
 	"encoding/json"
 	"os"
 	"path/filepath"
 	"slices"
-	"strings"
 	"testing"
 	"time"
 )
@@ -84,34 +82,6 @@ func TestOutcomeColumnsMatchTheSharedVocabulary(t *testing.T) {
 	}
 	if len(buckets) != 1 || totalJobs(buckets[0]) != int64(len(outcomes)) {
 		t.Fatalf("buckets = %+v, want every shared outcome counted in one minute", buckets)
-	}
-}
-
-func TestOpenRefusesADatabaseFromBeforeTheDiscardedCounter(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "metrics.db")
-	legacy, err := sql.Open("sqlite", "file:"+path)
-	if err != nil {
-		t.Fatalf("open legacy database: %v", err)
-	}
-	// The shape this package wrote before the discarded counter existed.
-	_, err = legacy.Exec(`CREATE TABLE queue_buckets (
-		queue TEXT NOT NULL, bucket_start INTEGER NOT NULL,
-		processed INTEGER NOT NULL DEFAULT 0, released INTEGER NOT NULL DEFAULT 0,
-		failed INTEGER NOT NULL DEFAULT 0, timed_out INTEGER NOT NULL DEFAULT 0,
-		duration_ms INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (queue, bucket_start))`)
-	if err != nil {
-		t.Fatalf("create legacy table: %v", err)
-	}
-	if err := legacy.Close(); err != nil {
-		t.Fatalf("close legacy database: %v", err)
-	}
-
-	_, err = Open(path, DefaultRetention())
-	if err == nil {
-		t.Fatal("Open accepted a database whose counters predate the shared vocabulary")
-	}
-	if !strings.Contains(err.Error(), `"discarded"`) || !strings.Contains(err.Error(), "delete the database file") {
-		t.Errorf("error = %q, want the missing counter and the way out", err)
 	}
 }
 

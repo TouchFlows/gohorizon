@@ -178,50 +178,7 @@ func Open(path string, retention Retention) (*Store, error) {
 		_ = db.Close()
 		return nil, fmt.Errorf("migrate metrics database %s: %w", path, err)
 	}
-	// CREATE TABLE IF NOT EXISTS leaves an older table's shape alone, so a database
-	// written before a counter existed would fail every insert and read. Refusing it
-	// disables history with the service's usual warning instead of stalling ingestion on
-	// batches that can never be acknowledged (docs/adr/0007).
-	if err := requireBucketColumns(db); err != nil {
-		_ = db.Close()
-		return nil, fmt.Errorf("metrics database %s: %w", path, err)
-	}
 	return &Store{db: db, retention: retention.withDefaults()}, nil
-}
-
-// bucketColumns are the columns every aggregate table must have. The tables are fixed
-// literals; nothing from a request reaches this check.
-var bucketColumns = []string{
-	"queue", "bucket_start", "processed", "released", "failed", "timed_out", "discarded", "duration_ms",
-}
-
-func requireBucketColumns(db *sql.DB) error {
-	for _, table := range []string{"queue_buckets", "queue_hourly_buckets", "queue_daily_buckets"} {
-		rows, err := db.Query(`SELECT name FROM pragma_table_info(?)`, table)
-		if err != nil {
-			return fmt.Errorf("inspect table %s: %w", table, err)
-		}
-		present := make(map[string]bool)
-		for rows.Next() {
-			var name string
-			if err := rows.Scan(&name); err != nil {
-				_ = rows.Close()
-				return fmt.Errorf("inspect table %s: %w", table, err)
-			}
-			present[name] = true
-		}
-		err = rows.Err()
-		_ = rows.Close()
-		if err != nil {
-			return fmt.Errorf("inspect table %s: %w", table, err)
-		}
-		for _, column := range bucketColumns {
-			if !present[column] {
-				return fmt.Errorf("table %s predates the %q column; delete the database file to rebuild history", table, column)
-			}
-		}
-	}
-	return nil
 }
 
 func (s *Store) Close() error { return s.db.Close() }

@@ -67,9 +67,6 @@ Two constraints shape the storage:
   `telemetry.retention` window is far shorter than 72 hours in practice.
 - Schema changes before the first release are applied by recreating the database;
   golang-migrate (handoff §5) arrives with the first upgrade that must preserve data.
-  `Open` checks the bucket tables for their counters and refuses an older shape, so a
-  database that predates `discarded` disables history with a clear warning instead of
-  failing every write the consumer would then retry forever.
 - A single connection (`SetMaxOpenConns(1)`) serialises writes and the read API's
   queries; that is enough for one consumer and a bounded range per request, and is
   revisited if read latency starts delaying ingestion.

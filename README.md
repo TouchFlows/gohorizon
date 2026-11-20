@@ -22,8 +22,7 @@ Milestone 1 (proof of concept) in progress. Implemented:
   event id, acknowledges what it handles and retries Redis failures without touching
   the workers. Its counters and live failure state are on `GET /api/v1/health`.
 - Historical metrics: every consumed `job.finished` event is aggregated into per-queue
-  minute buckets in SQLite at `storage.path` under its terminal outcome (`processed`,
-  `released`, `failed`, `timed_out`, `discarded`), deduplicated by event id, so history
+  minute buckets in SQLite at `storage.path`, deduplicated by event id, so history
   survives a restart. Each pass (startup and hourly) folds closed minutes into hourly
   buckets and closed hours into daily ones before pruning event ids, minutes, hours and
   days past their windows. The windows follow handoff §9 and are configurable under
