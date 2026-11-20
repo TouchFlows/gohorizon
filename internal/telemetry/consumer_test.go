@@ -82,14 +82,12 @@ func (f *fakeStream) ensureCalls() int {
 func testConsumer(t *testing.T, streams Stream) *Consumer {
 	t.Helper()
 	consumer, err := New(streams, Spec{
-		Application:  "production",
-		Environment:  "production",
-		Batch:        10,
-		Block:        time.Millisecond,
-		SeenCapacity: 100,
-		MinBackoff:   time.Millisecond,
-		MaxBackoff:   5 * time.Millisecond,
-		Logger:       slog.New(slog.NewTextHandler(io.Discard, nil)),
+		Application: "production",
+		Environment: "production",
+		Block:       time.Millisecond,
+		MinBackoff:  time.Millisecond,
+		MaxBackoff:  5 * time.Millisecond,
+		Logger:      slog.New(slog.NewTextHandler(io.Discard, nil)),
 	})
 	if err != nil {
 		t.Fatalf("New: %v", err)
@@ -243,6 +241,9 @@ func TestRunKeepsConsumingAfterRedisErrors(t *testing.T) {
 	if got := stream.ackedIDs(); len(got) != 1 || got[0] != "1-0" {
 		t.Errorf("acked = %v, want the event acknowledged", got)
 	}
+	if stats := consumer.Stats(); stats.Failing {
+		t.Error("ingestion still reports a live failure after a successful read")
+	}
 
 	cancel()
 	select {
@@ -278,6 +279,27 @@ func TestRunRetriesGroupCreationInsteadOfGivingUp(t *testing.T) {
 	}
 	if stats := consumer.Stats(); stats.Errors < 2 {
 		t.Errorf("errors = %d, want every failed attempt counted", stats.Errors)
+	}
+}
+
+func TestFailureIsLiveAndRecoveryClearsIt(t *testing.T) {
+	consumer := testConsumer(t, &fakeStream{})
+
+	consumer.failed(errors.New("redis is down"))
+
+	stats := consumer.Stats()
+	if !stats.Failing || stats.LastError != "redis is down" || stats.Errors != 1 {
+		t.Fatalf("stats = %+v, want a live failure", stats)
+	}
+
+	consumer.healthy()
+
+	stats = consumer.Stats()
+	if stats.Failing || stats.LastError != "" {
+		t.Errorf("stats = %+v, want the failure cleared after a successful read", stats)
+	}
+	if stats.Errors != 1 {
+		t.Errorf("errors = %d, want the history kept", stats.Errors)
 	}
 }
 

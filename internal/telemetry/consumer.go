@@ -34,24 +34,22 @@ type Stream interface {
 
 // Spec configures a Consumer. Zero values take the defaults above.
 type Spec struct {
-	Application  string
-	Environment  string
-	Group        string
-	Consumer     string
-	Batch        int64
-	Block        time.Duration
-	SeenCapacity int
-	MinBackoff   time.Duration
-	MaxBackoff   time.Duration
-	Logger       *slog.Logger
+	Application string
+	Environment string
+	Block       time.Duration
+	MinBackoff  time.Duration
+	MaxBackoff  time.Duration
+	Logger      *slog.Logger
 }
 
-// Counts is what the consumer has observed. Metrics history will read from here.
-type Counts struct {
-	Events     int `json:"events"`
-	Duplicates int `json:"duplicates"`
-	Invalid    int `json:"invalid"`
-	Errors     int `json:"errors"`
+// Stats is what the consumer has observed. Failing describes right now, not history.
+type Stats struct {
+	Events     int
+	Duplicates int
+	Invalid    int
+	Errors     int
+	Failing    bool
+	LastError  string
 }
 
 // Consumer reads the events stream in a consumer group, deduplicates by event id and
@@ -62,8 +60,8 @@ type Consumer struct {
 	log     *slog.Logger
 	seen    *seenSet
 
-	mu     sync.Mutex
-	counts Counts
+	mu    sync.Mutex
+	stats Stats
 }
 
 func New(streams Stream, spec Spec) (*Consumer, error) {
@@ -73,20 +71,8 @@ func New(streams Stream, spec Spec) (*Consumer, error) {
 	if spec.Application == "" || spec.Environment == "" {
 		return nil, errors.New("telemetry consumer requires the application and environment it consumes for")
 	}
-	if spec.Group == "" {
-		spec.Group = DefaultGroup
-	}
-	if spec.Consumer == "" {
-		spec.Consumer = DefaultConsumer
-	}
-	if spec.Batch <= 0 {
-		spec.Batch = DefaultBatch
-	}
 	if spec.Block == 0 {
 		spec.Block = DefaultBlock
-	}
-	if spec.SeenCapacity <= 0 {
-		spec.SeenCapacity = DefaultSeen
 	}
 	if spec.MinBackoff <= 0 {
 		spec.MinBackoff = DefaultMinBackoff
@@ -102,7 +88,7 @@ func New(streams Stream, spec Spec) (*Consumer, error) {
 		streams: streams,
 		spec:    spec,
 		log:     spec.Logger.With("component", "telemetry"),
-		seen:    newSeenSet(spec.SeenCapacity),
+		seen:    newSeenSet(DefaultSeen),
 	}, nil
 }
 
@@ -110,11 +96,11 @@ func New(streams Stream, spec Spec) (*Consumer, error) {
 // with backoff; they never reach the workers and never end supervision (handoff
 // §2.11, docs/adr/0006).
 func (c *Consumer) Run(ctx context.Context) {
-	c.log.Info("telemetry consumer started", "group", c.spec.Group, "consumer", c.spec.Consumer)
+	c.log.Info("telemetry consumer started", "group", DefaultGroup, "consumer", DefaultConsumer)
 
 	backoff := c.spec.MinBackoff
 	for ctx.Err() == nil {
-		if err := c.streams.EnsureEventsGroup(ctx, c.spec.Group); err != nil {
+		if err := c.streams.EnsureEventsGroup(ctx, DefaultGroup); err != nil {
 			c.failed(err)
 			if !wait(ctx, backoff) {
 				return
@@ -134,7 +120,7 @@ func (c *Consumer) Run(ctx context.Context) {
 // stop and true when the group should be re-established (Redis may have been flushed).
 func (c *Consumer) consume(ctx context.Context, backoff *time.Duration) bool {
 	for ctx.Err() == nil {
-		messages, err := c.streams.ReadEventsGroup(ctx, c.spec.Group, c.spec.Consumer, ">", c.spec.Batch, c.spec.Block)
+		messages, err := c.streams.ReadEventsGroup(ctx, DefaultGroup, DefaultConsumer, ">", DefaultBatch, c.spec.Block)
 		if err != nil {
 			c.failed(err)
 			if !wait(ctx, *backoff) {
@@ -144,6 +130,7 @@ func (c *Consumer) consume(ctx context.Context, backoff *time.Duration) bool {
 			return true
 		}
 
+		c.healthy()
 		*backoff = c.spec.MinBackoff
 		if err := c.handle(ctx, messages); err != nil {
 			// Unacknowledged entries are replayed by drain on the next pass.
@@ -161,7 +148,7 @@ func (c *Consumer) consume(ctx context.Context, backoff *time.Duration) bool {
 // counted twice.
 func (c *Consumer) drain(ctx context.Context) {
 	for ctx.Err() == nil {
-		messages, err := c.streams.ReadEventsGroup(ctx, c.spec.Group, c.spec.Consumer, "0", c.spec.Batch, -1)
+		messages, err := c.streams.ReadEventsGroup(ctx, DefaultGroup, DefaultConsumer, "0", DefaultBatch, -1)
 		if err != nil {
 			c.failed(err)
 			return
@@ -169,7 +156,7 @@ func (c *Consumer) drain(ctx context.Context) {
 		if err := c.handle(ctx, messages); err != nil {
 			return
 		}
-		if int64(len(messages)) < c.spec.Batch {
+		if int64(len(messages)) < DefaultBatch {
 			return
 		}
 	}
@@ -201,19 +188,19 @@ func (c *Consumer) handle(ctx context.Context, messages []redis.StreamMessage) e
 		}
 
 		if !c.seen.add(event.ID) {
-			c.count(func(n *Counts) { n.Duplicates++ })
+			c.count(func(n *Stats) { n.Duplicates++ })
 			acked = append(acked, message.ID)
 			continue
 		}
 
-		c.count(func(n *Counts) { n.Events++ })
+		c.count(func(n *Stats) { n.Events++ })
 		acked = append(acked, message.ID)
 	}
 
 	if len(acked) == 0 {
 		return nil
 	}
-	if err := c.streams.AckEvents(ctx, c.spec.Group, acked...); err != nil {
+	if err := c.streams.AckEvents(ctx, DefaultGroup, acked...); err != nil {
 		c.failed(err)
 		return err
 	}
@@ -221,28 +208,43 @@ func (c *Consumer) handle(ctx context.Context, messages []redis.StreamMessage) e
 }
 
 // Stats returns a point-in-time copy of the counters.
-func (c *Consumer) Stats() Counts {
+func (c *Consumer) Stats() Stats {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	return c.counts
+	return c.stats
 }
 
-func (c *Consumer) count(apply func(*Counts)) {
+func (c *Consumer) count(apply func(*Stats)) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	apply(&c.counts)
+	apply(&c.stats)
 }
 
 // discard counts and logs an event that will not be retried; a malformed entry that
 // stays unacknowledged would be redelivered forever.
 func (c *Consumer) discard(entryID, reason string) {
-	c.count(func(n *Counts) { n.Invalid++ })
+	c.count(func(n *Stats) { n.Invalid++ })
 	c.log.Warn("discarded telemetry event", "entry", entryID, "reason", reason)
 }
 
+// failed marks ingestion as currently failing, which /api/v1/health reports. The
+// workers never see it.
 func (c *Consumer) failed(err error) {
-	c.count(func(n *Counts) { n.Errors++ })
+	c.count(func(n *Stats) {
+		n.Errors++
+		n.Failing = true
+		n.LastError = err.Error()
+	})
 	c.log.Warn("telemetry consumer degraded; workers are unaffected", "error", err)
+}
+
+// healthy clears the live failure once a read succeeds, so a recovered Redis stops
+// reporting telemetry as degraded without losing the error count.
+func (c *Consumer) healthy() {
+	c.count(func(n *Stats) {
+		n.Failing = false
+		n.LastError = ""
+	})
 }
 
 func wait(ctx context.Context, d time.Duration) bool {
