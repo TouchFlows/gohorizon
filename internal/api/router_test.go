@@ -60,13 +60,13 @@ func TestHealthExposesTelemetryCounters(t *testing.T) {
 }
 
 func TestHealthExposesQueueDepth(t *testing.T) {
-	pending, reserved, delayed, size := 5, 1, 2, 8
+	pending, reserved, delayed := 5, 1, 2
 	recorder := getHealth(t, health.Report{
 		Status: "ok",
 		Queues: health.Queues{
 			Connection: "redis",
 			Depths: []health.QueueDepth{
-				{Queue: "default", Pending: &pending, Reserved: &reserved, Delayed: &delayed, Size: &size},
+				{Queue: "default", Pending: &pending, Reserved: &reserved, Delayed: &delayed},
 				{Queue: "sync-only"},
 			},
 		},
@@ -85,7 +85,6 @@ func TestHealthExposesQueueDepth(t *testing.T) {
 				Pending  *int   `json:"pending"`
 				Reserved *int   `json:"reserved"`
 				Delayed  *int   `json:"delayed"`
-				Size     *int   `json:"size"`
 			} `json:"depths"`
 		} `json:"queues"`
 	}
@@ -100,7 +99,7 @@ func TestHealthExposesQueueDepth(t *testing.T) {
 	}
 	depth := payload.Queues.Depths[0]
 	if depth.Pending == nil || *depth.Pending != 5 || depth.Reserved == nil || *depth.Reserved != 1 ||
-		depth.Delayed == nil || *depth.Delayed != 2 || depth.Size == nil || *depth.Size != 8 {
+		depth.Delayed == nil || *depth.Delayed != 2 {
 		t.Errorf("depth = %+v, want the reported counts", depth)
 	}
 	// A driver without counts reports nothing, and the body must say null rather than

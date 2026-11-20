@@ -237,9 +237,6 @@ func (s *Service) pruneOnce(ctx context.Context) {
 // failing command leaves an error in the report body and never affects the workers
 // (docs/adr/0001).
 func (s *Service) queueLoop(ctx context.Context) {
-	if s.inspector == nil || len(s.queues) == 0 {
-		return
-	}
 	s.sampleQueues(ctx)
 	ticker := time.NewTicker(s.queueInterval)
 	defer ticker.Stop()
@@ -273,7 +270,6 @@ func (s *Service) sampleQueues(ctx context.Context) {
 			Pending:  queue.Pending,
 			Reserved: queue.Reserved,
 			Delayed:  queue.Delayed,
-			Size:     queue.Size,
 		})
 	}
 	s.mu.Lock()

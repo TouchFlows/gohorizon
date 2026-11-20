@@ -9,8 +9,8 @@ import (
 
 const inspectionJSON = `{"schema":1,"application":"production","environment":"production",` +
 	`"connection":"redis","queues":[` +
-	`{"queue":"default","driver":"RedisQueue","pending":12,"delayed":3,"reserved":1,"size":16,"oldest_pending_at":1763600000},` +
-	`{"queue":"emails","driver":"RedisQueue","pending":0,"delayed":0,"reserved":0,"size":0}],` +
+	`{"queue":"default","driver":"RedisQueue","pending":12,"delayed":3,"reserved":1,"oldest_pending_at":1763600000},` +
+	`{"queue":"emails","driver":"RedisQueue","pending":0,"delayed":0,"reserved":0}],` +
 	`"generated_at":"2026-11-20T10:11:12Z"}`
 
 func TestProbeDecodesInspection(t *testing.T) {
@@ -37,8 +37,7 @@ func TestProbeDecodesInspection(t *testing.T) {
 			if defaultQueue.Queue != "default" ||
 				defaultQueue.Pending == nil || *defaultQueue.Pending != 12 ||
 				defaultQueue.Reserved == nil || *defaultQueue.Reserved != 1 ||
-				defaultQueue.Delayed == nil || *defaultQueue.Delayed != 3 ||
-				defaultQueue.Size == nil || *defaultQueue.Size != 16 {
+				defaultQueue.Delayed == nil || *defaultQueue.Delayed != 3 {
 				t.Errorf("default = %+v, want the reported counts", defaultQueue)
 			}
 		})
@@ -46,7 +45,7 @@ func TestProbeDecodesInspection(t *testing.T) {
 }
 
 func TestProbeKeepsUnreportedCountsDistinctFromZero(t *testing.T) {
-	// A driver without the contract's size methods omits the keys entirely.
+	// A driver that cannot answer the counts omits the keys entirely.
 	t.Setenv("GOHORIZON_TEST_CAPABILITIES",
 		`{"schema":1,"connection":"sync","queues":[{"queue":"default","driver":"SyncQueue"}]}`)
 
@@ -55,7 +54,7 @@ func TestProbeKeepsUnreportedCountsDistinctFromZero(t *testing.T) {
 		t.Fatalf("Queues: %v", err)
 	}
 	depth := inspection.Queues[0]
-	if depth.Pending != nil || depth.Reserved != nil || depth.Delayed != nil || depth.Size != nil {
+	if depth.Pending != nil || depth.Reserved != nil || depth.Delayed != nil {
 		t.Errorf("depth = %+v, want nil counts for a driver that cannot report them", depth)
 	}
 }

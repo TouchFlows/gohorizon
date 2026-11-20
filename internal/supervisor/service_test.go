@@ -193,13 +193,16 @@ func TestReportSurfacesFailingTelemetryIngestion(t *testing.T) {
 	}
 }
 
-// stubInspector answers the queue-depth probe without an application.
+// stubInspector answers the queue-depth probe without an application and counts how
+// often it was asked.
 type stubInspector struct {
 	inspection adapter.Inspection
 	err        error
+	calls      atomic.Int32
 }
 
 func (s *stubInspector) Queues(context.Context, string, []string) (adapter.Inspection, error) {
+	s.calls.Add(1)
 	if s.err != nil {
 		return adapter.Inspection{}, s.err
 	}
@@ -224,11 +227,11 @@ func queueTestService(t *testing.T, inspector queueInspector) *Service {
 }
 
 func TestHealthReportsQueueDepthFromTheAdapter(t *testing.T) {
-	pending, reserved, delayed, size := 12, 1, 3, 16
+	pending, reserved, delayed := 12, 1, 3
 	service := queueTestService(t, &stubInspector{inspection: adapter.Inspection{
 		Connection: "redis",
 		Queues: []adapter.QueueDepth{
-			{Queue: "default", Pending: &pending, Reserved: &reserved, Delayed: &delayed, Size: &size},
+			{Queue: "default", Pending: &pending, Reserved: &reserved, Delayed: &delayed},
 		},
 	}})
 
@@ -247,8 +250,7 @@ func TestHealthReportsQueueDepthFromTheAdapter(t *testing.T) {
 	depth := report.Queues.Depths[0]
 	if depth.Queue != "default" || depth.Pending == nil || *depth.Pending != 12 ||
 		depth.Reserved == nil || *depth.Reserved != 1 ||
-		depth.Delayed == nil || *depth.Delayed != 3 ||
-		depth.Size == nil || *depth.Size != 16 {
+		depth.Delayed == nil || *depth.Delayed != 3 {
 		t.Errorf("depth = %+v, want the counts the adapter reported", depth)
 	}
 }
@@ -289,16 +291,11 @@ func TestQueueInspectionFailureLeavesTheStatusAlone(t *testing.T) {
 	}
 }
 
-// countingInspector samples successfully and counts how often it was asked.
-type countingInspector struct{ calls atomic.Int32 }
-
-func (c *countingInspector) Queues(context.Context, string, []string) (adapter.Inspection, error) {
-	c.calls.Add(1)
-	return adapter.Inspection{Connection: "redis", Queues: []adapter.QueueDepth{{Queue: "default"}}}, nil
-}
-
 func TestQueueLoopSamplesOnItsInterval(t *testing.T) {
-	inspector := &countingInspector{}
+	inspector := &stubInspector{inspection: adapter.Inspection{
+		Connection: "redis",
+		Queues:     []adapter.QueueDepth{{Queue: "default"}},
+	}}
 	service := queueTestService(t, inspector)
 	service.queueInterval = 10 * time.Millisecond
 

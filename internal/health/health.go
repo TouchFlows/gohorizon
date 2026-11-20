@@ -49,7 +49,6 @@ type QueueDepth struct {
 	Pending  *int   `json:"pending"`
 	Reserved *int   `json:"reserved"`
 	Delayed  *int   `json:"delayed"`
-	Size     *int   `json:"size"`
 }
 
 type Supervisor struct {
