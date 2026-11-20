@@ -165,6 +165,12 @@ func TestReportSurfacesFailingTelemetryIngestion(t *testing.T) {
 	if report.Status != "ok" {
 		t.Errorf("status = %q, want ok while only ingestion is failing", report.Status)
 	}
+
+	// Lock loss is the one condition that still degrades the report.
+	service.lockHeld = false
+	if status := service.Report().Status; status != "degraded" {
+		t.Errorf("status = %q, want degraded once the lock is lost", status)
+	}
 }
 
 func TestNewDegradesWhenCapabilitiesAreUnavailable(t *testing.T) {

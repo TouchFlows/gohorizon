@@ -15,24 +15,24 @@ type stubProvider struct{ report health.Report }
 
 func (s stubProvider) Report() health.Report { return s.report }
 
-func discardLogger() *slog.Logger {
-	return slog.New(slog.NewTextHandler(io.Discard, nil))
+func getHealth(t *testing.T, report health.Report) *httptest.ResponseRecorder {
+	t.Helper()
+	recorder := httptest.NewRecorder()
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	NewRouter(stubProvider{report: report}, log).ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/api/v1/health", nil))
+	return recorder
 }
 
 func TestHealthExposesTelemetryCounters(t *testing.T) {
-	provider := stubProvider{report: health.Report{
-		Status:  "ok",
-		Version: "test",
+	recorder := getHealth(t, health.Report{
+		Status: "ok",
 		Telemetry: health.Telemetry{
 			Events:     42,
 			Duplicates: 3,
 			Invalid:    1,
 			Errors:     2,
 		},
-	}}
-
-	recorder := httptest.NewRecorder()
-	NewRouter(provider, discardLogger()).ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/api/v1/health", nil))
+	})
 
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200", recorder.Code)
@@ -60,17 +60,14 @@ func TestHealthExposesTelemetryCounters(t *testing.T) {
 }
 
 func TestFailingIngestionIsVisibleWithoutFailingTheEndpoint(t *testing.T) {
-	provider := stubProvider{report: health.Report{
+	recorder := getHealth(t, health.Report{
 		Status: "ok",
 		Telemetry: health.Telemetry{
 			Errors:    7,
 			Failing:   true,
 			LastError: "read group \"gohorizon\": redis is down",
 		},
-	}}
-
-	recorder := httptest.NewRecorder()
-	NewRouter(provider, discardLogger()).ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/api/v1/health", nil))
+	})
 
 	// A failed check here would get a supervisor with healthy workers restarted.
 	if recorder.Code != http.StatusOK {
@@ -78,7 +75,6 @@ func TestFailingIngestionIsVisibleWithoutFailingTheEndpoint(t *testing.T) {
 	}
 
 	var payload struct {
-		Status    string `json:"status"`
 		Telemetry struct {
 			Errors    int    `json:"errors"`
 			Failing   bool   `json:"failing"`
@@ -94,13 +90,10 @@ func TestFailingIngestionIsVisibleWithoutFailingTheEndpoint(t *testing.T) {
 }
 
 func TestHealthStillReportsLockDegradation(t *testing.T) {
-	provider := stubProvider{report: health.Report{
+	recorder := getHealth(t, health.Report{
 		Status: "degraded",
 		Lock:   health.Lock{Degraded: true, LastError: "lock renewal failed"},
-	}}
-
-	recorder := httptest.NewRecorder()
-	NewRouter(provider, discardLogger()).ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/api/v1/health", nil))
+	})
 
 	if recorder.Code != http.StatusServiceUnavailable {
 		t.Fatalf("status = %d, want 503 for a degraded report", recorder.Code)
