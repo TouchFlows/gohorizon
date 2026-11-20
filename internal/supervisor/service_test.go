@@ -3,17 +3,21 @@ package supervisor
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/gohorizon/gohorizon/internal/config"
+	"github.com/gohorizon/gohorizon/internal/process"
 	"github.com/gohorizon/gohorizon/internal/redis"
 	"github.com/gohorizon/gohorizon/internal/telemetry"
+	goredis "github.com/redis/go-redis/v9"
 )
 
 // TestCapabilitiesHelperProcess stands in for the application's `php artisan`. When it
@@ -170,6 +174,152 @@ func TestReportSurfacesFailingTelemetryIngestion(t *testing.T) {
 	service.lockHeld = false
 	if status := service.Report().Status; status != "degraded" {
 		t.Errorf("status = %q, want degraded once the lock is lost", status)
+	}
+}
+
+// TestServiceHelperProcess is both the application's `php artisan` (answering the
+// capabilities probe) and its queue worker, decided by the argv it receives.
+func TestServiceHelperProcess(t *testing.T) {
+	capabilities, ok := os.LookupEnv("GOHORIZON_TEST_CAPABILITIES")
+	if !ok {
+		t.Skip("helper process only; launched by the supervisor tests")
+	}
+
+	for _, arg := range os.Args[1:] {
+		if arg != "queue:work" {
+			continue
+		}
+		// A worker: stay up until the test triggers the exit, so the stop reason can be
+		// published while this worker still owns the slot.
+		trigger := os.Getenv("GOHORIZON_TEST_WORKER_EXIT")
+		deadline := time.Now().Add(30 * time.Second)
+		for time.Now().Before(deadline) {
+			if _, err := os.Stat(trigger); err == nil {
+				os.Exit(1) // the status Laravel uses for both a timeout and an error
+			}
+			time.Sleep(5 * time.Millisecond)
+		}
+		os.Exit(2)
+	}
+
+	os.Stdout.WriteString(capabilities)
+	os.Exit(0)
+}
+
+func waitUntil(t *testing.T, timeout time.Duration, condition func() bool, description string) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if condition() {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatalf("timed out after %s waiting for %s", timeout, description)
+}
+
+// TestConsumerDeliversStopReasonToTheOwningManager runs the real service: a worker is
+// spawned, a worker.stopped entry is published to Redis, the consumer reads it, and
+// the exit is classified by that reason instead of by the exit status.
+func TestConsumerDeliversStopReasonToTheOwningManager(t *testing.T) {
+	address := os.Getenv("GOHORIZON_TEST_REDIS_ADDR")
+	if address == "" {
+		address = "127.0.0.1:6379"
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	raw := goredis.NewClient(&goredis.Options{Addr: address})
+	defer raw.Close()
+	if err := raw.Ping(ctx).Err(); err != nil {
+		t.Skipf("redis at %s is unavailable: %v", address, err)
+	}
+
+	exit := filepath.Join(t.TempDir(), "exit")
+	t.Setenv("GOHORIZON_TEST_WORKER_EXIT", exit)
+	t.Setenv("GOHORIZON_TEST_CAPABILITIES", capabilitiesPayload("90"))
+
+	cfg := preflightConfig(t, 60)
+	// A namespace of its own keeps the stream, consumer group and lock isolated.
+	cfg.Applications[0].ID = "e2e" + strconv.FormatInt(time.Now().UnixNano(), 36)
+	cfg.Applications[0].Artisan = "-test.run=TestServiceHelperProcess"
+	cfg.Redis.Address = address
+	// The replacement must stay away long enough for the classification to be readable.
+	cfg.Applications[0].Supervisors[0].RestartBackoff = 30
+
+	service, err := New(ctx, cfg, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	t.Cleanup(func() {
+		_ = service.Close()
+		cleanupCtx, cleanup := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cleanup()
+		_ = raw.Del(cleanupCtx, service.client.Keys().Events(), service.client.Keys().SupervisorLock()).Err()
+	})
+
+	runCtx, stop := context.WithCancel(ctx)
+	runDone := make(chan error, 1)
+	go func() { runDone <- service.Run(runCtx) }()
+	t.Cleanup(func() {
+		stop()
+		select {
+		case <-runDone:
+		case <-time.After(15 * time.Second):
+			t.Error("the service did not stop within 15s")
+		}
+	})
+
+	manager := service.managers[0]
+	waitUntil(t, 10*time.Second, func() bool {
+		return manager.Snapshot().Running == 1
+	}, "the worker to start")
+	worker := manager.Snapshot().Workers[0]
+
+	stream := service.client.Keys().Events()
+	payload := fmt.Sprintf(`{"schema":1,"id":%q,"type":"worker.stopped",`, "e2e-"+strconv.FormatInt(time.Now().UnixNano(), 36)) +
+		fmt.Sprintf(`"application":%q,"environment":"production","worker":%q,"at":%q,`,
+			cfg.Applications[0].ID, worker.Name, time.Now().UTC().Format(time.RFC3339Nano)) +
+		`"worker_event":{"exit_code":1,"reason":"max_jobs"}}`
+	entryID, err := raw.XAdd(ctx, &goredis.XAddArgs{Stream: stream, Values: map[string]any{"payload": payload}}).Result()
+	if err != nil {
+		t.Fatalf("publish worker.stopped: %v", err)
+	}
+
+	// The consumer acknowledges only after it handled the entry, so an acked entry means
+	// the reason reached the manager before this worker exits.
+	waitUntil(t, 10*time.Second, func() bool {
+		groups, err := raw.XInfoGroups(ctx, stream).Result()
+		if err != nil {
+			return false
+		}
+		for _, group := range groups {
+			if group.Name == telemetry.DefaultGroup && group.LastDeliveredID == entryID && group.Pending == 0 {
+				return true
+			}
+		}
+		return false
+	}, "the consumer to acknowledge the stop reason")
+
+	if err := os.WriteFile(exit, []byte("exit"), 0o600); err != nil {
+		t.Fatalf("trigger the worker exit: %v", err)
+	}
+
+	waitUntil(t, 10*time.Second, func() bool {
+		workers := manager.Snapshot().Workers
+		return len(workers) == 1 && workers[0].State == process.StateStopped
+	}, "the manager to classify the exit")
+
+	classified := manager.Snapshot().Workers[0]
+	if classified.LastExitCode != 1 {
+		t.Fatalf("last exit code = %d, want 1: without the reason this status means a crash", classified.LastExitCode)
+	}
+	if classified.RestartCount != 0 {
+		t.Errorf("restart count = %d, want 0: max_jobs is a recycle, not a crash", classified.RestartCount)
+	}
+	if !strings.Contains(classified.LastExitReason, "max_jobs") {
+		t.Errorf("last exit reason = %q, want the reason Laravel reported", classified.LastExitReason)
 	}
 }
 
