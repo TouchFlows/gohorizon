@@ -14,7 +14,6 @@ import (
 	"time"
 
 	"github.com/gohorizon/gohorizon/internal/config"
-	"github.com/gohorizon/gohorizon/internal/metrics"
 	"github.com/gohorizon/gohorizon/internal/process"
 	"github.com/gohorizon/gohorizon/internal/redis"
 	"github.com/gohorizon/gohorizon/internal/telemetry"
@@ -204,18 +203,32 @@ func waitUntil(t *testing.T, timeout time.Duration, condition func() bool, descr
 	t.Fatalf("timed out after %s waiting for %s", timeout, description)
 }
 
-// TestServiceConsumesTelemetryEndToEnd runs the real service: a worker is spawned, a
-// worker.stopped entry classifies its exit by the reported reason, and a job.finished
-// entry is persisted into the metrics history the service opened.
-func TestServiceConsumesTelemetryEndToEnd(t *testing.T) {
+// runningService is the real service under test: one worker is up, the consumer runs and
+// the metrics store is open.
+type runningService struct {
+	ctx         context.Context
+	service     *Service
+	raw         *goredis.Client
+	stream      string
+	application string
+	exit        string
+	manager     *process.Manager
+	worker      process.Record
+}
+
+// startService starts the service against Redis with its worker held up until the exit
+// file is written. prepare runs before Run, so a test can seed state the service has to
+// deal with on startup. It skips when Redis is unreachable.
+func startService(t *testing.T, prepare func(*Service)) *runningService {
+	t.Helper()
 	const address = "127.0.0.1:6379"
 
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-	defer cancel()
+	t.Cleanup(cancel)
 
 	raw := goredis.NewClient(&goredis.Options{Addr: address})
-	defer raw.Close()
 	if err := raw.Ping(ctx).Err(); err != nil {
+		_ = raw.Close()
 		t.Skipf("redis at %s is unavailable: %v", address, err)
 	}
 
@@ -224,161 +237,24 @@ func TestServiceConsumesTelemetryEndToEnd(t *testing.T) {
 	t.Setenv("GOHORIZON_TEST_CAPABILITIES", capabilitiesPayload("90"))
 
 	cfg := preflightConfig(t, 60)
+	cfg.Redis.Address = address
 	// A namespace of its own keeps the stream, consumer group and lock isolated.
 	cfg.Applications[0].ID = "e2e" + strconv.FormatInt(time.Now().UnixNano(), 36)
-	cfg.Redis.Address = address
-	// The replacement must stay away long enough for the classification to be readable.
+	// The replacement must stay away long enough for a classification to be readable.
 	cfg.Applications[0].Supervisors[0].RestartBackoff = 30
 
 	service, err := New(ctx, cfg, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	if err != nil {
-		t.Fatalf("New: %v", err)
-	}
-
-	stream := service.client.Keys().Events()
-
-	runCtx, stop := context.WithCancel(ctx)
-	runDone := make(chan error, 1)
-	go func() { runDone <- service.Run(runCtx) }()
-	t.Cleanup(func() {
-		stop()
-		select {
-		case <-runDone:
-		case <-time.After(15 * time.Second):
-			t.Error("the service did not stop within 15s")
-		}
-		_ = service.Close()
-		cleanupCtx, cleanup := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cleanup()
-		_ = raw.Del(cleanupCtx, stream, service.client.Keys().SupervisorLock()).Err()
-	})
-
-	manager := service.managers[0]
-	waitUntil(t, 10*time.Second, func() bool {
-		return manager.Snapshot().Running == 1
-	}, "the worker to start")
-	worker := manager.Snapshot().Workers[0]
-
-	payload := fmt.Sprintf(
-		`{"schema":1,"id":"%s","type":"worker.stopped","application":%q,"environment":"production",`+
-			`"worker":%q,"at":%q,"worker_event":{"exit_code":1,"reason":"max_jobs"}}`,
-		"e2e-"+strconv.FormatInt(time.Now().UnixNano(), 36),
-		cfg.Applications[0].ID, worker.Name, time.Now().UTC().Format(time.RFC3339Nano),
-	)
-	entryID, err := raw.XAdd(ctx, &goredis.XAddArgs{Stream: stream, Values: map[string]any{"payload": payload}}).Result()
-	if err != nil {
-		t.Fatalf("publish worker.stopped: %v", err)
-	}
-
-	// The consumer acknowledges only after it handled the entry, so an acked entry means
-	// the reason reached the manager before this worker exits.
-	waitUntil(t, 10*time.Second, func() bool {
-		groups, err := raw.XInfoGroups(ctx, stream).Result()
-		if err != nil {
-			return false
-		}
-		for _, group := range groups {
-			if group.Name == telemetry.DefaultGroup && group.LastDeliveredID == entryID && group.Pending == 0 {
-				return true
-			}
-		}
-		return false
-	}, "the consumer to acknowledge the stop reason")
-
-	if err := os.WriteFile(exit, []byte("exit"), 0o600); err != nil {
-		t.Fatalf("trigger the worker exit: %v", err)
-	}
-
-	waitUntil(t, 10*time.Second, func() bool {
-		workers := manager.Snapshot().Workers
-		return len(workers) == 1 && workers[0].State == process.StateStopped
-	}, "the manager to classify the exit")
-
-	classified := manager.Snapshot().Workers[0]
-	if classified.LastExitCode != 1 {
-		t.Fatalf("last exit code = %d, want 1: without the reason this status means a crash", classified.LastExitCode)
-	}
-	if classified.RestartCount != 0 {
-		t.Errorf("restart count = %d, want 0: max_jobs is a recycle, not a crash", classified.RestartCount)
-	}
-	if !strings.Contains(classified.LastExitReason, "max_jobs") {
-		t.Errorf("last exit reason = %q, want the reason Laravel reported", classified.LastExitReason)
-	}
-
-	// The same consumer persists job metrics through the store New opened, so the
-	// history exists without the dashboard (docs/adr/0007).
-	jobPayload := fmt.Sprintf(
-		`{"schema":1,"id":"%s","type":"job.finished","application":%q,"environment":"production",`+
-			`"worker":%q,"at":%q,"job":{"queue":"emails","outcome":"processed","duration_ms":1500}}`,
-		"e2e-job-"+strconv.FormatInt(time.Now().UnixNano(), 36),
-		cfg.Applications[0].ID, worker.Name, time.Now().UTC().Format(time.RFC3339Nano),
-	)
-	if _, err := raw.XAdd(ctx, &goredis.XAddArgs{Stream: stream, Values: map[string]any{"payload": jobPayload}}).Result(); err != nil {
-		t.Fatalf("publish job.finished: %v", err)
-	}
-
-	waitUntil(t, 10*time.Second, func() bool {
-		buckets, err := service.store.Buckets(context.Background(), "emails",
-			time.Now().Add(-time.Hour), time.Now().Add(time.Hour))
-		return err == nil && len(buckets) == 1 && buckets[0].Processed == 1
-	}, "the job metric to be persisted")
-
-	buckets, err := service.store.Buckets(ctx, "emails", time.Now().Add(-time.Hour), time.Now().Add(time.Hour))
-	if err != nil {
-		t.Fatalf("read metrics history: %v", err)
-	}
-	if buckets[0].DurationMS != 1500 {
-		t.Errorf("duration = %d, want the reported 1500ms", buckets[0].DurationMS)
-	}
-}
-
-// TestServicePrunesMetricsOnStartupAndWhileRunning seeds the database a previous run
-// would have left behind, then proves the running service removes what is past the
-// retention windows on startup and again on its schedule.
-func TestServicePrunesMetricsOnStartupAndWhileRunning(t *testing.T) {
-	const address = "127.0.0.1:6379"
-
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-	defer cancel()
-
-	raw := goredis.NewClient(&goredis.Options{Addr: address})
-	defer raw.Close()
-	if err := raw.Ping(ctx).Err(); err != nil {
-		t.Skipf("redis at %s is unavailable: %v", address, err)
-	}
-
-	// The worker only has to stay up; this test is about the database.
-	t.Setenv("GOHORIZON_TEST_WORKER_EXIT", filepath.Join(t.TempDir(), "never"))
-	t.Setenv("GOHORIZON_TEST_CAPABILITIES", capabilitiesPayload("90"))
-
-	cfg := preflightConfig(t, 60)
-	cfg.Redis.Address = address
-	cfg.Applications[0].ID = "prune" + strconv.FormatInt(time.Now().UnixNano(), 36)
-	old := time.Now().Add(-8 * 24 * time.Hour)
-
-	seed, err := metrics.Open(cfg.Storage.Path)
-	if err != nil {
-		t.Fatalf("metrics.Open: %v", err)
-	}
-	if err := seed.RecordJob(ctx, "old-event", "emails", "processed", 10, old); err != nil {
-		t.Fatalf("seed old metric: %v", err)
-	}
-	if err := seed.RecordJob(ctx, "fresh-event", "emails", "processed", 10, time.Now().Add(-time.Hour)); err != nil {
-		t.Fatalf("seed fresh metric: %v", err)
-	}
-	if err := seed.Close(); err != nil {
-		t.Fatalf("close seed store: %v", err)
-	}
-
-	service, err := New(ctx, cfg, slog.New(slog.NewTextHandler(io.Discard, nil)))
-	if err != nil {
+		_ = raw.Close()
 		t.Fatalf("New: %v", err)
 	}
 	if service.store == nil {
-		t.Fatal("metrics history was not opened, so pruning cannot run")
+		_ = raw.Close()
+		t.Fatal("metrics history was not opened")
 	}
-	service.pruneInterval = 50 * time.Millisecond
-	stream := service.client.Keys().Events()
+	if prepare != nil {
+		prepare(service)
+	}
 
 	runCtx, stop := context.WithCancel(ctx)
 	runDone := make(chan error, 1)
@@ -395,16 +271,131 @@ func TestServicePrunesMetricsOnStartupAndWhileRunning(t *testing.T) {
 		}
 		cleanupCtx, cleanup := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cleanup()
-		_ = raw.Del(cleanupCtx, stream, service.client.Keys().SupervisorLock()).Err()
+		_ = raw.Del(cleanupCtx, service.client.Keys().Events(), service.client.Keys().SupervisorLock()).Err()
+		_ = raw.Close()
+	})
+
+	manager := service.managers[0]
+	waitUntil(t, 10*time.Second, func() bool {
+		return manager.Snapshot().Running == 1
+	}, "the worker to start")
+
+	return &runningService{
+		ctx:         ctx,
+		service:     service,
+		raw:         raw,
+		stream:      service.client.Keys().Events(),
+		application: cfg.Applications[0].ID,
+		exit:        exit,
+		manager:     manager,
+		worker:      manager.Snapshot().Workers[0],
+	}
+}
+
+// TestServiceConsumesTelemetryEndToEnd runs the real service: a worker is spawned, a
+// worker.stopped entry classifies its exit by the reported reason, and a job.finished
+// entry is persisted into the metrics history the service opened.
+func TestServiceConsumesTelemetryEndToEnd(t *testing.T) {
+	running := startService(t, nil)
+
+	payload := fmt.Sprintf(
+		`{"schema":1,"id":"%s","type":"worker.stopped","application":%q,"environment":"production",`+
+			`"worker":%q,"at":%q,"worker_event":{"exit_code":1,"reason":"max_jobs"}}`,
+		"e2e-"+strconv.FormatInt(time.Now().UnixNano(), 36),
+		running.application, running.worker.Name, time.Now().UTC().Format(time.RFC3339Nano),
+	)
+	entryID, err := running.raw.XAdd(running.ctx, &goredis.XAddArgs{Stream: running.stream, Values: map[string]any{"payload": payload}}).Result()
+	if err != nil {
+		t.Fatalf("publish worker.stopped: %v", err)
+	}
+
+	// The consumer acknowledges only after it handled the entry, so an acked entry means
+	// the reason reached the manager before this worker exits.
+	waitUntil(t, 10*time.Second, func() bool {
+		groups, err := running.raw.XInfoGroups(context.Background(), running.stream).Result()
+		if err != nil {
+			return false
+		}
+		for _, group := range groups {
+			if group.Name == telemetry.DefaultGroup && group.LastDeliveredID == entryID && group.Pending == 0 {
+				return true
+			}
+		}
+		return false
+	}, "the consumer to acknowledge the stop reason")
+
+	if err := os.WriteFile(running.exit, []byte("exit"), 0o600); err != nil {
+		t.Fatalf("trigger the worker exit: %v", err)
+	}
+
+	waitUntil(t, 10*time.Second, func() bool {
+		workers := running.manager.Snapshot().Workers
+		return len(workers) == 1 && workers[0].State == process.StateStopped
+	}, "the manager to classify the exit")
+
+	classified := running.manager.Snapshot().Workers[0]
+	if classified.LastExitCode != 1 {
+		t.Fatalf("last exit code = %d, want 1: without the reason this status means a crash", classified.LastExitCode)
+	}
+	if classified.RestartCount != 0 {
+		t.Errorf("restart count = %d, want 0: max_jobs is a recycle, not a crash", classified.RestartCount)
+	}
+	if !strings.Contains(classified.LastExitReason, "max_jobs") {
+		t.Errorf("last exit reason = %q, want the reason Laravel reported", classified.LastExitReason)
+	}
+
+	// The same consumer persists job metrics through the store New opened, so the
+	// history exists without the dashboard (docs/adr/0007).
+	jobPayload := fmt.Sprintf(
+		`{"schema":1,"id":"%s","type":"job.finished","application":%q,"environment":"production",`+
+			`"worker":%q,"at":%q,"job":{"queue":"emails","outcome":"processed","duration_ms":1500}}`,
+		"e2e-job-"+strconv.FormatInt(time.Now().UnixNano(), 36),
+		running.application, running.worker.Name, time.Now().UTC().Format(time.RFC3339Nano),
+	)
+	if _, err := running.raw.XAdd(running.ctx, &goredis.XAddArgs{Stream: running.stream, Values: map[string]any{"payload": jobPayload}}).Result(); err != nil {
+		t.Fatalf("publish job.finished: %v", err)
+	}
+
+	waitUntil(t, 10*time.Second, func() bool {
+		buckets, err := running.service.store.Buckets(context.Background(), "emails",
+			time.Now().Add(-time.Hour), time.Now().Add(time.Hour))
+		return err == nil && len(buckets) == 1 && buckets[0].Processed == 1
+	}, "the job metric to be persisted")
+
+	buckets, err := running.service.store.Buckets(running.ctx, "emails",
+		time.Now().Add(-time.Hour), time.Now().Add(time.Hour))
+	if err != nil {
+		t.Fatalf("read metrics history: %v", err)
+	}
+	if buckets[0].DurationMS != 1500 {
+		t.Errorf("duration = %d, want the reported 1500ms", buckets[0].DurationMS)
+	}
+}
+
+// TestServicePrunesMetricsOnStartupAndWhileRunning seeds the database a previous run
+// would have left behind, then proves the running service removes what is past the
+// retention windows on startup and again on its schedule.
+func TestServicePrunesMetricsOnStartupAndWhileRunning(t *testing.T) {
+	old := time.Now().Add(-8 * 24 * time.Hour)
+	running := startService(t, func(service *Service) {
+		service.pruneInterval = 50 * time.Millisecond
+		// History a previous run left behind: one bucket past the 7-day window, one
+		// inside it.
+		if err := service.store.RecordJob(context.Background(), "old-event", "emails", "processed", 10, old); err != nil {
+			t.Fatalf("seed old metric: %v", err)
+		}
+		if err := service.store.RecordJob(context.Background(), "fresh-event", "emails", "processed", 10, time.Now().Add(-time.Hour)); err != nil {
+			t.Fatalf("seed fresh metric: %v", err)
+		}
 	})
 
 	from := old.Add(-time.Hour)
 	waitUntil(t, 10*time.Second, func() bool {
-		buckets, err := service.store.Buckets(context.Background(), "emails", from, time.Now())
+		buckets, err := running.service.store.Buckets(context.Background(), "emails", from, time.Now())
 		return err == nil && len(buckets) == 1
 	}, "the startup prune to remove the 8-day-old bucket")
 
-	buckets, err := service.store.Buckets(ctx, "emails", from, time.Now())
+	buckets, err := running.service.store.Buckets(running.ctx, "emails", from, time.Now())
 	if err != nil {
 		t.Fatalf("read metrics history: %v", err)
 	}
@@ -414,26 +405,23 @@ func TestServicePrunesMetricsOnStartupAndWhileRunning(t *testing.T) {
 	if buckets[0].Start.Equal(old.Truncate(time.Minute)) {
 		t.Error("the 8-day-old bucket survived the startup prune")
 	}
-	if buckets[0].Processed != 1 || buckets[0].DurationMS != 10 {
-		t.Errorf("bucket = %+v, want the in-window job kept", buckets[0])
-	}
 
 	// The startup pass is done, so a bucket written now can only disappear through the
 	// scheduled pass.
 	loopOld := time.Now().Add(-9 * 24 * time.Hour)
-	if err := service.store.RecordJob(ctx, "loop-old", "emails", "processed", 10, loopOld); err != nil {
+	if err := running.service.store.RecordJob(running.ctx, "loop-old", "emails", "processed", 10, loopOld); err != nil {
 		t.Fatalf("seed metric for the scheduled pass: %v", err)
 	}
 	waitUntil(t, 5*time.Second, func() bool {
-		buckets, err := service.store.Buckets(context.Background(), "emails", loopOld.Add(-time.Hour), loopOld.Add(time.Hour))
+		buckets, err := running.service.store.Buckets(context.Background(), "emails", loopOld.Add(-time.Hour), loopOld.Add(time.Hour))
 		return err == nil && len(buckets) == 0
 	}, "the scheduled prune to remove a bucket written after startup")
 
-	buckets, err = service.store.Buckets(ctx, "emails", from, time.Now())
+	buckets, err = running.service.store.Buckets(running.ctx, "emails", from, time.Now())
 	if err != nil {
 		t.Fatalf("read metrics history: %v", err)
 	}
-	if len(buckets) != 1 || buckets[0].Processed != 1 {
+	if len(buckets) != 1 || buckets[0].Processed != 1 || buckets[0].DurationMS != 10 {
 		t.Errorf("buckets = %+v, want the in-window job untouched by the schedule", buckets)
 	}
 }

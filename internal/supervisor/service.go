@@ -190,12 +190,8 @@ func (s *Service) pruneLoop(ctx context.Context) {
 	if s.store == nil {
 		return
 	}
-	interval := s.pruneInterval
-	if interval <= 0 {
-		interval = defaultPruneInterval
-	}
 	s.pruneOnce(ctx)
-	ticker := time.NewTicker(interval)
+	ticker := time.NewTicker(s.pruneInterval)
 	defer ticker.Stop()
 	for {
 		select {
