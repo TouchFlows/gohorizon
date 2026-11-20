@@ -20,21 +20,35 @@ import (
 	goredis "github.com/redis/go-redis/v9"
 )
 
-// TestCapabilitiesHelperProcess stands in for the application's `php artisan`. When it
-// is asked for queue:work it records the spawn attempt, so a test can prove the
-// preflight refused before any worker existed.
+// TestCapabilitiesHelperProcess stands in for the application's `php artisan`. It
+// answers the capabilities probe, and when it is asked for queue:work it records the
+// spawn attempt (so a test can prove the preflight refused before any worker existed)
+// or, when a worker exit trigger is configured, acts as the end-to-end test's worker.
 func TestCapabilitiesHelperProcess(t *testing.T) {
 	payload, ok := os.LookupEnv("GOHORIZON_TEST_CAPABILITIES")
 	if !ok {
-		t.Skip("helper process only; launched by the supervisor preflight tests")
+		t.Skip("helper process only; launched by the supervisor tests")
 	}
 	for _, arg := range os.Args[1:] {
-		if arg == "queue:work" {
-			if path := os.Getenv("GOHORIZON_TEST_SPAWN_FILE"); path != "" {
-				_ = os.WriteFile(path, []byte(strings.Join(os.Args, " ")), 0o600)
-			}
-			os.Exit(0)
+		if arg != "queue:work" {
+			continue
 		}
+		if path := os.Getenv("GOHORIZON_TEST_SPAWN_FILE"); path != "" {
+			_ = os.WriteFile(path, []byte(strings.Join(os.Args, " ")), 0o600)
+		}
+		// The worker stays up until the test triggers its exit, so the stop reason can
+		// arrive while this worker still owns the slot.
+		if trigger := os.Getenv("GOHORIZON_TEST_WORKER_EXIT"); trigger != "" {
+			deadline := time.Now().Add(30 * time.Second)
+			for time.Now().Before(deadline) {
+				if _, err := os.Stat(trigger); err == nil {
+					os.Exit(1) // the status Laravel uses for both a timeout and an error
+				}
+				time.Sleep(5 * time.Millisecond)
+			}
+			os.Exit(2)
+		}
+		os.Exit(0)
 	}
 	os.Stdout.WriteString(payload)
 	os.Exit(0)
@@ -177,35 +191,6 @@ func TestReportSurfacesFailingTelemetryIngestion(t *testing.T) {
 	}
 }
 
-// TestServiceHelperProcess is both the application's `php artisan` (answering the
-// capabilities probe) and its queue worker, decided by the argv it receives.
-func TestServiceHelperProcess(t *testing.T) {
-	capabilities, ok := os.LookupEnv("GOHORIZON_TEST_CAPABILITIES")
-	if !ok {
-		t.Skip("helper process only; launched by the supervisor tests")
-	}
-
-	for _, arg := range os.Args[1:] {
-		if arg != "queue:work" {
-			continue
-		}
-		// A worker: stay up until the test triggers the exit, so the stop reason can be
-		// published while this worker still owns the slot.
-		trigger := os.Getenv("GOHORIZON_TEST_WORKER_EXIT")
-		deadline := time.Now().Add(30 * time.Second)
-		for time.Now().Before(deadline) {
-			if _, err := os.Stat(trigger); err == nil {
-				os.Exit(1) // the status Laravel uses for both a timeout and an error
-			}
-			time.Sleep(5 * time.Millisecond)
-		}
-		os.Exit(2)
-	}
-
-	os.Stdout.WriteString(capabilities)
-	os.Exit(0)
-}
-
 func waitUntil(t *testing.T, timeout time.Duration, condition func() bool, description string) {
 	t.Helper()
 	deadline := time.Now().Add(timeout)
@@ -222,10 +207,8 @@ func waitUntil(t *testing.T, timeout time.Duration, condition func() bool, descr
 // spawned, a worker.stopped entry is published to Redis, the consumer reads it, and
 // the exit is classified by that reason instead of by the exit status.
 func TestConsumerDeliversStopReasonToTheOwningManager(t *testing.T) {
-	address := os.Getenv("GOHORIZON_TEST_REDIS_ADDR")
-	if address == "" {
-		address = "127.0.0.1:6379"
-	}
+	const address = "127.0.0.1:6379"
+
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
@@ -242,7 +225,6 @@ func TestConsumerDeliversStopReasonToTheOwningManager(t *testing.T) {
 	cfg := preflightConfig(t, 60)
 	// A namespace of its own keeps the stream, consumer group and lock isolated.
 	cfg.Applications[0].ID = "e2e" + strconv.FormatInt(time.Now().UnixNano(), 36)
-	cfg.Applications[0].Artisan = "-test.run=TestServiceHelperProcess"
 	cfg.Redis.Address = address
 	// The replacement must stay away long enough for the classification to be readable.
 	cfg.Applications[0].Supervisors[0].RestartBackoff = 30
@@ -252,12 +234,7 @@ func TestConsumerDeliversStopReasonToTheOwningManager(t *testing.T) {
 		t.Fatalf("New: %v", err)
 	}
 
-	t.Cleanup(func() {
-		_ = service.Close()
-		cleanupCtx, cleanup := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cleanup()
-		_ = raw.Del(cleanupCtx, service.client.Keys().Events(), service.client.Keys().SupervisorLock()).Err()
-	})
+	stream := service.client.Keys().Events()
 
 	runCtx, stop := context.WithCancel(ctx)
 	runDone := make(chan error, 1)
@@ -269,6 +246,10 @@ func TestConsumerDeliversStopReasonToTheOwningManager(t *testing.T) {
 		case <-time.After(15 * time.Second):
 			t.Error("the service did not stop within 15s")
 		}
+		_ = service.Close()
+		cleanupCtx, cleanup := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cleanup()
+		_ = raw.Del(cleanupCtx, stream, service.client.Keys().SupervisorLock()).Err()
 	})
 
 	manager := service.managers[0]
@@ -277,11 +258,12 @@ func TestConsumerDeliversStopReasonToTheOwningManager(t *testing.T) {
 	}, "the worker to start")
 	worker := manager.Snapshot().Workers[0]
 
-	stream := service.client.Keys().Events()
-	payload := fmt.Sprintf(`{"schema":1,"id":%q,"type":"worker.stopped",`, "e2e-"+strconv.FormatInt(time.Now().UnixNano(), 36)) +
-		fmt.Sprintf(`"application":%q,"environment":"production","worker":%q,"at":%q,`,
-			cfg.Applications[0].ID, worker.Name, time.Now().UTC().Format(time.RFC3339Nano)) +
-		`"worker_event":{"exit_code":1,"reason":"max_jobs"}}`
+	payload := fmt.Sprintf(
+		`{"schema":1,"id":"%s","type":"worker.stopped","application":%q,"environment":"production",`+
+			`"worker":%q,"at":%q,"worker_event":{"exit_code":1,"reason":"max_jobs"}}`,
+		"e2e-"+strconv.FormatInt(time.Now().UnixNano(), 36),
+		cfg.Applications[0].ID, worker.Name, time.Now().UTC().Format(time.RFC3339Nano),
+	)
 	entryID, err := raw.XAdd(ctx, &goredis.XAddArgs{Stream: stream, Values: map[string]any{"payload": payload}}).Result()
 	if err != nil {
 		t.Fatalf("publish worker.stopped: %v", err)
