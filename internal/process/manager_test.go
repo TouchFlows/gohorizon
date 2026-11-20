@@ -266,6 +266,76 @@ func TestManagerRecyclesCleanExitsWithoutCountingCrashes(t *testing.T) {
 	}
 }
 
+func TestManagerClassifiesExitsByTheReportedStopReason(t *testing.T) {
+	manager, err := New(helperSpec(t, "run", 1, 2*time.Second, 20*time.Millisecond))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	name := WorkerName(manager.spec.ApplicationID, manager.spec.Environment, manager.spec.SupervisorID, "abcd1234")
+
+	tests := []struct {
+		name       string
+		reason     string
+		exitCode   int
+		wantState  State
+		wantReason string
+		wantRestar int
+	}{
+		// Exit 1 alone says "error"; the reason says it was a timeout, which is the
+		// distinction exit-code inference cannot make.
+		{"timeout", "timed_out", 1, StateCrashed, "timed out", 1},
+		// A reason that names a recycle overrides the crash the exit status implied.
+		{"max jobs", "max_jobs", 1, StateStopped, "max_jobs", 0},
+		{"memory", "memory", 12, StateStopped, "memory limit", 0},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			inst := &instance{rec: Record{
+				UUID: "abcd1234", Name: name, Queue: "default",
+				State: StateRunning, LastExitCode: tc.exitCode, LastExitReason: "exited",
+				StartedAt: manager.now(),
+			}}
+			manager.slots[0] = inst
+
+			if !manager.NoteStopReason(name, tc.reason) {
+				t.Fatalf("NoteStopReason(%q) found no live worker", tc.reason)
+			}
+			inst.exited = true
+			manager.afterExitLocked(inst, manager.now())
+
+			if inst.rec.State != tc.wantState {
+				t.Errorf("state = %s, want %s", inst.rec.State, tc.wantState)
+			}
+			if inst.rec.RestartCount != tc.wantRestar {
+				t.Errorf("restart count = %d, want %d", inst.rec.RestartCount, tc.wantRestar)
+			}
+			if !strings.Contains(inst.rec.LastExitReason, tc.wantReason) {
+				t.Errorf("last exit reason = %q, want it to mention %q", inst.rec.LastExitReason, tc.wantReason)
+			}
+		})
+	}
+}
+
+func TestManagerIgnoresStopReasonsItCannotAttribute(t *testing.T) {
+	manager, err := New(helperSpec(t, "run", 1, 2*time.Second, 20*time.Millisecond))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	if manager.NoteStopReason(WorkerName("production", "production", "default-supervisor", "0000ffff"), "timed_out") {
+		t.Error("NoteStopReason accepted a reason for a worker this manager does not run")
+	}
+
+	// A worker that already exited has been classified; a late reason must not rewrite
+	// a restart decision that was already taken.
+	name := WorkerName(manager.spec.ApplicationID, manager.spec.Environment, manager.spec.SupervisorID, "abcd1234")
+	manager.slots[0] = &instance{rec: Record{Name: name, State: StateCrashed}, exited: true}
+	if manager.NoteStopReason(name, "timed_out") {
+		t.Error("NoteStopReason accepted a reason for a worker that already exited")
+	}
+}
+
 func TestManagerAdoptsExistingWorkerWithoutDuplicating(t *testing.T) {
 	spec := helperSpec(t, "run", 1, 2*time.Second, 20*time.Millisecond)
 

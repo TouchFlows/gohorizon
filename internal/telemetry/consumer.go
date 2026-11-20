@@ -40,6 +40,11 @@ type Spec struct {
 	MinBackoff  time.Duration
 	MaxBackoff  time.Duration
 	Logger      *slog.Logger
+
+	// OnWorkerStopped receives the reason from a worker.stopped event. It runs on the
+	// consumer goroutine while the event is acknowledged, so it must not block or
+	// panic: a slow hook delays ingestion, never a job.
+	OnWorkerStopped func(worker, reason string)
 }
 
 // Stats is what the consumer has observed. Failing describes right now, not history.
@@ -194,6 +199,9 @@ func (c *Consumer) handle(ctx context.Context, messages []redis.StreamMessage) e
 		}
 
 		c.count(func(n *Stats) { n.Events++ })
+		if event.Type == TypeWorkerStopped && c.spec.OnWorkerStopped != nil {
+			c.spec.OnWorkerStopped(event.Worker, event.WorkerEvent.Reason)
+		}
 		acked = append(acked, message.ID)
 	}
 

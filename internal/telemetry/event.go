@@ -38,6 +38,7 @@ type Event struct {
 	Type        string    `json:"type"`
 	Application string    `json:"application"`
 	Environment string    `json:"environment"`
+	Worker      string    `json:"worker"`
 	At          time.Time `json:"at"`
 
 	Job         *jobPayload    `json:"job,omitempty"`
@@ -91,6 +92,11 @@ func (e Event) validate() error {
 	case TypeWorkerStopped:
 		if e.WorkerEvent == nil {
 			add("%s requires a worker_event object", TypeWorkerStopped)
+		} else if strings.TrimSpace(e.WorkerEvent.Reason) == "" {
+			add("%s requires worker_event.reason", TypeWorkerStopped)
+		}
+		if strings.TrimSpace(e.Worker) == "" {
+			add("%s requires the worker name", TypeWorkerStopped)
 		}
 	default:
 		add("type %q is not supported", e.Type)

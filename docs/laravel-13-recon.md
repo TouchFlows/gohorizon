@@ -157,10 +157,9 @@ database, not through the queue transport.
   slice).
 - Adapter-side `queue:work --json` ingestion as a fallback for applications that will
   not install the package.
-- `WorkerStopping` reason overriding exit-code inference: the reason is not consumed
-  until Go ingestion exists, so exit `1` is still reported as `error` (ADR 0002
-  item 5, pending).
-
-Wired in this slice: `retry_after` and `pcntl` are validated against `--timeout`
-through `gohorizon:capabilities --json` before the supervisor spawns anything, and an
-incompatible configuration refuses to start (ADR 0002 item 6).
+Wired so far: `retry_after` and `pcntl` are validated against `--timeout` through
+`gohorizon:capabilities --json` before the supervisor spawns anything, and an
+incompatible configuration refuses to start (ADR 0002 item 6). `worker.stopped`
+reasons travel through the telemetry consumer to the owning manager, so an exit is
+classified by what Laravel reported rather than by the exit status alone (ADR 0002
+item 5).

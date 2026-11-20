@@ -282,6 +282,41 @@ func TestRunRetriesGroupCreationInsteadOfGivingUp(t *testing.T) {
 	}
 }
 
+func TestWorkerStoppedDeliversItsReasonOnce(t *testing.T) {
+	var got []string
+	consumer, err := New(&fakeStream{}, Spec{
+		Application: "production",
+		Environment: "production",
+		Logger:      slog.New(slog.NewTextHandler(io.Discard, nil)),
+		OnWorkerStopped: func(worker, reason string) {
+			got = append(got, worker+" "+reason)
+		},
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	payload := `{"schema":1,"id":"w-1","type":"worker.stopped",` +
+		`"application":"production","environment":"production",` +
+		`"worker":"gohorizon:production:production:default-supervisor:1a2b3c4d",` +
+		`"at":"2026-11-20T10:11:12.345Z",` +
+		`"worker_event":{"exit_code":1,"reason":"timed_out"}}`
+	entries := []redis.StreamMessage{{ID: "1-0", Fields: map[string]string{"payload": payload}}}
+
+	if err := consumer.handle(context.Background(), entries); err != nil {
+		t.Fatalf("handle: %v", err)
+	}
+	// A duplicate must not move a worker's exit classification twice.
+	if err := consumer.handle(context.Background(), entries); err != nil {
+		t.Fatalf("handle duplicate: %v", err)
+	}
+
+	want := "gohorizon:production:production:default-supervisor:1a2b3c4d timed_out"
+	if len(got) != 1 || got[0] != want {
+		t.Errorf("hook calls = %v, want exactly [%q]", got, want)
+	}
+}
+
 func TestFailureIsLiveAndRecoveryClearsIt(t *testing.T) {
 	consumer := testConsumer(t, &fakeStream{})
 

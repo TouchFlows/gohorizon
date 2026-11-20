@@ -78,23 +78,12 @@ func New(ctx context.Context, cfg *config.Config, log *slog.Logger) (*Service, e
 		return nil, err
 	}
 
-	consumer, err := telemetry.New(client, telemetry.Spec{
-		Application: app.ID,
-		Environment: app.Environment,
-		Logger:      log,
-	})
-	if err != nil {
-		client.Close()
-		return nil, err
-	}
-
 	s := &Service{
-		cfg:      cfg,
-		log:      log,
-		client:   client,
-		consumer: consumer,
-		started:  time.Now(),
-		owner:    fmt.Sprintf("%s-%d", version.Version, time.Now().UnixNano()),
+		cfg:     cfg,
+		log:     log,
+		client:  client,
+		started: time.Now(),
+		owner:   fmt.Sprintf("%s-%d", version.Version, time.Now().UnixNano()),
 	}
 
 	for i := range app.Supervisors {
@@ -131,10 +120,36 @@ func New(ctx context.Context, cfg *config.Config, log *slog.Logger) (*Service, e
 		s.managers = append(s.managers, manager)
 	}
 
+	// The consumer feeds WorkerStopping reasons back to the managers, so an exit is
+	// classified by what Laravel reported instead of by the exit status alone
+	// (docs/adr/0002 item 5). It is built last because it needs the managers.
+	consumer, err := telemetry.New(client, telemetry.Spec{
+		Application:     app.ID,
+		Environment:     app.Environment,
+		Logger:          log,
+		OnWorkerStopped: s.noteStopReason,
+	})
+	if err != nil {
+		client.Close()
+		return nil, err
+	}
+	s.consumer = consumer
+
 	return s, nil
 }
 
 func (s *Service) Close() error { return s.client.Close() }
+
+// noteStopReason hands a reported WorkerStopping reason to the manager that owns the
+// worker. An unmatched reason belongs to a worker this instance no longer tracks.
+func (s *Service) noteStopReason(worker, reason string) {
+	for _, manager := range s.managers {
+		if manager.NoteStopReason(worker, reason) {
+			return
+		}
+	}
+	s.log.Debug("worker stop reason did not match a live worker", "worker", worker, "reason", reason)
+}
 
 // Run acquires the ownership lock, starts every supervisor and blocks until the
 // context is cancelled. Worker shutdown happens inside the managers, so cancelling

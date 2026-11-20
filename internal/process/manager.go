@@ -60,6 +60,9 @@ type instance struct {
 	nextStart     time.Time
 	stoppingSince time.Time
 	escalated     bool
+	// stopReason is the WorkerStopping reason Laravel reported for this worker, if it
+	// arrived before the exit was classified (docs/adr/0002 item 5).
+	stopReason string
 }
 
 // Manager owns the worker processes for one supervisor.
@@ -189,6 +192,31 @@ func (m *Manager) Snapshot() Stats {
 	return stats
 }
 
+// NoteStopReason records why Laravel's worker reported it was stopping. That reason
+// classifies the worker's exit instead of the exit status, which cannot separate a job
+// timeout from an error (docs/adr/0002 item 5). It returns false when no live worker
+// carries the name — a reason for a worker this instance no longer tracks, or one that
+// arrives after the exit was already classified.
+func (m *Manager) NoteStopReason(worker, reason string) bool {
+	if reason == "" {
+		return false
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	for _, inst := range append(append([]*instance{}, m.slots...), m.overflow...) {
+		if inst == nil || inst.rec.Name != worker {
+			continue
+		}
+		if inst.exited || inst.rec.State == StateStopped || inst.rec.State == StateCrashed {
+			return false
+		}
+		inst.stopReason = reason
+		return true
+	}
+	return false
+}
+
 // StopWorker gracefully stops one worker by UUID, leaving the rest untouched.
 func (m *Manager) StopWorker(uuid string) error {
 	m.mu.Lock()
@@ -288,11 +316,12 @@ func (m *Manager) afterExitLocked(inst *instance, now time.Time) {
 		rec.RestartCount = 0
 	}
 
-	// Laravel's own recycling paths: exit 0 (max-jobs, max-time, restart signal,
-	// queue empty) and exit 12 (memory limit) are not failures.
-	if code == 0 || code == 12 {
-		rec.LastExitReason = classifyRecycleExit(code, rawReason)
-		if err := rec.Transition(StateStopped, "recycled: "+rec.LastExitReason, now); err != nil {
+	// The reported WorkerStopping reason is more precise than the exit status, which
+	// cannot separate a timeout from an error (docs/adr/0002 item 5).
+	recycled, reason := classifyExit(code, rawReason, inst.stopReason)
+	if recycled {
+		rec.LastExitReason = reason
+		if err := rec.Transition(StateStopped, "recycled: "+reason, now); err != nil {
 			m.log.Error("state transition failed", "error", err)
 		}
 		inst.nextStart = now.Add(m.spec.RestartBackoff)
@@ -301,7 +330,7 @@ func (m *Manager) afterExitLocked(inst *instance, now time.Time) {
 	}
 
 	rec.RestartCount++
-	rec.LastExitReason = classifyCrashExit(code, rawReason)
+	rec.LastExitReason = reason
 	if err := rec.Transition(StateCrashed, rec.LastExitReason, now); err != nil {
 		m.log.Error("state transition failed", "error", err)
 	}
@@ -627,7 +656,26 @@ func (m *Manager) freeSlotForQueue(queue string) int {
 	return -1
 }
 
-func classifyRecycleExit(code int, raw string) string {
+// classifyExit decides whether an exited worker is simply replaced. A WorkerStopping
+// reason overrides the exit status: Laravel exits 0 for its own recycling paths and 12
+// for the memory limit, but exit 1 covers both a job timeout and an error.
+func classifyExit(code int, rawReason, stopReason string) (recycled bool, reason string) {
+	switch stopReason {
+	case "memory":
+		return true, "memory limit exceeded (WorkerStopping reason)"
+	case "max_jobs", "max_time", "empty", "empty_for", "restart_signal":
+		return true, fmt.Sprintf("worker stopped with reason %q", stopReason)
+	case "timed_out":
+		return false, "job timed out (WorkerStopping reason)"
+	}
+
+	if code == 0 || code == 12 {
+		return true, classifyRecycleExit(code)
+	}
+	return false, classifyCrashExit(code, rawReason)
+}
+
+func classifyRecycleExit(code int) string {
 	if code == 12 {
 		return "memory limit exceeded (recycled)"
 	}

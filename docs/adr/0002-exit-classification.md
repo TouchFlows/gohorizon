@@ -1,7 +1,7 @@
 # ADR 0002 — Worker exit classification and restart policy
 
 **Status:** accepted (Milestone 1)
-**Enforcement:** items 1–4 and 6 are implemented; item 5 is **pending**.
+**Enforcement:** items 1–6 are implemented.
 **Refines:** handoff §7.3 (process states) and §7.4 (graceful shutdown / escalation).
 
 ## Context
@@ -42,11 +42,16 @@ kill unless the adapter reports it.
    Laravel may need up to one job duration or one `--sleep` to honour SIGTERM, so the
    grace period must exceed `timeout + sleep`; configuration validation enforces
    `shutdown_grace > timeout + sleep`.
-5. **Pending enforcement (telemetry ingestion).** When the package reports a
-   `WorkerStopping` reason for a worker UUID, that reason overrides exit-code
-   inference. Nothing consumes that reason yet — the Go telemetry consumer is not
-   written — so today `exit 1` is reported as `error` and never silently as
-   `timed_out`. This is the remaining piece of the ADR.
+5. **Enforced (WorkerStopping reasons).** When the package reports a `worker.stopped`
+   event, its `worker_event.reason` overrides exit-code inference for that worker:
+   `max_jobs`, `max_time`, `empty`, `empty_for`, `restart_signal` and `memory` are
+   recycles that do not count against the crash budget, `timed_out` is a crash recorded
+   as a timeout rather than a generic error, and any other reason (or none) falls back
+   to the exit status. The event is flushed before the worker process exits, so the
+   reason normally reaches the manager first; a reason that arrives after the exit was
+   already classified is dropped instead of rewriting a restart decision that has
+   already been taken. The reason is matched by the worker `--name`, so it can only
+   apply to the worker that emitted it.
 6. **Enforced at supervisor startup.** `pcntl` is a hard prerequisite for a
    configured `--timeout`, and `--timeout` must stay below the queue connection's
    `retry_after`. `internal/adapter` runs `gohorizon:capabilities --json` before any
