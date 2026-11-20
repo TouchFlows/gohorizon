@@ -11,3 +11,6 @@
 # Local configuration and secrets
 .env
 *.local.yaml
+
+# PHPUnit test cache
+packages/laravel/.phpunit.result.cache

@@ -1,0 +1,79 @@
+<?php
+
+declare(strict_types=1);
+
+namespace GoHorizon\Laravel\Telemetry;
+
+use Illuminate\Contracts\Events\Dispatcher;
+use Illuminate\Queue\Events\JobExceptionOccurred;
+use Illuminate\Queue\Events\JobFailed;
+use Illuminate\Queue\Events\JobProcessed;
+use Illuminate\Queue\Events\JobProcessing;
+use Illuminate\Queue\Events\JobReleasedAfterException;
+use Illuminate\Queue\Events\JobTimedOut;
+use Illuminate\Queue\Events\WorkerStopping;
+use Throwable;
+
+/**
+ * Maps Laravel 13 queue events onto the GoHorizon telemetry schema.
+ *
+ * Several framework events collapse into one terminal record per attempt; see
+ * docs/adr/0006-telemetry-schema.md for why JobProcessed alone is not success.
+ */
+final class JobEventSubscriber
+{
+    public function __construct(private readonly TelemetryRecorder $recorder)
+    {
+    }
+
+    public function subscribe(Dispatcher $events): void
+    {
+        $events->listen(JobProcessing::class, fn (JobProcessing $event) => $this->guard(
+            fn () => $this->recorder->jobStarted($event)
+        ));
+
+        $events->listen(JobProcessed::class, fn (JobProcessed $event) => $this->guard(function () use ($event): void {
+            // JobProcessed fires for deleted/over-limit jobs too. Status comes from the
+            // job flags, not from the event class.
+            $outcome = match (true) {
+                $event->job->hasFailed() => 'failed',
+                $event->job->isReleased() => 'released',
+                $event->job->isDeleted() => 'discarded',
+                default => 'processed',
+            };
+
+            $this->recorder->jobFinished($event->job, $outcome);
+        }));
+
+        $events->listen(JobReleasedAfterException::class, fn (JobReleasedAfterException $event) => $this->guard(
+            fn () => $this->recorder->jobFinished($event->job, 'released', null, [
+                'backoff_seconds' => (int) $event->backoff,
+            ])
+        ));
+
+        $events->listen(JobExceptionOccurred::class, fn (JobExceptionOccurred $event) => $this->guard(
+            fn () => $this->recorder->jobFinished($event->job, 'exception', $event->exception)
+        ));
+
+        $events->listen(JobFailed::class, fn (JobFailed $event) => $this->guard(
+            fn () => $this->recorder->jobFinished($event->job, 'failed', $event->exception)
+        ));
+
+        $events->listen(JobTimedOut::class, fn (JobTimedOut $event) => $this->guard(
+            fn () => $this->recorder->jobFinished($event->job, 'timed_out')
+        ));
+
+        $events->listen(WorkerStopping::class, fn (WorkerStopping $event) => $this->guard(
+            fn () => $this->recorder->workerStopping($event)
+        ));
+    }
+
+    private function guard(callable $callback): void
+    {
+        try {
+            $callback();
+        } catch (Throwable) {
+            // A telemetry listener must never break job execution (handoff §2.11).
+        }
+    }
+}
