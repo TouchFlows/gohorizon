@@ -22,8 +22,8 @@ the ownership lock needs Redis, and worker execution does not.
    lock. The owner token is a random UUID per process.
 3. **Losing Redis after startup degrades, it does not stop.** Supervision is local; a
    Redis outage means no telemetry ingestion and a stale lock, not stopped workers.
-   Renewal failures are logged once per episode and reported through `/api/v1/health`
-   as `degraded` with `lock.renewal_error`. Workers keep running, restarts keep
+   Renewal failures are logged and reported through `/api/v1/health` as `degraded`
+   with `lock.degraded` and `lock.last_error`. Workers keep running, restarts keep
    happening, and no job is touched.
 4. **A lost lock is not a reason to kill workers.** If the key disappears or changes
    owner, the running instance keeps supervising (killing a healthy pool is worse) but
@@ -31,6 +31,15 @@ the ownership lock needs Redis, and worker execution does not.
    operator restarts the service, and the startup rule in (1) applies again.
 5. All lock timings are constants in one place; there is no configuration knob for
    them in v1 (a knob invites two instances with mismatched TTLs).
+6. **The health status follows the lock and nothing else.** `/api/v1/health` answers
+   `ok`/200 while the lock is held and `degraded`/503 once it is lost; no other
+   condition participates. Telemetry ingestion failures never change `status` or the
+   HTTP code: they are body-only, as the `telemetry.events`, `telemetry.duplicates`,
+   `telemetry.invalid` and `telemetry.errors` counters plus `telemetry.failing` and
+   `telemetry.last_error`. A 503 from a transient stream-read failure would make an
+   automated health check restart a supervisor whose workers are healthy — a larger
+   outage than the telemetry gap it reacted to. `failing` clears on the next
+   successful read, so recovery never needs a restart.
 
 ## Consequences
 
@@ -41,3 +50,6 @@ the ownership lock needs Redis, and worker execution does not.
   unavailable" (handoff §15) requires.
 - Failover between two GoHorizon instances is explicitly not implemented; the lock only
   refuses the second one.
+- `503` means lock loss only, so a process manager may restart on it. Telemetry health
+  (`telemetry.failing`, `last_error`, counters) belongs in dashboards and alerts, not in
+  restart decisions.
