@@ -44,8 +44,19 @@ type Server struct {
 }
 
 type Storage struct {
-	Driver string `yaml:"driver"`
-	Path   string `yaml:"path"`
+	Driver    string    `yaml:"driver"`
+	Path      string    `yaml:"path"`
+	Retention Retention `yaml:"retention"`
+}
+
+// Retention configures how long each level of metrics history lives (handoff §9). Raw
+// telemetry is measured in hours because the handoff's window is 24–72 hours; the
+// aggregates are measured in days.
+type Retention struct {
+	RawHours   int `yaml:"raw_hours"`
+	MinuteDays int `yaml:"minute_days"`
+	HourlyDays int `yaml:"hourly_days"`
+	DailyDays  int `yaml:"daily_days"`
 }
 
 type Redis struct {
@@ -108,6 +119,13 @@ const (
 	DefaultMemory         = Memory("128")
 	DefaultShutdownGrace  = 120
 	DefaultRestartBackoff = 5
+
+	// Metrics retention (handoff §9): the upper end of the raw window, then 7 days of
+	// minute buckets, 30 days of hours and 12 months of days.
+	DefaultRawRetentionHours   = 72
+	DefaultMinuteRetentionDays = 7
+	DefaultHourlyRetentionDays = 30
+	DefaultDailyRetentionDays  = 365
 )
 
 const SupportedVersion = 1
@@ -157,6 +175,20 @@ func Parse(src []byte) (*Config, error) {
 }
 
 func (c *Config) normalize() {
+	retention := &c.Storage.Retention
+	if retention.RawHours == 0 {
+		retention.RawHours = DefaultRawRetentionHours
+	}
+	if retention.MinuteDays == 0 {
+		retention.MinuteDays = DefaultMinuteRetentionDays
+	}
+	if retention.HourlyDays == 0 {
+		retention.HourlyDays = DefaultHourlyRetentionDays
+	}
+	if retention.DailyDays == 0 {
+		retention.DailyDays = DefaultDailyRetentionDays
+	}
+
 	for ai := range c.Applications {
 		app := &c.Applications[ai]
 		if app.Artisan == "" {

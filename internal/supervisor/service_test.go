@@ -292,8 +292,25 @@ func TestQueueInspectionFailureLeavesTheStatusAlone(t *testing.T) {
 	}
 }
 
+func TestMetricsRetentionMapsTheConfiguredWindows(t *testing.T) {
+	cfg := &config.Config{Storage: config.Storage{Retention: config.Retention{
+		RawHours: 48, MinuteDays: 3, HourlyDays: 10, DailyDays: 90,
+	}}}
+
+	got := metricsRetention(cfg)
+	want := metrics.Retention{
+		Raw:    48 * time.Hour,
+		Minute: 3 * 24 * time.Hour,
+		Hourly: 10 * 24 * time.Hour,
+		Daily:  90 * 24 * time.Hour,
+	}
+	if got != want {
+		t.Errorf("metricsRetention = %+v, want %+v", got, want)
+	}
+}
+
 func TestBucketsReadsPersistedHistory(t *testing.T) {
-	store, err := metrics.Open(filepath.Join(t.TempDir(), "metrics.db"))
+	store, err := metrics.Open(filepath.Join(t.TempDir(), "metrics.db"), metrics.DefaultRetention())
 	if err != nil {
 		t.Fatalf("open metrics store: %v", err)
 	}
@@ -510,12 +527,12 @@ func TestServiceConsumesTelemetryEndToEnd(t *testing.T) {
 	}
 
 	waitUntil(t, 10*time.Second, func() bool {
-		buckets, err := running.service.store.Buckets(context.Background(), "emails",
+		buckets, err := running.service.store.Buckets(context.Background(), metrics.ResolutionMinute, "emails",
 			time.Now().Add(-time.Hour), time.Now().Add(time.Hour))
 		return err == nil && len(buckets) == 1 && buckets[0].Processed == 1
 	}, "the job metric to be persisted")
 
-	buckets, err := running.service.store.Buckets(running.ctx, "emails",
+	buckets, err := running.service.store.Buckets(running.ctx, metrics.ResolutionMinute, "emails",
 		time.Now().Add(-time.Hour), time.Now().Add(time.Hour))
 	if err != nil {
 		t.Fatalf("read metrics history: %v", err)
@@ -543,11 +560,11 @@ func TestServicePrunesMetricsOnStartup(t *testing.T) {
 
 	from := old.Add(-time.Hour)
 	waitUntil(t, 10*time.Second, func() bool {
-		buckets, err := running.service.store.Buckets(context.Background(), "emails", from, time.Now())
+		buckets, err := running.service.store.Buckets(context.Background(), metrics.ResolutionMinute, "emails", from, time.Now())
 		return err == nil && len(buckets) == 1
 	}, "the startup prune to remove the 8-day-old bucket")
 
-	buckets, err := running.service.store.Buckets(running.ctx, "emails", from, time.Now())
+	buckets, err := running.service.store.Buckets(running.ctx, metrics.ResolutionMinute, "emails", from, time.Now())
 	if err != nil {
 		t.Fatalf("read metrics history: %v", err)
 	}
@@ -559,6 +576,15 @@ func TestServicePrunesMetricsOnStartup(t *testing.T) {
 	}
 	if buckets[0].Processed != 1 || buckets[0].DurationMS != 10 {
 		t.Errorf("bucket = %+v, want the in-window job kept", buckets[0])
+	}
+
+	// The rollup runs before the prune, so the expired minute survives as its hour.
+	hours, err := running.service.store.Buckets(running.ctx, metrics.ResolutionHourly, "emails", from, old.Add(time.Hour))
+	if err != nil {
+		t.Fatalf("read hourly history: %v", err)
+	}
+	if len(hours) != 1 || hours[0].Processed != 1 {
+		t.Errorf("hours = %+v, want the expired minute preserved by the startup rollup", hours)
 	}
 }
 
@@ -575,7 +601,7 @@ func TestServicePrunesMetricsOnSchedule(t *testing.T) {
 	}
 
 	waitUntil(t, 5*time.Second, func() bool {
-		buckets, err := running.service.store.Buckets(context.Background(), "emails", old.Add(-time.Hour), old.Add(time.Hour))
+		buckets, err := running.service.store.Buckets(context.Background(), metrics.ResolutionMinute, "emails", old.Add(-time.Hour), old.Add(time.Hour))
 		return err == nil && len(buckets) == 0
 	}, "the scheduled prune to remove a bucket written after startup")
 }

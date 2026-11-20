@@ -23,8 +23,11 @@ Milestone 1 (proof of concept) in progress. Implemented:
   the workers. Its counters and live failure state are on `GET /api/v1/health`.
 - Historical metrics: every consumed `job.finished` event is aggregated into per-queue
   minute buckets in SQLite at `storage.path`, deduplicated by event id, so history
-  survives a restart. Event ids are pruned after 72 hours and minute buckets after 7
-  days (handoff §9), at startup and hourly. `GET /api/v1/metrics` reads it back.
+  survives a restart. Each pass (startup and hourly) folds closed minutes into hourly
+  buckets and closed hours into daily ones before pruning event ids, minutes, hours and
+  days past their windows. The windows follow handoff §9 and are configurable under
+  `storage.retention` (defaults: raw 72 h, minutes 7 d, hours 30 d, days 365 d).
+  `GET /api/v1/metrics` reads the minute level back.
 - Queue depth: every 15 seconds the service runs `gohorizon:inspect` for the queues
   its supervisors launch and reports each queue's `pending`, `reserved` and `delayed`
   counts on `GET /api/v1/health`. Counts a driver cannot report are `null`, and a

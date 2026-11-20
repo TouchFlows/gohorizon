@@ -9,7 +9,7 @@ import (
 
 func openStore(t *testing.T, path string) *Store {
 	t.Helper()
-	store, err := Open(path)
+	store, err := Open(path, DefaultRetention())
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
@@ -52,7 +52,7 @@ func TestRecordAggregatesPerQueuePerMinuteAndOutcome(t *testing.T) {
 		}
 	}
 
-	emails, err := store.Buckets(ctx, "emails", at(0), at(3))
+	emails, err := store.Buckets(ctx, ResolutionMinute, "emails", at(0), at(3))
 	if err != nil {
 		t.Fatalf("Buckets: %v", err)
 	}
@@ -73,7 +73,7 @@ func TestRecordAggregatesPerQueuePerMinuteAndOutcome(t *testing.T) {
 		t.Errorf("second bucket = %+v, want the timed-out job alone", second)
 	}
 
-	reports, err := store.Buckets(ctx, "reports", at(0), at(3))
+	reports, err := store.Buckets(ctx, ResolutionMinute, "reports", at(0), at(3))
 	if err != nil {
 		t.Fatalf("Buckets(reports): %v", err)
 	}
@@ -94,7 +94,7 @@ func TestRecordIsIdempotentByEventID(t *testing.T) {
 		t.Fatalf("RecordJob replay: %v", err)
 	}
 
-	buckets, err := store.Buckets(ctx, "emails", at(0), at(3))
+	buckets, err := store.Buckets(ctx, ResolutionMinute, "emails", at(0), at(3))
 	if err != nil {
 		t.Fatalf("Buckets: %v", err)
 	}
@@ -107,7 +107,7 @@ func TestHistorySurvivesReopen(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "metrics.db")
 	ctx := context.Background()
 
-	first, err := Open(path)
+	first, err := Open(path, DefaultRetention())
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
@@ -120,7 +120,7 @@ func TestHistorySurvivesReopen(t *testing.T) {
 
 	// A restarted supervisor opens the same file; the history must still be there.
 	second := openStore(t, path)
-	buckets, err := second.Buckets(ctx, "emails", at(0), at(3))
+	buckets, err := second.Buckets(ctx, ResolutionMinute, "emails", at(0), at(3))
 	if err != nil {
 		t.Fatalf("Buckets after reopen: %v", err)
 	}
@@ -132,7 +132,7 @@ func TestHistorySurvivesReopen(t *testing.T) {
 	if err := second.RecordJob(ctx, "e1", "emails", "processed", 750, at(1)); err != nil {
 		t.Fatalf("RecordJob after reopen: %v", err)
 	}
-	buckets, err = second.Buckets(ctx, "emails", at(0), at(3))
+	buckets, err = second.Buckets(ctx, ResolutionMinute, "emails", at(0), at(3))
 	if err != nil {
 		t.Fatalf("Buckets: %v", err)
 	}
@@ -169,7 +169,7 @@ func TestPruneDropsHistoryPastTheHandoffWindows(t *testing.T) {
 		t.Errorf("pruned = %+v, want 2 event ids and 1 bucket", pruned)
 	}
 
-	buckets, err := store.Buckets(ctx, "emails", now.Add(-minuteRetention), now)
+	buckets, err := store.Buckets(ctx, ResolutionMinute, "emails", now.Add(-minuteRetention), now)
 	if err != nil {
 		t.Fatalf("Buckets: %v", err)
 	}
@@ -218,7 +218,7 @@ func TestPruneKeepsRowsJustInsideTheWindow(t *testing.T) {
 	if err := store.RecordJob(ctx, "raw-edge", "emails", "processed", 10, rawEdge); err != nil {
 		t.Fatalf("RecordJob replay: %v", err)
 	}
-	buckets, err := store.Buckets(ctx, "emails", now.Add(-minuteRetention), now)
+	buckets, err := store.Buckets(ctx, ResolutionMinute, "emails", now.Add(-minuteRetention), now)
 	if err != nil {
 		t.Fatalf("Buckets: %v", err)
 	}
@@ -228,6 +228,209 @@ func TestPruneKeepsRowsJustInsideTheWindow(t *testing.T) {
 	}
 	if jobs != 2 {
 		t.Errorf("jobs = %d over %d buckets, want both aggregates and the replay absorbed", jobs, len(buckets))
+	}
+}
+
+func TestRollupFoldsClosedMinutesIntoHoursAndDays(t *testing.T) {
+	store := openStore(t, filepath.Join(t.TempDir(), "metrics.db"))
+	ctx := context.Background()
+	now := time.Date(2026, 11, 20, 12, 30, 0, 0, time.UTC)
+
+	records := []struct {
+		id, queue, outcome string
+		duration           int64
+		at                 time.Time
+	}{
+		{"a", "emails", "processed", 100, time.Date(2026, 11, 20, 10, 5, 0, 0, time.UTC)},
+		{"b", "emails", "failed", 200, time.Date(2026, 11, 20, 10, 35, 0, 0, time.UTC)},
+		{"c", "emails", "processed", 300, time.Date(2026, 11, 20, 11, 20, 0, 0, time.UTC)},
+		{"d", "reports", "released", 50, time.Date(2026, 11, 20, 10, 10, 0, 0, time.UTC)},
+		// The hour in progress is not folded yet.
+		{"e", "emails", "processed", 400, time.Date(2026, 11, 20, 12, 10, 0, 0, time.UTC)},
+	}
+	for _, record := range records {
+		if err := store.RecordJob(ctx, record.id, record.queue, record.outcome, record.duration, record.at); err != nil {
+			t.Fatalf("RecordJob(%s): %v", record.id, err)
+		}
+	}
+	if err := store.Rollup(ctx, now); err != nil {
+		t.Fatalf("Rollup: %v", err)
+	}
+
+	hours, err := store.Buckets(ctx, ResolutionHourly, "emails", now.Add(-24*time.Hour), now)
+	if err != nil {
+		t.Fatalf("hourly Buckets: %v", err)
+	}
+	if len(hours) != 2 {
+		t.Fatalf("hours = %+v, want one for 10:00 and one for 11:00", hours)
+	}
+	ten := hours[0]
+	if !ten.Start.Equal(time.Date(2026, 11, 20, 10, 0, 0, 0, time.UTC)) ||
+		ten.Processed != 1 || ten.Failed != 1 || ten.DurationMS != 300 {
+		t.Errorf("10:00 hour = %+v, want both 10:xx minutes summed", ten)
+	}
+	if eleven := hours[1]; eleven.Start.Hour() != 11 || eleven.Processed != 1 || eleven.DurationMS != 300 {
+		t.Errorf("11:00 hour = %+v, want the single 11:20 job", eleven)
+	}
+
+	days, err := store.Buckets(ctx, ResolutionDaily, "emails", now.Add(-7*24*time.Hour), now)
+	if err != nil {
+		t.Fatalf("daily Buckets: %v", err)
+	}
+	if len(days) != 1 {
+		t.Fatalf("days = %+v, want one", days)
+	}
+	day := days[0]
+	if !day.Start.Equal(time.Date(2026, 11, 20, 0, 0, 0, 0, time.UTC)) ||
+		totalJobs(day) != 3 || day.DurationMS != 600 {
+		t.Errorf("day = %+v, want only the three closed hours", day)
+	}
+
+	// Queues roll up independently.
+	reports, err := store.Buckets(ctx, ResolutionHourly, "reports", now.Add(-24*time.Hour), now)
+	if err != nil {
+		t.Fatalf("hourly Buckets(reports): %v", err)
+	}
+	if len(reports) != 1 || reports[0].Released != 1 {
+		t.Errorf("reports hours = %+v, want the released job", reports)
+	}
+}
+
+func TestRollupIsIdempotentAndAbsorbsLateMinutes(t *testing.T) {
+	store := openStore(t, filepath.Join(t.TempDir(), "metrics.db"))
+	ctx := context.Background()
+	now := time.Date(2026, 11, 20, 12, 30, 0, 0, time.UTC)
+
+	if err := store.RecordJob(ctx, "a", "emails", "processed", 100, time.Date(2026, 11, 20, 10, 5, 0, 0, time.UTC)); err != nil {
+		t.Fatalf("RecordJob: %v", err)
+	}
+	for i := 0; i < 2; i++ {
+		if err := store.Rollup(ctx, now); err != nil {
+			t.Fatalf("Rollup %d: %v", i, err)
+		}
+	}
+
+	hours, err := store.Buckets(ctx, ResolutionHourly, "emails", now.Add(-24*time.Hour), now)
+	if err != nil {
+		t.Fatalf("hourly Buckets: %v", err)
+	}
+	if len(hours) != 1 || hours[0].Processed != 1 || hours[0].DurationMS != 100 {
+		t.Fatalf("hours = %+v, want the job counted once after two rollups", hours)
+	}
+
+	// A stream entry delivered after its hour was folded is picked up by the next pass.
+	if err := store.RecordJob(ctx, "late", "emails", "failed", 50, time.Date(2026, 11, 20, 10, 40, 0, 0, time.UTC)); err != nil {
+		t.Fatalf("RecordJob(late): %v", err)
+	}
+	if err := store.Rollup(ctx, now); err != nil {
+		t.Fatalf("Rollup after late minute: %v", err)
+	}
+	hours, err = store.Buckets(ctx, ResolutionHourly, "emails", now.Add(-24*time.Hour), now)
+	if err != nil {
+		t.Fatalf("hourly Buckets: %v", err)
+	}
+	if len(hours) != 1 || hours[0].Processed != 1 || hours[0].Failed != 1 || hours[0].DurationMS != 150 {
+		t.Errorf("hours = %+v, want the late failure added without recounting the first job", hours)
+	}
+}
+
+func TestRollupKeepsHistoryPastTheMinuteWindow(t *testing.T) {
+	store := openStore(t, filepath.Join(t.TempDir(), "metrics.db"))
+	ctx := context.Background()
+	now := time.Date(2026, 11, 20, 12, 0, 0, 0, time.UTC)
+
+	// Older than minute retention but inside hourly retention: a restart must roll it up
+	// before the prune that would otherwise delete it.
+	at := now.Add(-20 * 24 * time.Hour)
+	if err := store.RecordJob(ctx, "old", "emails", "processed", 10, at); err != nil {
+		t.Fatalf("RecordJob: %v", err)
+	}
+	if err := store.Rollup(ctx, now); err != nil {
+		t.Fatalf("Rollup: %v", err)
+	}
+	if _, err := store.Prune(ctx, now); err != nil {
+		t.Fatalf("Prune: %v", err)
+	}
+
+	minutes, err := store.Buckets(ctx, ResolutionMinute, "emails", now.Add(-30*24*time.Hour), now)
+	if err != nil {
+		t.Fatalf("minute Buckets: %v", err)
+	}
+	if len(minutes) != 0 {
+		t.Errorf("minutes = %+v, want the expired minute bucket gone", minutes)
+	}
+	hours, err := store.Buckets(ctx, ResolutionHourly, "emails", now.Add(-30*24*time.Hour), now)
+	if err != nil {
+		t.Fatalf("hourly Buckets: %v", err)
+	}
+	if len(hours) != 1 || hours[0].Processed != 1 {
+		t.Errorf("hours = %+v, want the job preserved in its hour", hours)
+	}
+}
+
+func TestPruneUsesTheConfiguredRawWindow(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "metrics.db"), Retention{Raw: 24 * time.Hour})
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	now := time.Date(2026, 11, 20, 12, 0, 0, 0, time.UTC)
+
+	// 30 hours old: past the configured 24-hour raw window, inside the 72-hour default,
+	// and inside the default minute window, so only the id may go.
+	if err := store.RecordJob(context.Background(), "id", "emails", "processed", 10, now.Add(-30*time.Hour)); err != nil {
+		t.Fatalf("RecordJob: %v", err)
+	}
+	pruned, err := store.Prune(context.Background(), now)
+	if err != nil {
+		t.Fatalf("Prune: %v", err)
+	}
+	if pruned.Events != 1 || pruned.Buckets != 0 {
+		t.Errorf("pruned = %+v, want only the id removed by the 24-hour window", pruned)
+	}
+}
+
+func TestPruneUsesTheConfiguredRetentionPerLevel(t *testing.T) {
+	retention := Retention{
+		Raw:    24 * time.Hour,
+		Minute: 48 * time.Hour,
+		Hourly: 72 * time.Hour,
+		Daily:  90 * time.Hour,
+	}
+	store, err := Open(filepath.Join(t.TempDir(), "metrics.db"), retention)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	ctx := context.Background()
+	now := time.Date(2026, 11, 20, 12, 0, 0, 0, time.UTC)
+
+	// 79 hours old: past every window except the 90-hour daily one (its day starts 84
+	// hours before now).
+	old := now.Add(-79 * time.Hour)
+	if err := store.RecordJob(ctx, "old", "emails", "processed", 10, old); err != nil {
+		t.Fatalf("RecordJob: %v", err)
+	}
+	if err := store.Rollup(ctx, now); err != nil {
+		t.Fatalf("Rollup: %v", err)
+	}
+
+	pruned, err := store.Prune(ctx, now)
+	if err != nil {
+		t.Fatalf("Prune: %v", err)
+	}
+	if pruned.Events != 1 || pruned.Buckets != 1 || pruned.Hourly != 1 || pruned.Daily != 0 {
+		t.Fatalf("pruned = %+v, want the id, minute and hour gone but the day kept", pruned)
+	}
+
+	// The daily aggregate outlives the hourly rows it was built from, then expires on its
+	// own window.
+	pruned, err = store.Prune(ctx, now.Add(10*time.Hour))
+	if err != nil {
+		t.Fatalf("Prune again: %v", err)
+	}
+	if pruned.Daily != 1 {
+		t.Errorf("second prune = %+v, want the expired day removed", pruned)
 	}
 }
 

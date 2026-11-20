@@ -152,7 +152,7 @@ func New(ctx context.Context, cfg *config.Config, log *slog.Logger) (*Service, e
 	// start anyway (docs/adr/0007).
 	var store *metrics.Store
 	if cfg.Storage.Driver == "sqlite" {
-		opened, openErr := metrics.Open(cfg.Storage.Path)
+		opened, openErr := metrics.Open(cfg.Storage.Path, metricsRetention(cfg))
 		if openErr != nil {
 			log.Warn("metrics history disabled: the storage database could not be opened",
 				"path", cfg.Storage.Path, "error", openErr)
@@ -197,7 +197,7 @@ func (s *Service) Buckets(ctx context.Context, queue string, from, to time.Time)
 	if s.store == nil {
 		return nil, metrics.ErrDisabled
 	}
-	return s.store.Buckets(ctx, queue, from, to)
+	return s.store.Buckets(ctx, metrics.ResolutionMinute, queue, from, to)
 }
 
 func (s *Service) Close() error {
@@ -233,13 +233,35 @@ func (s *Service) pruneLoop(ctx context.Context) {
 func (s *Service) pruneOnce(ctx context.Context) {
 	pruneCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
-	pruned, err := s.store.Prune(pruneCtx, time.Now())
+
+	now := time.Now()
+	// Rollups run before pruning: pruning the minutes first would leave holes in the
+	// hours and days that are built from them. A failed rollup skips this prune pass
+	// rather than risking that, and the next pass retries (docs/adr/0007).
+	if err := s.store.Rollup(pruneCtx, now); err != nil {
+		s.log.Warn("metrics rollup failed; skipping this prune pass", "error", err)
+		return
+	}
+
+	pruned, err := s.store.Prune(pruneCtx, now)
 	if err != nil {
 		s.log.Warn("metrics retention pruning failed", "error", err)
 		return
 	}
-	if pruned.Events > 0 || pruned.Buckets > 0 {
-		s.log.Info("pruned metrics history", "events", pruned.Events, "buckets", pruned.Buckets)
+	if pruned.Events > 0 || pruned.Buckets > 0 || pruned.Hourly > 0 || pruned.Daily > 0 {
+		s.log.Info("pruned metrics history", "events", pruned.Events, "minutes", pruned.Buckets,
+			"hours", pruned.Hourly, "days", pruned.Daily)
+	}
+}
+
+// metricsRetention maps the configured windows onto the store's durations.
+func metricsRetention(cfg *config.Config) metrics.Retention {
+	retention := cfg.Storage.Retention
+	return metrics.Retention{
+		Raw:    time.Duration(retention.RawHours) * time.Hour,
+		Minute: time.Duration(retention.MinuteDays) * 24 * time.Hour,
+		Hourly: time.Duration(retention.HourlyDays) * 24 * time.Hour,
+		Daily:  time.Duration(retention.DailyDays) * 24 * time.Hour,
 	}
 }
 

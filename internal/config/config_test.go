@@ -119,6 +119,67 @@ func TestParseAppliesQueueWorkDefaults(t *testing.T) {
 	}
 }
 
+func TestParseAppliesDefaultRetention(t *testing.T) {
+	cfg, err := Parse([]byte(minimal))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	retention := cfg.Storage.Retention
+	if retention.RawHours != DefaultRawRetentionHours ||
+		retention.MinuteDays != DefaultMinuteRetentionDays ||
+		retention.HourlyDays != DefaultHourlyRetentionDays ||
+		retention.DailyDays != DefaultDailyRetentionDays {
+		t.Errorf("retention = %+v, want the handoff defaults", retention)
+	}
+}
+
+func TestParseReadsExplicitRetention(t *testing.T) {
+	src := strings.Replace(minimal,
+		"storage:\n  driver: sqlite\n  path: /var/lib/gohorizon/gohorizon.db\n",
+		"storage:\n  driver: sqlite\n  path: /var/lib/gohorizon/gohorizon.db\n"+
+			"  retention:\n    raw_hours: 48\n    minute_days: 3\n    hourly_days: 10\n    daily_days: 90\n", 1)
+
+	cfg, err := Parse([]byte(src))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("Validate: %v", err)
+	}
+	want := Retention{RawHours: 48, MinuteDays: 3, HourlyDays: 10, DailyDays: 90}
+	if got := cfg.Storage.Retention; got != want {
+		t.Errorf("retention = %+v, want %+v", got, want)
+	}
+}
+
+func TestValidateRejectsRetentionShorterThanItsSource(t *testing.T) {
+	cases := []struct {
+		name      string
+		retention string
+		want      string
+	}{
+		{"raw past minutes", "  retention:\n    raw_hours: 100\n    minute_days: 1\n", "raw_hours"},
+		{"minutes past hours", "  retention:\n    minute_days: 10\n    hourly_days: 5\n", "minute_days"},
+		{"hours past days", "  retention:\n    hourly_days: 40\n    daily_days: 30\n", "hourly_days"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			src := strings.Replace(minimal,
+				"storage:\n  driver: sqlite\n  path: /var/lib/gohorizon/gohorizon.db\n",
+				"storage:\n  driver: sqlite\n  path: /var/lib/gohorizon/gohorizon.db\n"+tc.retention, 1)
+			cfg, err := Parse([]byte(src))
+			if err != nil {
+				t.Fatalf("Parse: %v", err)
+			}
+			err = cfg.Validate()
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("error = %v, want it to mention %q", err, tc.want)
+			}
+		})
+	}
+}
+
 func TestExpandEnv(t *testing.T) {
 	t.Setenv("GH_TEST_APP", "production")
 	t.Setenv("GH_TEST_DB", "7")

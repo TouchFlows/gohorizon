@@ -63,6 +63,31 @@ func (c *Config) Validate() error {
 		errs.add("storage.driver: %q is not supported (supported: sqlite)", c.Storage.Driver)
 	}
 
+	retention := c.Storage.Retention
+	if retention.RawHours <= 0 {
+		errs.add("storage.retention.raw_hours: must be at least 1 hour")
+	}
+	if retention.MinuteDays <= 0 {
+		errs.add("storage.retention.minute_days: must be at least 1 day")
+	}
+	if retention.HourlyDays <= 0 {
+		errs.add("storage.retention.hourly_days: must be at least 1 day")
+	}
+	if retention.DailyDays <= 0 {
+		errs.add("storage.retention.daily_days: must be at least 1 day")
+	}
+	// Each rollup must outlive the level it is built from, otherwise pruning empties the
+	// source before the aggregate that needs it exists.
+	if retention.RawHours > 0 && retention.MinuteDays > 0 && retention.RawHours > retention.MinuteDays*24 {
+		errs.add("storage.retention.raw_hours: %d must not exceed minute_days (%d days)", retention.RawHours, retention.MinuteDays)
+	}
+	if retention.MinuteDays > retention.HourlyDays {
+		errs.add("storage.retention.minute_days: %d must not exceed hourly_days (%d)", retention.MinuteDays, retention.HourlyDays)
+	}
+	if retention.HourlyDays > retention.DailyDays {
+		errs.add("storage.retention.hourly_days: %d must not exceed daily_days (%d)", retention.HourlyDays, retention.DailyDays)
+	}
+
 	if c.Redis.Address == "" {
 		errs.add("redis.address: required")
 	} else if _, _, err := net.SplitHostPort(c.Redis.Address); err != nil {

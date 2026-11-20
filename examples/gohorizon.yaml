@@ -7,6 +7,13 @@ server:
 storage:
   driver: sqlite
   path: /var/lib/gohorizon/gohorizon.db
+  # Handoff §9 windows. Minute buckets are rolled up into hours and hours into days
+  # before each prune, so each level must outlive the one it is built from.
+  retention:
+    raw_hours: 72
+    minute_days: 7
+    hourly_days: 30
+    daily_days: 365
 
 redis:
   address: "127.0.0.1:6379"

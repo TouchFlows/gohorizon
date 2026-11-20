@@ -42,20 +42,26 @@ Two constraints shape the storage:
 6. **No dashboard coupling.** This package formats nothing. `GET /api/v1/metrics`
    serves one queue's `Buckets` over `[from, to)`, read-only; the dashboard remains a
    later slice.
-7. **Bounded growth follows handoff §9.** `Prune` deletes event ids older than 72 hours
-   (the handoff's 24–72 hour raw window, at its upper bound, so an outage still
-   recognises replays) and minute buckets older than 7 days. It runs at startup and then
-   hourly, which bounds the overshoot to one interval. Hourly (30 days) and daily (12
-   months) rollups do not exist yet, so there is nothing to prune for them. The windows
-   are constants for now; they become configuration when the rollups that need their own
-   windows arrive.
+7. **Bounded growth follows handoff §9.** `Rollup` folds closed minute buckets into
+   hourly buckets and closed hourly buckets into daily ones; `Prune` then deletes event
+   ids and each aggregate level past its window. Both run at startup and then hourly,
+   rollup first: pruning minutes before rolling them up would leave holes in the hours
+   and days built from them, so a failed rollup skips that prune pass. Windows come from
+   `storage.retention` (defaults 72 h raw — the upper end of the handoff's window, so an
+   outage still recognises replays — then 7 d minutes, 30 d hours, 365 d days), and each
+   level must outlive the level it is built from.
+8. **Rollups recompute, they do not increment.** Every pass groups the source table for
+   closed periods and writes absolute sums with an upsert. Running a pass twice cannot
+   double count, and a late event inside an already closed hour is absorbed by the next
+   pass. The hour in progress is excluded; the day in progress collects its completed
+   hours and is recomputed as more arrive.
 
 ## Consequences
 
 - History survives a restart, including the dedupe record, so a replayed stream entry is
   not counted twice.
-- Per-queue aggregates are the unit the handoff's balancing and dashboard work will read;
-  no schema change is needed for a per-queue view, only for new rollup granularities.
+- Per-queue aggregates exist at minute, hour and day resolution for the handoff's
+  balancing and dashboard work; `GET /api/v1/metrics` currently serves the minute level.
 - The database is bounded: ids live 72 hours, minute buckets 7 days. An event
   redelivered after its id was pruned would be counted again, but the stream's own
   `telemetry.retention` window is far shorter than 72 hours in practice.

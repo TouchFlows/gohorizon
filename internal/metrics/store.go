@@ -21,12 +21,15 @@ import (
 // bucketSize is the aggregation window: one row per queue per minute of traffic.
 const bucketSize = time.Minute
 
-// Retention follows handoff §9: raw telemetry lives 24–72 hours (the upper bound, so a
-// consumer that was down still recognises replays), minute aggregates 7 days. Hourly
-// (30 days) and daily (12 months) rollups do not exist yet, so nothing prunes them.
+// Default retention follows handoff §9: raw telemetry lives 24–72 hours (the upper
+// bound, so a consumer that was down still recognises replays), minute aggregates 7
+// days, hourly aggregates 30 days and daily aggregates 12 months. The service passes
+// configured windows in; these are the fallbacks for an omitted storage.retention.
 const (
 	rawRetention    = 72 * time.Hour
 	minuteRetention = 7 * 24 * time.Hour
+	hourlyRetention = 30 * 24 * time.Hour
+	dailyRetention  = 365 * 24 * time.Hour
 )
 
 const schema = `
@@ -36,6 +39,28 @@ CREATE TABLE IF NOT EXISTS recorded_events (
 );
 
 CREATE TABLE IF NOT EXISTS queue_buckets (
+	queue TEXT NOT NULL,
+	bucket_start INTEGER NOT NULL,
+	processed INTEGER NOT NULL DEFAULT 0,
+	released INTEGER NOT NULL DEFAULT 0,
+	failed INTEGER NOT NULL DEFAULT 0,
+	timed_out INTEGER NOT NULL DEFAULT 0,
+	duration_ms INTEGER NOT NULL DEFAULT 0,
+	PRIMARY KEY (queue, bucket_start)
+);
+
+CREATE TABLE IF NOT EXISTS queue_hourly_buckets (
+	queue TEXT NOT NULL,
+	bucket_start INTEGER NOT NULL,
+	processed INTEGER NOT NULL DEFAULT 0,
+	released INTEGER NOT NULL DEFAULT 0,
+	failed INTEGER NOT NULL DEFAULT 0,
+	timed_out INTEGER NOT NULL DEFAULT 0,
+	duration_ms INTEGER NOT NULL DEFAULT 0,
+	PRIMARY KEY (queue, bucket_start)
+);
+
+CREATE TABLE IF NOT EXISTS queue_daily_buckets (
 	queue TEXT NOT NULL,
 	bucket_start INTEGER NOT NULL,
 	processed INTEGER NOT NULL DEFAULT 0,
@@ -72,13 +97,61 @@ type Bucket struct {
 // the database could not be opened at startup (the service supervises anyway).
 var ErrDisabled = errors.New("metrics history is disabled")
 
+// Retention bounds how long each level of history lives. A zero field takes its
+// default, so a configuration that omits storage.retention keeps the handoff windows.
+type Retention struct {
+	Raw    time.Duration
+	Minute time.Duration
+	Hourly time.Duration
+	Daily  time.Duration
+}
+
+// DefaultRetention is handoff §9's suggested window per level.
+func DefaultRetention() Retention {
+	return Retention{Raw: rawRetention, Minute: minuteRetention, Hourly: hourlyRetention, Daily: dailyRetention}
+}
+
+func (r Retention) withDefaults() Retention {
+	defaults := DefaultRetention()
+	if r.Raw <= 0 {
+		r.Raw = defaults.Raw
+	}
+	if r.Minute <= 0 {
+		r.Minute = defaults.Minute
+	}
+	if r.Hourly <= 0 {
+		r.Hourly = defaults.Hourly
+	}
+	if r.Daily <= 0 {
+		r.Daily = defaults.Daily
+	}
+	return r
+}
+
+// Resolution selects which aggregate level a read returns.
+type Resolution string
+
+const (
+	ResolutionMinute Resolution = "minute"
+	ResolutionHourly Resolution = "hourly"
+	ResolutionDaily  Resolution = "daily"
+)
+
+// bucketTables maps a resolution to its table. Only these fixed names ever reach SQL.
+var bucketTables = map[Resolution]string{
+	ResolutionMinute: "queue_buckets",
+	ResolutionHourly: "queue_hourly_buckets",
+	ResolutionDaily:  "queue_daily_buckets",
+}
+
 // Store is the SQLite-backed metrics history.
 type Store struct {
-	db *sql.DB
+	db        *sql.DB
+	retention Retention
 }
 
 // Open opens (creating if needed) the metrics database and its schema.
-func Open(path string) (*Store, error) {
+func Open(path string, retention Retention) (*Store, error) {
 	if path == "" {
 		return nil, errors.New("metrics database path must not be empty")
 	}
@@ -100,19 +173,22 @@ func Open(path string) (*Store, error) {
 		_ = db.Close()
 		return nil, fmt.Errorf("migrate metrics database %s: %w", path, err)
 	}
-	return &Store{db: db}, nil
+	return &Store{db: db, retention: retention.withDefaults()}, nil
 }
 
 func (s *Store) Close() error { return s.db.Close() }
 
-// Pruned reports how much history one Prune removed.
+// Pruned reports how much history one Prune removed, per level.
 type Pruned struct {
 	Events  int64
 	Buckets int64
+	Hourly  int64
+	Daily   int64
 }
 
-// Prune drops raw event ids and minute buckets older than the retention windows. It is
-// the only bound on the database's growth, so it runs at startup and hourly.
+// Prune drops raw event ids and each aggregate level older than its configured window.
+// It is the only bound on the database's growth, so it runs at startup and hourly, after
+// Rollup has folded everything the prune is about to delete.
 func (s *Store) Prune(ctx context.Context, now time.Time) (Pruned, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -122,7 +198,7 @@ func (s *Store) Prune(ctx context.Context, now time.Time) (Pruned, error) {
 
 	var pruned Pruned
 	result, err := tx.ExecContext(ctx, `DELETE FROM recorded_events WHERE recorded_at < ?`,
-		now.Add(-rawRetention).UTC().Unix())
+		now.Add(-s.retention.Raw).UTC().Unix())
 	if err != nil {
 		return Pruned{}, fmt.Errorf("prune recorded event ids: %w", err)
 	}
@@ -130,13 +206,14 @@ func (s *Store) Prune(ctx context.Context, now time.Time) (Pruned, error) {
 		return Pruned{}, fmt.Errorf("count pruned event ids: %w", err)
 	}
 
-	result, err = tx.ExecContext(ctx, `DELETE FROM queue_buckets WHERE bucket_start < ?`,
-		now.Add(-minuteRetention).UTC().Unix())
-	if err != nil {
-		return Pruned{}, fmt.Errorf("prune queue buckets: %w", err)
+	if pruned.Buckets, err = pruneBuckets(ctx, tx, ResolutionMinute, now.Add(-s.retention.Minute)); err != nil {
+		return Pruned{}, fmt.Errorf("prune minute buckets: %w", err)
 	}
-	if pruned.Buckets, err = result.RowsAffected(); err != nil {
-		return Pruned{}, fmt.Errorf("count pruned queue buckets: %w", err)
+	if pruned.Hourly, err = pruneBuckets(ctx, tx, ResolutionHourly, now.Add(-s.retention.Hourly)); err != nil {
+		return Pruned{}, fmt.Errorf("prune hourly buckets: %w", err)
+	}
+	if pruned.Daily, err = pruneBuckets(ctx, tx, ResolutionDaily, now.Add(-s.retention.Daily)); err != nil {
+		return Pruned{}, fmt.Errorf("prune daily buckets: %w", err)
 	}
 
 	if err := tx.Commit(); err != nil {
@@ -195,11 +272,82 @@ ON CONFLICT(queue, bucket_start) DO UPDATE SET
 	return nil
 }
 
-// Buckets returns a queue's history in [from, to), oldest first.
-func (s *Store) Buckets(ctx context.Context, queue string, from, to time.Time) ([]Bucket, error) {
+// Rollup folds closed minute buckets into hourly buckets and closed hourly buckets into
+// daily ones. Each pass recomputes the affected periods from their source with absolute
+// values, so running it twice cannot double count and a late event inside a closed hour
+// is picked up by the next pass. Only the hour in progress is left out: the day in
+// progress collects its completed hours and is recomputed by later passes.
+func (s *Store) Rollup(ctx context.Context, now time.Time) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin rollup transaction: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	hourStart := now.UTC().Truncate(time.Hour).Unix()
+	if _, err := tx.ExecContext(ctx, hourlyRollup, hourStart); err != nil {
+		return fmt.Errorf("roll up minute buckets into hours: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, dailyRollup, hourStart); err != nil {
+		return fmt.Errorf("roll up hourly buckets into days: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit rollup: %w", err)
+	}
+	return nil
+}
+
+// The modulo constants are time.Hour and 24 hours in seconds. The WHERE clause also keeps
+// SQLite's upsert parser from reading ON as a join constraint.
+const hourlyRollup = `
+INSERT INTO queue_hourly_buckets (queue, bucket_start, processed, released, failed, timed_out, duration_ms)
+SELECT queue, bucket_start - (bucket_start % 3600),
+	SUM(processed), SUM(released), SUM(failed), SUM(timed_out), SUM(duration_ms)
+FROM queue_buckets
+WHERE bucket_start < ?
+GROUP BY queue, bucket_start - (bucket_start % 3600)
+ON CONFLICT(queue, bucket_start) DO UPDATE SET
+	processed = excluded.processed,
+	released = excluded.released,
+	failed = excluded.failed,
+	timed_out = excluded.timed_out,
+	duration_ms = excluded.duration_ms`
+
+const dailyRollup = `
+INSERT INTO queue_daily_buckets (queue, bucket_start, processed, released, failed, timed_out, duration_ms)
+SELECT queue, bucket_start - (bucket_start % 86400),
+	SUM(processed), SUM(released), SUM(failed), SUM(timed_out), SUM(duration_ms)
+FROM queue_hourly_buckets
+WHERE bucket_start < ?
+GROUP BY queue, bucket_start - (bucket_start % 86400)
+ON CONFLICT(queue, bucket_start) DO UPDATE SET
+	processed = excluded.processed,
+	released = excluded.released,
+	failed = excluded.failed,
+	timed_out = excluded.timed_out,
+	duration_ms = excluded.duration_ms`
+
+func pruneBuckets(ctx context.Context, tx *sql.Tx, resolution Resolution, cutoff time.Time) (int64, error) {
+	table, ok := bucketTables[resolution]
+	if !ok {
+		return 0, fmt.Errorf("unknown metrics resolution %q", resolution)
+	}
+	result, err := tx.ExecContext(ctx, "DELETE FROM "+table+" WHERE bucket_start < ?", cutoff.UTC().Unix())
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
+// Buckets returns a queue's history at one resolution in [from, to), oldest first.
+func (s *Store) Buckets(ctx context.Context, resolution Resolution, queue string, from, to time.Time) ([]Bucket, error) {
+	table, ok := bucketTables[resolution]
+	if !ok {
+		return nil, fmt.Errorf("unknown metrics resolution %q", resolution)
+	}
 	rows, err := s.db.QueryContext(ctx, `
 SELECT bucket_start, processed, released, failed, timed_out, duration_ms
-FROM queue_buckets
+FROM `+table+`
 WHERE queue = ? AND bucket_start >= ? AND bucket_start < ?
 ORDER BY bucket_start`,
 		queue, from.UTC().Unix(), to.UTC().Unix())
