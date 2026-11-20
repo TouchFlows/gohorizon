@@ -41,7 +41,7 @@ Milestone 1 (proof of concept) in progress. Implemented:
 returns one queue's persisted buckets as `{queue, resolution, from, to, buckets: [{start,
 processed, released, failed, timed_out, duration_ms}]}`, oldest first. `resolution`
 defaults to `minute`; the range is `[from, to)` in RFC 3339 and defaults to the last
-hour of minutes, the last 24 hours of hours, or the last 30 days of days. A missing
+hour, 24 hours or 30 days respectively. A missing
 queue, an unknown resolution or a malformed range is a 400, unavailable history is a
 503, and a store failure is a 500 that keeps the database path out of the response.
 

@@ -213,10 +213,10 @@ func TestMetricsDefaultsToTheLastHour(t *testing.T) {
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200", recorder.Code)
 	}
-	if provider.queue != "emails" {
-		t.Errorf("queue = %q, want emails", provider.queue)
+	if provider.queue != "emails" || provider.resolution != metrics.ResolutionMinute {
+		t.Errorf("store read (%q, %q), want emails at minute resolution", provider.queue, provider.resolution)
 	}
-	if window := provider.to.Sub(provider.from); window != defaultHistoryWindows[metrics.ResolutionMinute] {
+	if window := provider.to.Sub(provider.from); window != time.Hour {
 		t.Errorf("window = %s, want an hour", window)
 	}
 
@@ -259,11 +259,12 @@ func TestMetricsReadsTheRequestedResolution(t *testing.T) {
 }
 
 func TestMetricsDefaultsTheWindowToTheResolution(t *testing.T) {
+	// The minute default is covered by TestMetricsDefaultsToTheLastHour, which also
+	// proves that omitting the parameter selects it.
 	for _, tc := range []struct {
 		resolution metrics.Resolution
 		window     time.Duration
 	}{
-		{metrics.ResolutionMinute, time.Hour},
 		{metrics.ResolutionHourly, 24 * time.Hour},
 		{metrics.ResolutionDaily, 30 * 24 * time.Hour},
 	} {

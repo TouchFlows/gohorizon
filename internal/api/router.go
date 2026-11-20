@@ -23,7 +23,7 @@ type Provider interface {
 }
 
 // defaultHistoryWindows is the range the metrics endpoint answers when no `from` is
-// given, per resolution: an hour of minutes, a day of hours, a month of days.
+// given, per resolution: an hour, a day or a month.
 var defaultHistoryWindows = map[metrics.Resolution]time.Duration{
 	metrics.ResolutionMinute: time.Hour,
 	metrics.ResolutionHourly: 24 * time.Hour,
