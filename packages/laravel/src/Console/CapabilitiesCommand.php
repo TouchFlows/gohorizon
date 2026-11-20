@@ -62,39 +62,24 @@ final class CapabilitiesCommand extends Command
      */
     public function capabilities(): array
     {
-        $defaultConnection = (string) config('queue.default');
-        $redisConnection = (string) config('gohorizon.redis.connection', 'default');
-
         return [
             'schema' => 1,
             'package' => 'gohorizon/laravel',
-            'package_version' => '0.1.0',
             'laravel' => $this->app->version(),
             'php' => PHP_VERSION,
             'application' => $this->keys->application(),
             'environment' => $this->keys->environment(),
             'queue' => [
-                'default_connection' => $defaultConnection,
                 'connections' => $this->queueConnections(),
             ],
-            'redis' => $this->redisDescription($redisConnection),
             'telemetry' => [
-                'enabled' => (bool) config('gohorizon.enabled', true) && (bool) config('gohorizon.telemetry.enabled', true),
                 'stream' => $this->keys->events(),
-                'batch_size' => (int) config('gohorizon.telemetry.batch_size', 100),
-                'buffer_size' => (int) config('gohorizon.telemetry.buffer_size', 1000),
             ],
             'runtime' => [
+                // A --timeout is inert without pcntl, so GoHorizon refuses to spawn one.
                 'pcntl' => extension_loaded('pcntl'),
-                'posix' => extension_loaded('posix'),
-                'sapi' => PHP_SAPI,
             ],
             'events' => $this->availableEvents(),
-            'operations' => [
-                'inspect_queues',
-                'telemetry',
-                'capabilities',
-            ],
         ];
     }
 
@@ -108,34 +93,12 @@ final class CapabilitiesCommand extends Command
         foreach ((array) config('queue.connections', []) as $name => $connection) {
             $connections[(string) $name] = [
                 'driver' => $connection['driver'] ?? null,
-                'queue' => $connection['queue'] ?? null,
                 // GoHorizon compares worker.timeout against this before spawning.
                 'retry_after' => $connection['retry_after'] ?? null,
-                'block_for' => $connection['block_for'] ?? null,
-                'after_commit' => (bool) ($connection['after_commit'] ?? false),
-                'has_password' => ! empty($connection['password']),
             ];
         }
 
         return $connections;
-    }
-
-    /**
-     * @return array<string, mixed>
-     */
-    private function redisDescription(string $connection): array
-    {
-        $config = (array) config("database.redis.{$connection}", []);
-
-        return [
-            'connection' => $connection,
-            'client' => config('database.redis.client'),
-            'host' => $config['host'] ?? null,
-            'port' => isset($config['port']) ? (int) $config['port'] : null,
-            'database' => isset($config['database']) ? (int) $config['database'] : null,
-            'has_password' => ! empty($config['password']),
-            'has_username' => ! empty($config['username']),
-        ];
     }
 
     /**

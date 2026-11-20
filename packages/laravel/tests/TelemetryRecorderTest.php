@@ -13,7 +13,6 @@ use Illuminate\Queue\Events\WorkerStopping;
 use Illuminate\Queue\WorkerStopReason;
 use PHPUnit\Framework\TestCase;
 use RuntimeException;
-use Throwable;
 
 final class TelemetryRecorderTest extends TestCase
 {
@@ -66,8 +65,8 @@ final class TelemetryRecorderTest extends TestCase
 
         $recorder->jobFinished($this->job(), 'processed'); // flushes immediately, fails
 
-        		self::assertSame(1, $recorder->dropped());
-		self::assertCount(1, $publisher->attempts, 'the batch was attempted exactly once');
+        self::assertSame(1, $recorder->dropped());
+        self::assertCount(1, $publisher->attempts, 'the batch was attempted exactly once');
     }
 
     public function test_worker_stopping_flushes_and_records_the_reason(): void
@@ -81,7 +80,7 @@ final class TelemetryRecorderTest extends TestCase
         $recorder->workerStopping(new WorkerStopping(
             status: 0,
             workerOptions: null,
-            			reason: WorkerStopReason::Interrupted,
+            reason: WorkerStopReason::Interrupted,
             jobsProcessed: 12,
             lastJobProcessedAt: null,
             memoryUsage: 42.25,
@@ -127,19 +126,6 @@ final class TelemetryRecorderTest extends TestCase
         $job->method('attempts')->willReturn(2);
 
         return $job;
-    }
-}
-
-final class RecordingPublisher implements TelemetryPublisher
-{
-    /** @var list<array<string, mixed>> */
-    public array $events = [];
-
-    public function publish(array $events): void
-    {
-        foreach ($events as $event) {
-            $this->events[] = $event;
-        }
     }
 }
 

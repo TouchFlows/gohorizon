@@ -38,7 +38,7 @@ final class Keys
      * Slugifies a human name into a valid namespace segment. Throws instead of
      * silently producing an empty segment (for example an all-symbols app name).
      */
-    public static function segment(string $value): string
+    private static function segment(string $value): string
     {
         $slug = Str::slug($value);
 
@@ -61,11 +61,6 @@ final class Keys
         return $this->environment;
     }
 
-    public function scope(): string
-    {
-        return sprintf('gohorizon:%s:%s:', $this->application, $this->environment);
-    }
-
     /**
      * Telemetry stream consumed by GoHorizon (handoff §6.3).
      */
@@ -74,9 +69,14 @@ final class Keys
         return $this->scope().'events';
     }
 
-    public function coordinates(): string
+    /**
+     * Coordination keys (lock, supervisor control) belong to the Go service alone; the
+     * application never writes them, so this is the only segment the package builds
+     * beyond the stream.
+     */
+    private function scope(): string
     {
-        return $this->scope().'coord:';
+        return sprintf('gohorizon:%s:%s:', $this->application, $this->environment);
     }
 
     private static function assertSegment(string $segment, string $label): void

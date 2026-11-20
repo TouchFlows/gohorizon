@@ -21,12 +21,6 @@ final class CapabilitiesCommandTest extends TestCase
         $app['config']->set('gohorizon.environment', 'staging');
         $app['config']->set('gohorizon.telemetry.enabled', false);
 
-        $app['config']->set('database.redis.default', [
-            'host' => '127.0.0.1',
-            'port' => 6379,
-            'database' => 2,
-            'password' => 'redis-password-that-must-not-leak',
-        ]);
         $app['config']->set('queue.connections.redis', [
             'driver' => 'redis',
             'queue' => 'default',
@@ -48,14 +42,11 @@ final class CapabilitiesCommandTest extends TestCase
         self::assertSame('my-application', $data['application']);
         self::assertSame('staging', $data['environment']);
         self::assertSame('gohorizon:my-application:staging:events', $data['telemetry']['stream']);
+        self::assertSame('redis', $data['queue']['connections']['redis']['driver']);
         self::assertSame(90, $data['queue']['connections']['redis']['retry_after']);
-        self::assertTrue($data['queue']['connections']['redis']['has_password']);
-        self::assertTrue($data['redis']['has_password']);
-        self::assertSame(2, $data['redis']['database']);
+        self::assertSame(extension_loaded('pcntl'), $data['runtime']['pcntl']);
         self::assertContains('Illuminate\\Queue\\Events\\JobReleasedAfterException', $data['events']);
-        self::assertContains('inspect_queues', $data['operations']);
 
-        self::assertStringNotContainsString('redis-password-that-must-not-leak', $output);
         self::assertStringNotContainsString('queue-password-that-must-not-leak', $output);
     }
 

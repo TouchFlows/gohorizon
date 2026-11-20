@@ -58,11 +58,7 @@ final class GoHorizonServiceProvider extends ServiceProvider
             ]);
         }
 
-        if (! (bool) config('gohorizon.enabled', true)) {
-            return;
-        }
-
-        if (! (bool) config('gohorizon.telemetry.enabled', true)) {
+        if (! (bool) config('gohorizon.enabled', true) || ! (bool) config('gohorizon.telemetry.enabled', true)) {
             return;
         }
 

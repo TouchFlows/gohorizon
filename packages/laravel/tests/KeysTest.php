@@ -17,8 +17,6 @@ final class KeysTest extends TestCase
         $keys = new Keys('production', 'production');
 
         self::assertSame('gohorizon:production:production:events', $keys->events());
-        self::assertSame('gohorizon:production:production:coord:', $keys->coordinates());
-        self::assertSame('gohorizon:production:production:', $keys->scope());
     }
 
     public function test_it_slugifies_human_names(): void

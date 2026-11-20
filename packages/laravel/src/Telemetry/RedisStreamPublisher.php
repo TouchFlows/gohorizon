@@ -6,7 +6,6 @@ namespace GoHorizon\Laravel\Telemetry;
 
 use GoHorizon\Laravel\Redis\Keys;
 use Illuminate\Contracts\Redis\Factory;
-use Illuminate\Redis\Connections\Connection;
 use Throwable;
 
 /**
@@ -35,7 +34,7 @@ final class RedisStreamPublisher implements TelemetryPublisher
         $stream = $this->keys->events();
 
         if (count($events) === 1) {
-            $this->add($redis, $stream, $events[0]);
+            $redis->xadd($stream, '*', ['payload' => $this->encode($events[0])], $this->retention, true);
 
             return;
         }
@@ -45,11 +44,6 @@ final class RedisStreamPublisher implements TelemetryPublisher
                 $pipe->xadd($stream, '*', ['payload' => $this->encode($event)], $this->retention, true);
             }
         });
-    }
-
-    private function add(Connection $redis, string $stream, array $event): void
-    {
-        $redis->xadd($stream, '*', ['payload' => $this->encode($event)], $this->retention, true);
     }
 
     private function encode(array $event): string

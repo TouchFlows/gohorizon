@@ -27,7 +27,7 @@ final class TelemetryRecorder
     /** @var list<array<string, mixed>> */
     private array $buffer = [];
 
-    /** @var array<string, array{started_at: float, attempt: int}> */
+    /** @var array<string, float> Start time per in-flight job key. */
     private array $inFlight = [];
 
     private int $dropped = 0;
@@ -51,10 +51,7 @@ final class TelemetryRecorder
     public function jobStarted(JobProcessing $event): void
     {
         try {
-            $this->inFlight[$this->jobKey($event->job)] = [
-                'started_at' => microtime(true),
-                'attempt' => (int) $event->job->attempts(),
-            ];
+            $this->inFlight[$this->jobKey($event->job)] = microtime(true);
         } catch (Throwable) {
             // Best effort only.
         }
@@ -83,7 +80,7 @@ final class TelemetryRecorder
                     'queue' => (string) $job->getQueue(),
                     'attempts' => (int) $job->attempts(),
                     'outcome' => $outcome,
-                    'duration_ms' => $started === null ? null : (int) round((microtime(true) - $started['started_at']) * 1000),
+                    'duration_ms' => $started === null ? null : (int) round((microtime(true) - $started) * 1000),
                     'exception' => $exception === null ? null : [
                         'class' => $exception::class,
                         'message' => Sanitizer::message($exception),
@@ -113,7 +110,7 @@ final class TelemetryRecorder
                 'at' => self::timestamp(),
                 'worker_event' => array_filter([
                     'exit_code' => (int) $event->status,
-                    'reason' => is_object($reason) && property_exists($reason, 'value') ? $reason->value : null,
+                    'reason' => $reason?->value,
                     'connection' => $event->connectionName,
                     'queue' => $event->queue,
                     'jobs_processed' => $event->jobsProcessed,
@@ -211,10 +208,6 @@ final class TelemetryRecorder
 
     private static function timestamp(): string
     {
-        $now = \DateTimeImmutable::createFromFormat('U.u', sprintf('%.6F', microtime(true)));
-
-        return $now === false
-            ? gmdate('Y-m-d\TH:i:s\Z')
-            : $now->setTimezone(new \DateTimeZone('UTC'))->format('Y-m-d\TH:i:s.v\Z');
+        return (new \DateTimeImmutable('now', new \DateTimeZone('UTC')))->format('Y-m-d\TH:i:s.v\Z');
     }
 }
