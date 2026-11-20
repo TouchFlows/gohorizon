@@ -58,6 +58,26 @@ final class TelemetryRecorderTest extends TestCase
         self::assertStringContainsString('boom at /srv/app/x.php', $encoded);
     }
 
+    public function test_an_exception_is_carried_to_the_terminal_record(): void
+    {
+        $publisher = new RecordingPublisher();
+        $recorder = $this->recorder($publisher, batchSize: 1000);
+        $job = $this->job();
+
+        $recorder->jobStarted(new JobProcessing('redis', $job));
+        $recorder->jobExceptionOccurred($job, new RuntimeException('boom'));
+        self::assertSame([], $publisher->events, 'an exception alone is not a terminal event');
+
+        $recorder->jobFinished($job, 'released');
+        $recorder->flush();
+
+        self::assertCount(1, $publisher->events);
+        $event = $publisher->events[0];
+        self::assertSame('released', $event['job']['outcome']);
+        self::assertSame(RuntimeException::class, $event['job']['exception']['class']);
+        self::assertArrayHasKey('duration_ms', $event['job']);
+    }
+
     public function test_a_failing_publisher_is_counted_and_never_thrown(): void
     {
         $publisher = new FailingPublisher();

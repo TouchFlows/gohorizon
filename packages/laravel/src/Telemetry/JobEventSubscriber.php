@@ -51,8 +51,10 @@ final class JobEventSubscriber
             ])
         ));
 
+        // No record here: the job still has to be released or failed, and that event is
+        // the one terminal record for the attempt. The exception rides along with it.
         $events->listen(JobExceptionOccurred::class, fn (JobExceptionOccurred $event) => $this->guard(
-            fn () => $this->recorder->jobFinished($event->job, 'exception', $event->exception)
+            fn () => $this->recorder->jobExceptionOccurred($event->job, $event->exception)
         ));
 
         $events->listen(JobFailed::class, fn (JobFailed $event) => $this->guard(

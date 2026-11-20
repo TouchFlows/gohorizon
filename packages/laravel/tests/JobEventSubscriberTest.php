@@ -10,6 +10,7 @@ use GoHorizon\Laravel\Telemetry\TelemetryRecorder;
 use Illuminate\Container\Container;
 use Illuminate\Contracts\Queue\Job;
 use Illuminate\Events\Dispatcher;
+use Illuminate\Queue\Events\JobExceptionOccurred;
 use Illuminate\Queue\Events\JobFailed;
 use Illuminate\Queue\Events\JobProcessed;
 use Illuminate\Queue\Events\JobProcessing;
@@ -64,6 +65,37 @@ final class JobEventSubscriberTest extends TestCase
         self::assertSame('failed', $event['job']['outcome']);
         self::assertSame(RuntimeException::class, $event['job']['exception']['class']);
         self::assertStringNotContainsString('secret', (string) $event['job']['exception']['message']);
+    }
+
+    public function test_a_released_job_reports_one_record_carrying_the_exception(): void
+    {
+        [$events, $publisher] = $this->subscriber();
+        $job = $this->job();
+
+        $events->dispatch(new JobProcessing('redis', $job));
+        $events->dispatch(new JobExceptionOccurred('redis', $job, new RuntimeException('cannot reach redis://user:secret@host:6379')));
+        $events->dispatch(new JobReleasedAfterException('redis', $job, 30));
+
+        self::assertCount(1, $publisher->events, 'an exception plus a release is one attempt');
+        $event = $publisher->events[0];
+        self::assertSame('released', $event['job']['outcome']);
+        self::assertSame(30, $event['job']['backoff_seconds']);
+        self::assertSame(RuntimeException::class, $event['job']['exception']['class']);
+        self::assertStringNotContainsString('secret', (string) $event['job']['exception']['message']);
+    }
+
+    public function test_a_failed_job_reports_one_record_even_with_both_events(): void
+    {
+        [$events, $publisher] = $this->subscriber();
+        $job = $this->job();
+
+        $events->dispatch(new JobProcessing('redis', $job));
+        $events->dispatch(new JobExceptionOccurred('redis', $job, new RuntimeException('first')));
+        $events->dispatch(new JobFailed('redis', $job, new RuntimeException('second')));
+
+        self::assertCount(1, $publisher->events, 'an exception plus a failure is one attempt');
+        self::assertSame('failed', $publisher->events[0]['job']['outcome']);
+        self::assertSame('second', $publisher->events[0]['job']['exception']['message']);
     }
 
     /**

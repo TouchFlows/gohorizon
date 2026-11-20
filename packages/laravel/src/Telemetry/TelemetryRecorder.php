@@ -27,7 +27,7 @@ final class TelemetryRecorder
     /** @var list<array<string, mixed>> */
     private array $buffer = [];
 
-    /** @var array<string, float> Start time per in-flight job key. */
+    /** @var array<string, array{started_at: ?float, exception: ?Throwable}> */
     private array $inFlight = [];
 
     private int $dropped = 0;
@@ -51,7 +51,28 @@ final class TelemetryRecorder
     public function jobStarted(JobProcessing $event): void
     {
         try {
-            $this->inFlight[$this->jobKey($event->job)] = microtime(true);
+            $this->inFlight[$this->jobKey($event->job)] = [
+                'started_at' => microtime(true),
+                'exception' => null,
+            ];
+        } catch (Throwable) {
+            // Best effort only.
+        }
+    }
+
+    /**
+     * Remembers the failure instead of emitting it: Laravel fires JobExceptionOccurred
+     * before JobFailed or JobReleasedAfterException, so the terminal event is the one
+     * that carries it. Emitting on both would report a single attempt twice
+     * (docs/adr/0006).
+     */
+    public function jobExceptionOccurred(Job $job, Throwable $exception): void
+    {
+        try {
+            $key = $this->jobKey($job);
+            $entry = $this->inFlight[$key] ?? ['started_at' => null, 'exception' => null];
+            $entry['exception'] = $exception;
+            $this->inFlight[$key] = $entry;
         } catch (Throwable) {
             // Best effort only.
         }
@@ -61,8 +82,11 @@ final class TelemetryRecorder
     {
         try {
             $key = $this->jobKey($job);
-            $started = $this->inFlight[$key] ?? null;
+            $entry = $this->inFlight[$key] ?? null;
             unset($this->inFlight[$key]);
+
+            $started = $entry['started_at'] ?? null;
+            $exception ??= $entry['exception'] ?? null;
 
             $payload = [
                 'schema' => self::SCHEMA,
