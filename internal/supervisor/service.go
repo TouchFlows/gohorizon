@@ -16,6 +16,7 @@ import (
 	"github.com/gohorizon/gohorizon/internal/health"
 	"github.com/gohorizon/gohorizon/internal/process"
 	"github.com/gohorizon/gohorizon/internal/redis"
+	"github.com/gohorizon/gohorizon/internal/telemetry"
 	"github.com/gohorizon/gohorizon/internal/version"
 )
 
@@ -33,6 +34,7 @@ type Service struct {
 	cfg      *config.Config
 	log      *slog.Logger
 	client   *redis.Client
+	consumer *telemetry.Consumer
 	managers []*process.Manager
 	started  time.Time
 	owner    string
@@ -76,12 +78,23 @@ func New(ctx context.Context, cfg *config.Config, log *slog.Logger) (*Service, e
 		return nil, err
 	}
 
+	consumer, err := telemetry.New(client, telemetry.Spec{
+		Application: app.ID,
+		Environment: app.Environment,
+		Logger:      log,
+	})
+	if err != nil {
+		client.Close()
+		return nil, err
+	}
+
 	s := &Service{
-		cfg:     cfg,
-		log:     log,
-		client:  client,
-		started: time.Now(),
-		owner:   fmt.Sprintf("%s-%d", version.Version, time.Now().UnixNano()),
+		cfg:      cfg,
+		log:      log,
+		client:   client,
+		consumer: consumer,
+		started:  time.Now(),
+		owner:    fmt.Sprintf("%s-%d", version.Version, time.Now().UnixNano()),
 	}
 
 	for i := range app.Supervisors {
@@ -164,6 +177,17 @@ func (s *Service) Run(ctx context.Context) error {
 			}
 		}(manager)
 	}
+
+	// Telemetry is observation: Run never returns an error and never touches the
+	// workers, so a Redis outage degrades telemetry and nothing else (handoff §2.11).
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		s.consumer.Run(runCtx)
+		stats := s.consumer.Stats()
+		s.log.Info("telemetry consumer stopped", "events", stats.Events,
+			"duplicates", stats.Duplicates, "invalid", stats.Invalid, "errors", stats.Errors)
+	}()
 
 	wg.Add(1)
 	go func() {

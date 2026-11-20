@@ -18,12 +18,15 @@ Milestone 1 (proof of concept) in progress. Implemented:
 - Process supervisor: explicit state machine, per-queue fixed allocation, crash backoff,
   graceful SIGTERM with bounded SIGKILL escalation, adoption of processes left by a
   previous supervisor, exit-code classification (0/12 recycle vs crash).
+- Telemetry ingestion: a consumer group on the events stream that deduplicates by
+  event id, acknowledges what it handles and retries Redis failures without touching
+  the workers.
 - Read-only `GET /api/v1/health`.
 - `gohorizon/laravel` package: configuration, job lifecycle telemetry to a Redis Stream,
   `gohorizon:capabilities`, `gohorizon:inspect`.
 
-Not implemented yet: telemetry ingestion in Go, the React dashboard, historical metrics,
-authentication, balancing, failed-job administration.
+Not implemented yet: persisting consumed telemetry (historical metrics), the React
+dashboard, authentication, balancing, failed-job administration.
 
 ## Layout
 
@@ -33,6 +36,7 @@ internal/config        YAML loading, env expansion, validation
 internal/redis         key ownership and the typed Redis client
 internal/process       worker state machine, launch specs, process manager
 internal/adapter       gohorizon:capabilities probe and launch preflight
+internal/telemetry     events stream consumer, dedupe and counters
 internal/supervisor    lock + managers + health report
 internal/api           HTTP routes
 packages/laravel       Composer package (gohorizon/laravel)

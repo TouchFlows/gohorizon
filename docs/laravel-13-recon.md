@@ -152,8 +152,9 @@ database, not through the queue transport.
 
 ## Open items for the next slice
 
-- Go-side telemetry ingestion (consumer group, dedupe, idempotency) — the package
-  publishes, nothing consumes yet.
+- Persisting consumed telemetry: the Go consumer now reads the stream, deduplicates by
+  event id and acknowledges, but keeps counters only (metrics history is a later
+  slice).
 - Adapter-side `queue:work --json` ingestion as a fallback for applications that will
   not install the package.
 - `WorkerStopping` reason overriding exit-code inference: the reason is not consumed
