@@ -1,9 +1,9 @@
 // Package metrics persists consumed telemetry as durable per-queue aggregates.
 //
 // History lives in SQLite at storage.path (handoff §7.3/§9, docs/adr/0007): one row per
-// queue per minute, plus the event ids already counted so a replayed stream entry can
-// never be added twice. `GET /api/v1/metrics` serves it back; the dashboard itself is
-// out of scope.
+// queue per minute, rolled up into hours and days, plus the event ids already counted so
+// a replayed stream entry can never be added twice. `GET /api/v1/metrics` serves the
+// minute level back; the dashboard itself is out of scope.
 package metrics
 
 import (
@@ -181,7 +181,7 @@ func (s *Store) Close() error { return s.db.Close() }
 // Pruned reports how much history one Prune removed, per level.
 type Pruned struct {
 	Events  int64
-	Buckets int64
+	Minutes int64
 	Hourly  int64
 	Daily   int64
 }
@@ -206,7 +206,7 @@ func (s *Store) Prune(ctx context.Context, now time.Time) (Pruned, error) {
 		return Pruned{}, fmt.Errorf("count pruned event ids: %w", err)
 	}
 
-	if pruned.Buckets, err = pruneBuckets(ctx, tx, ResolutionMinute, now.Add(-s.retention.Minute)); err != nil {
+	if pruned.Minutes, err = pruneBuckets(ctx, tx, ResolutionMinute, now.Add(-s.retention.Minute)); err != nil {
 		return Pruned{}, fmt.Errorf("prune minute buckets: %w", err)
 	}
 	if pruned.Hourly, err = pruneBuckets(ctx, tx, ResolutionHourly, now.Add(-s.retention.Hourly)); err != nil {
@@ -327,10 +327,20 @@ ON CONFLICT(queue, bucket_start) DO UPDATE SET
 	timed_out = excluded.timed_out,
 	duration_ms = excluded.duration_ms`
 
-func pruneBuckets(ctx context.Context, tx *sql.Tx, resolution Resolution, cutoff time.Time) (int64, error) {
+// bucketTable maps a read or prune target to its table, rejecting anything that is not
+// one of the fixed resolutions before a name reaches SQL.
+func bucketTable(resolution Resolution) (string, error) {
 	table, ok := bucketTables[resolution]
 	if !ok {
-		return 0, fmt.Errorf("unknown metrics resolution %q", resolution)
+		return "", fmt.Errorf("unknown metrics resolution %q", resolution)
+	}
+	return table, nil
+}
+
+func pruneBuckets(ctx context.Context, tx *sql.Tx, resolution Resolution, cutoff time.Time) (int64, error) {
+	table, err := bucketTable(resolution)
+	if err != nil {
+		return 0, err
 	}
 	result, err := tx.ExecContext(ctx, "DELETE FROM "+table+" WHERE bucket_start < ?", cutoff.UTC().Unix())
 	if err != nil {
@@ -341,9 +351,9 @@ func pruneBuckets(ctx context.Context, tx *sql.Tx, resolution Resolution, cutoff
 
 // Buckets returns a queue's history at one resolution in [from, to), oldest first.
 func (s *Store) Buckets(ctx context.Context, resolution Resolution, queue string, from, to time.Time) ([]Bucket, error) {
-	table, ok := bucketTables[resolution]
-	if !ok {
-		return nil, fmt.Errorf("unknown metrics resolution %q", resolution)
+	table, err := bucketTable(resolution)
+	if err != nil {
+		return nil, err
 	}
 	rows, err := s.db.QueryContext(ctx, `
 SELECT bucket_start, processed, released, failed, timed_out, duration_ms

@@ -9,7 +9,12 @@ import (
 
 func openStore(t *testing.T, path string) *Store {
 	t.Helper()
-	store, err := Open(path, DefaultRetention())
+	return openStoreWithRetention(t, path, DefaultRetention())
+}
+
+func openStoreWithRetention(t *testing.T, path string, retention Retention) *Store {
+	t.Helper()
+	store, err := Open(path, retention)
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
@@ -165,7 +170,7 @@ func TestPruneDropsHistoryPastTheHandoffWindows(t *testing.T) {
 		t.Fatalf("Prune: %v", err)
 	}
 	// Two ids expire (72h) but only one bucket (7 days): the 4-day-old aggregate stays.
-	if pruned.Events != 2 || pruned.Buckets != 1 {
+	if pruned.Events != 2 || pruned.Minutes != 1 {
 		t.Errorf("pruned = %+v, want 2 event ids and 1 bucket", pruned)
 	}
 
@@ -185,7 +190,7 @@ func TestPruneDropsHistoryPastTheHandoffWindows(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Prune again: %v", err)
 	}
-	if again.Events != 0 || again.Buckets != 0 {
+	if again.Events != 0 || again.Minutes != 0 {
 		t.Errorf("second prune = %+v, want nothing left to remove", again)
 	}
 }
@@ -211,7 +216,7 @@ func TestPruneKeepsRowsJustInsideTheWindow(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Prune: %v", err)
 	}
-	if pruned.Events != 1 || pruned.Buckets != 0 {
+	if pruned.Events != 1 || pruned.Minutes != 0 {
 		t.Errorf("pruned = %+v, want only the 7-day-old event id removed", pruned)
 	}
 
@@ -369,11 +374,7 @@ func TestRollupKeepsHistoryPastTheMinuteWindow(t *testing.T) {
 }
 
 func TestPruneUsesTheConfiguredRawWindow(t *testing.T) {
-	store, err := Open(filepath.Join(t.TempDir(), "metrics.db"), Retention{Raw: 24 * time.Hour})
-	if err != nil {
-		t.Fatalf("Open: %v", err)
-	}
-	t.Cleanup(func() { _ = store.Close() })
+	store := openStoreWithRetention(t, filepath.Join(t.TempDir(), "metrics.db"), Retention{Raw: 24 * time.Hour})
 	now := time.Date(2026, 11, 20, 12, 0, 0, 0, time.UTC)
 
 	// 30 hours old: past the configured 24-hour raw window, inside the 72-hour default,
@@ -385,7 +386,7 @@ func TestPruneUsesTheConfiguredRawWindow(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Prune: %v", err)
 	}
-	if pruned.Events != 1 || pruned.Buckets != 0 {
+	if pruned.Events != 1 || pruned.Minutes != 0 {
 		t.Errorf("pruned = %+v, want only the id removed by the 24-hour window", pruned)
 	}
 }
@@ -397,11 +398,7 @@ func TestPruneUsesTheConfiguredRetentionPerLevel(t *testing.T) {
 		Hourly: 72 * time.Hour,
 		Daily:  90 * time.Hour,
 	}
-	store, err := Open(filepath.Join(t.TempDir(), "metrics.db"), retention)
-	if err != nil {
-		t.Fatalf("Open: %v", err)
-	}
-	t.Cleanup(func() { _ = store.Close() })
+	store := openStoreWithRetention(t, filepath.Join(t.TempDir(), "metrics.db"), retention)
 	ctx := context.Background()
 	now := time.Date(2026, 11, 20, 12, 0, 0, 0, time.UTC)
 
@@ -419,7 +416,7 @@ func TestPruneUsesTheConfiguredRetentionPerLevel(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Prune: %v", err)
 	}
-	if pruned.Events != 1 || pruned.Buckets != 1 || pruned.Hourly != 1 || pruned.Daily != 0 {
+	if pruned.Events != 1 || pruned.Minutes != 1 || pruned.Hourly != 1 || pruned.Daily != 0 {
 		t.Fatalf("pruned = %+v, want the id, minute and hour gone but the day kept", pruned)
 	}
 
