@@ -45,20 +45,13 @@ func NewRouter(provider Provider, log *slog.Logger) http.Handler {
 	return r
 }
 
+// metricsResponse carries the store's buckets unchanged; their JSON tags are the wire
+// shape, so there is no second copy of the same fields to keep in step.
 type metricsResponse struct {
-	Queue   string          `json:"queue"`
-	From    time.Time       `json:"from"`
-	To      time.Time       `json:"to"`
-	Buckets []bucketPayload `json:"buckets"`
-}
-
-type bucketPayload struct {
-	Start      time.Time `json:"start"`
-	Processed  int64     `json:"processed"`
-	Released   int64     `json:"released"`
-	Failed     int64     `json:"failed"`
-	TimedOut   int64     `json:"timed_out"`
-	DurationMS int64     `json:"duration_ms"`
+	Queue   string           `json:"queue"`
+	From    time.Time        `json:"from"`
+	To      time.Time        `json:"to"`
+	Buckets []metrics.Bucket `json:"buckets"`
 }
 
 // metricsHistory reads one queue's persisted minute buckets for [from, to) from the
@@ -109,23 +102,10 @@ func metricsHistory(provider Provider, log *slog.Logger) http.HandlerFunc {
 			return
 		}
 
-		payload := metricsResponse{
-			Queue:   queue,
-			From:    from,
-			To:      to,
-			Buckets: make([]bucketPayload, 0, len(buckets)),
+		if buckets == nil {
+			buckets = []metrics.Bucket{} // an empty range is [], never null
 		}
-		for _, bucket := range buckets {
-			payload.Buckets = append(payload.Buckets, bucketPayload{
-				Start:      bucket.Start,
-				Processed:  bucket.Processed,
-				Released:   bucket.Released,
-				Failed:     bucket.Failed,
-				TimedOut:   bucket.TimedOut,
-				DurationMS: bucket.DurationMS,
-			})
-		}
-		writeJSON(w, http.StatusOK, payload)
+		writeJSON(w, http.StatusOK, metricsResponse{Queue: queue, From: from, To: to, Buckets: buckets})
 	}
 }
 

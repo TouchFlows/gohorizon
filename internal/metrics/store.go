@@ -57,14 +57,15 @@ var outcomeColumns = map[string]string{
 }
 
 // Bucket is one queue's aggregate for one minute. The job count is the sum of the
-// outcome counters, so it is not stored twice.
+// outcome counters, so it is not stored twice. Its JSON tags are the wire shape of
+// `GET /api/v1/metrics`.
 type Bucket struct {
-	Start      time.Time
-	Processed  int64
-	Released   int64
-	Failed     int64
-	TimedOut   int64
-	DurationMS int64
+	Start      time.Time `json:"start"`
+	Processed  int64     `json:"processed"`
+	Released   int64     `json:"released"`
+	Failed     int64     `json:"failed"`
+	TimedOut   int64     `json:"timed_out"`
+	DurationMS int64     `json:"duration_ms"`
 }
 
 // ErrDisabled reports that history was never opened: storage.driver is not sqlite, or

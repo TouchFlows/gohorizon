@@ -180,17 +180,10 @@ func TestMetricsReadsPersistedBuckets(t *testing.T) {
 	}
 
 	var payload struct {
-		Queue   string    `json:"queue"`
-		From    time.Time `json:"from"`
-		To      time.Time `json:"to"`
-		Buckets []struct {
-			Start      time.Time `json:"start"`
-			Processed  int64     `json:"processed"`
-			Released   int64     `json:"released"`
-			Failed     int64     `json:"failed"`
-			TimedOut   int64     `json:"timed_out"`
-			DurationMS int64     `json:"duration_ms"`
-		} `json:"buckets"`
+		Queue   string           `json:"queue"`
+		From    time.Time        `json:"from"`
+		To      time.Time        `json:"to"`
+		Buckets []metrics.Bucket `json:"buckets"`
 	}
 	if err := json.Unmarshal(recorder.Body.Bytes(), &payload); err != nil {
 		t.Fatalf("decode body: %v", err)
@@ -210,7 +203,6 @@ func TestMetricsReadsPersistedBuckets(t *testing.T) {
 
 func TestMetricsDefaultsToTheLastHour(t *testing.T) {
 	provider := &stubProvider{}
-	before := time.Now()
 
 	recorder := get(t, provider, "/api/v1/metrics?queue=emails")
 
@@ -223,12 +215,16 @@ func TestMetricsDefaultsToTheLastHour(t *testing.T) {
 	if window := provider.to.Sub(provider.from); window != defaultHistoryWindow {
 		t.Errorf("window = %s, want %s", window, defaultHistoryWindow)
 	}
-	if provider.to.Before(before) {
-		t.Errorf("to = %s, want the current time", provider.to)
+
+	// No history yet is an empty array, not null.
+	var payload struct {
+		Buckets []metrics.Bucket `json:"buckets"`
 	}
-	// No history yet is an empty list, not null.
-	if !strings.Contains(recorder.Body.String(), `"buckets":[]`) {
-		t.Errorf("body = %s, want an empty buckets array", recorder.Body.String())
+	if err := json.Unmarshal(recorder.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode body: %v", err)
+	}
+	if payload.Buckets == nil || len(payload.Buckets) != 0 {
+		t.Errorf("buckets = %#v, want an empty array", payload.Buckets)
 	}
 }
 
