@@ -24,7 +24,7 @@ Milestone 1 (proof of concept) in progress. Implemented:
 - Historical metrics: every consumed `job.finished` event is aggregated into per-queue
   minute buckets in SQLite at `storage.path`, deduplicated by event id, so history
   survives a restart. Event ids are pruned after 72 hours and minute buckets after 7
-  days (handoff §9), at startup and hourly. Reading it over HTTP is a later slice.
+  days (handoff §9), at startup and hourly. `GET /api/v1/metrics` reads it back.
 - Queue depth: every 15 seconds the service runs `gohorizon:inspect` for the queues
   its supervisors launch and reports each queue's `pending`, `reserved` and `delayed`
   counts on `GET /api/v1/health`. Counts a driver cannot report are `null`, and a
@@ -34,8 +34,15 @@ Milestone 1 (proof of concept) in progress. Implemented:
 - `gohorizon/laravel` package: configuration, job lifecycle telemetry to a Redis Stream,
   `gohorizon:capabilities`, `gohorizon:inspect`.
 
-Not implemented yet: the metrics API and React dashboard, authentication, balancing,
-failed-job administration, Prometheus exposition.
+`GET /api/v1/metrics?queue=default[&from=…&to=…]` returns the persisted minute buckets
+for one queue as `{queue, from, to, buckets: [{start, processed, released, failed,
+timed_out, duration_ms}]}`, oldest first. The range is `[from, to)` in RFC 3339 and
+defaults to the last hour; a missing queue or a malformed range is a 400, unavailable
+history is a 503, and a store failure is a 500 that keeps the database path out of the
+response.
+
+Not implemented yet: the React dashboard, authentication, balancing, failed-job
+administration, Prometheus exposition.
 
 ## Layout
 

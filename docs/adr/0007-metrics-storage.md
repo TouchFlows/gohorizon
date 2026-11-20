@@ -39,9 +39,9 @@ Two constraints shape the storage:
    service logs a warning and supervises without history. A metrics outage must not take
    healthy workers down (contrast the capabilities preflight, which protects job
    correctness and therefore does refuse to start).
-6. **No dashboard coupling.** Nothing in this package formats or serves the data; the
-   read API and UI are later slices. `Buckets` exists so history can be read back and
-   tested.
+6. **No dashboard coupling.** This package formats nothing. `GET /api/v1/metrics`
+   serves one queue's `Buckets` over `[from, to)`, read-only; the dashboard remains a
+   later slice.
 7. **Bounded growth follows handoff §9.** `Prune` deletes event ids older than 72 hours
    (the handoff's 24–72 hour raw window, at its upper bound, so an outage still
    recognises replays) and minute buckets older than 7 days. It runs at startup and then
@@ -61,5 +61,6 @@ Two constraints shape the storage:
   `telemetry.retention` window is far shorter than 72 hours in practice.
 - Schema changes before the first release are applied by recreating the database;
   golang-migrate (handoff §5) arrives with the first upgrade that must preserve data.
-- A single connection (`SetMaxOpenConns(1)`) serialises writes; that is enough for one
-  consumer and is revisited when the read API arrives.
+- A single connection (`SetMaxOpenConns(1)`) serialises writes and the read API's
+  queries; that is enough for one consumer and a bounded range per request, and is
+  revisited if read latency starts delaying ingestion.

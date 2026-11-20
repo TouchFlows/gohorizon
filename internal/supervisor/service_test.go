@@ -16,6 +16,7 @@ import (
 
 	"github.com/gohorizon/gohorizon/internal/adapter"
 	"github.com/gohorizon/gohorizon/internal/config"
+	"github.com/gohorizon/gohorizon/internal/metrics"
 	"github.com/gohorizon/gohorizon/internal/process"
 	"github.com/gohorizon/gohorizon/internal/redis"
 	"github.com/gohorizon/gohorizon/internal/telemetry"
@@ -288,6 +289,33 @@ func TestQueueInspectionFailureLeavesTheStatusAlone(t *testing.T) {
 	}
 	if len(report.Queues.Depths) != 1 || report.Queues.Depths[0].Pending != nil {
 		t.Errorf("depths = %+v, want the queue with its unreported counts left nil", report.Queues.Depths)
+	}
+}
+
+func TestBucketsReadsPersistedHistory(t *testing.T) {
+	store, err := metrics.Open(filepath.Join(t.TempDir(), "metrics.db"))
+	if err != nil {
+		t.Fatalf("open metrics store: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+
+	at := time.Now().Add(-2 * time.Minute)
+	if err := store.RecordJob(context.Background(), "event-1", "emails", "processed", 120, at); err != nil {
+		t.Fatalf("seed metric: %v", err)
+	}
+
+	service := &Service{store: store}
+	buckets, err := service.Buckets(context.Background(), "emails", at.Add(-time.Hour), time.Now())
+	if err != nil {
+		t.Fatalf("Buckets: %v", err)
+	}
+	if len(buckets) != 1 || buckets[0].Processed != 1 || buckets[0].DurationMS != 120 {
+		t.Fatalf("buckets = %+v, want the recorded job", buckets)
+	}
+
+	// A service whose store never opened says so instead of answering "no jobs".
+	if _, err := (&Service{}).Buckets(context.Background(), "emails", time.Now().Add(-time.Hour), time.Now()); !errors.Is(err, metrics.ErrDisabled) {
+		t.Errorf("error = %v, want ErrDisabled", err)
 	}
 }
 

@@ -190,6 +190,16 @@ func New(ctx context.Context, cfg *config.Config, log *slog.Logger) (*Service, e
 	return s, nil
 }
 
+// Buckets reads persisted queue history for the read-only metrics endpoint. A service
+// whose store never opened answers ErrDisabled instead of an empty list that would look
+// like "no jobs ran" (docs/adr/0007).
+func (s *Service) Buckets(ctx context.Context, queue string, from, to time.Time) ([]metrics.Bucket, error) {
+	if s.store == nil {
+		return nil, metrics.ErrDisabled
+	}
+	return s.store.Buckets(ctx, queue, from, to)
+}
+
 func (s *Service) Close() error {
 	err := s.client.Close()
 	if s.store != nil {

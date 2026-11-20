@@ -2,8 +2,8 @@
 //
 // History lives in SQLite at storage.path (handoff §7.3/§9, docs/adr/0007): one row per
 // queue per minute, plus the event ids already counted so a replayed stream entry can
-// never be added twice. Reading it back is what a later API or dashboard will do; the
-// dashboard itself is out of scope.
+// never be added twice. `GET /api/v1/metrics` serves it back; the dashboard itself is
+// out of scope.
 package metrics
 
 import (
@@ -66,6 +66,10 @@ type Bucket struct {
 	TimedOut   int64
 	DurationMS int64
 }
+
+// ErrDisabled reports that history was never opened: storage.driver is not sqlite, or
+// the database could not be opened at startup (the service supervises anyway).
+var ErrDisabled = errors.New("metrics history is disabled")
 
 // Store is the SQLite-backed metrics history.
 type Store struct {
