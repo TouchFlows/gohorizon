@@ -21,9 +21,18 @@ import (
 // bucketSize is the aggregation window: one row per queue per minute of traffic.
 const bucketSize = time.Minute
 
+// Retention follows handoff §9: raw telemetry lives 24–72 hours (the upper bound, so a
+// consumer that was down still recognises replays), minute aggregates 7 days. Hourly
+// (30 days) and daily (12 months) rollups do not exist yet, so nothing prunes them.
+const (
+	rawRetention    = 72 * time.Hour
+	minuteRetention = 7 * 24 * time.Hour
+)
+
 const schema = `
 CREATE TABLE IF NOT EXISTS recorded_events (
-	id TEXT PRIMARY KEY
+	id TEXT PRIMARY KEY,
+	recorded_at INTEGER NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS queue_buckets (
@@ -91,6 +100,46 @@ func Open(path string) (*Store, error) {
 
 func (s *Store) Close() error { return s.db.Close() }
 
+// Pruned reports how much history one Prune removed.
+type Pruned struct {
+	Events  int64
+	Buckets int64
+}
+
+// Prune drops raw event ids and minute buckets older than the retention windows. It is
+// the only bound on the database's growth, so it runs at startup and hourly.
+func (s *Store) Prune(ctx context.Context, now time.Time) (Pruned, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return Pruned{}, fmt.Errorf("begin prune transaction: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	var pruned Pruned
+	result, err := tx.ExecContext(ctx, `DELETE FROM recorded_events WHERE recorded_at < ?`,
+		now.Add(-rawRetention).UTC().Unix())
+	if err != nil {
+		return Pruned{}, fmt.Errorf("prune recorded event ids: %w", err)
+	}
+	if pruned.Events, err = result.RowsAffected(); err != nil {
+		return Pruned{}, fmt.Errorf("count pruned event ids: %w", err)
+	}
+
+	result, err = tx.ExecContext(ctx, `DELETE FROM queue_buckets WHERE bucket_start < ?`,
+		now.Add(-minuteRetention).UTC().Unix())
+	if err != nil {
+		return Pruned{}, fmt.Errorf("prune queue buckets: %w", err)
+	}
+	if pruned.Buckets, err = result.RowsAffected(); err != nil {
+		return Pruned{}, fmt.Errorf("count pruned queue buckets: %w", err)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return Pruned{}, fmt.Errorf("commit prune transaction: %w", err)
+	}
+	return pruned, nil
+}
+
 // RecordJob adds one finished job to its queue's minute bucket. It is idempotent by
 // event id: the stream is at-least-once, so a replay after a crash must not double
 // count. It satisfies the telemetry consumer's sink.
@@ -113,7 +162,8 @@ func (s *Store) RecordJob(ctx context.Context, eventID, queue, outcome string, d
 	defer func() { _ = tx.Rollback() }()
 
 	result, err := tx.ExecContext(ctx,
-		`INSERT INTO recorded_events (id) VALUES (?) ON CONFLICT(id) DO NOTHING`, eventID)
+		`INSERT INTO recorded_events (id, recorded_at) VALUES (?, ?) ON CONFLICT(id) DO NOTHING`,
+		eventID, at.UTC().Unix())
 	if err != nil {
 		return fmt.Errorf("record event id: %w", err)
 	}

@@ -154,8 +154,8 @@ database, not through the queue transport.
 
 - Persisting consumed telemetry: the consumer aggregates every `job.finished` event
   into per-queue minute buckets in SQLite (`storage.path`) and records event ids so a
-  replay is not counted twice (ADR 0007). Exposing that history over HTTP and the
-  retention windows are later slices.
+  replay is not counted twice (ADR 0007). Ids are pruned after 72 hours and minute
+  buckets after 7 days. Exposing that history over HTTP is a later slice.
 - Adapter-side `queue:work --json` ingestion as a fallback for applications that will
   not install the package.
 Wired so far: `retry_after` and `pcntl` are validated against `--timeout` through

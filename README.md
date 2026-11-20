@@ -23,7 +23,8 @@ Milestone 1 (proof of concept) in progress. Implemented:
   the workers. Its counters and live failure state are on `GET /api/v1/health`.
 - Historical metrics: every consumed `job.finished` event is aggregated into per-queue
   minute buckets in SQLite at `storage.path`, deduplicated by event id, so history
-  survives a restart. Reading it over HTTP is a later slice.
+  survives a restart. Event ids are pruned after 72 hours and minute buckets after 7
+  days (handoff §9), at startup and hourly. Reading it over HTTP is a later slice.
 - Read-only `GET /api/v1/health`.
 - `gohorizon/laravel` package: configuration, job lifecycle telemetry to a Redis Stream,
   `gohorizon:capabilities`, `gohorizon:inspect`.

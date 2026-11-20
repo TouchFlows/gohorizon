@@ -25,13 +25,11 @@ Two constraints shape the storage:
    `queue_buckets(queue, bucket_start, processed, released, failed, timed_out,
    duration_ms)`, one row per queue per minute (UTC). The job count is the sum of the
    outcome counters, so it is not stored twice. Minutes keep recent history useful at a
-   row cost of one per queue per busy minute; coarser rollups and retention windows from
-   handoff §9 are deliberately not implemented yet.
-3. **Exactly-once by event id.** `recorded_events(id)` is inserted in the same
-   transaction as the bucket update, and a duplicate insert aborts the update. This makes
-   the sink idempotent across restarts, which is what allows a safe retry. The table
-   carries no timestamp yet: nothing prunes it, and the column arrives with the retention
-   windows that would use it.
+   row cost of one per queue per busy minute; the coarser hourly and daily rollups from
+   handoff §9 are not implemented yet.
+3. **Exactly-once by event id.** `recorded_events(id, recorded_at)` is inserted in the
+   same transaction as the bucket update, and a duplicate insert aborts the update. This
+   makes the sink idempotent across restarts, which is what allows a safe retry.
 4. **The sink failure policy differs from the ack policy.** A failed write counts as a
    telemetry error and leaves the batch unacknowledged, so the drain path retries it
    instead of dropping the metric. Ingestion backs off; no worker is affected. The event
@@ -44,6 +42,13 @@ Two constraints shape the storage:
 6. **No dashboard coupling.** Nothing in this package formats or serves the data; the
    read API and UI are later slices. `Buckets` exists so history can be read back and
    tested.
+7. **Bounded growth follows handoff §9.** `Prune` deletes event ids older than 72 hours
+   (the handoff's 24–72 hour raw window, at its upper bound, so an outage still
+   recognises replays) and minute buckets older than 7 days. It runs at startup and then
+   hourly, which bounds the overshoot to one interval. Hourly (30 days) and daily (12
+   months) rollups do not exist yet, so there is nothing to prune for them. The windows
+   are constants for now; they become configuration when the rollups that need their own
+   windows arrive.
 
 ## Consequences
 
@@ -51,7 +56,10 @@ Two constraints shape the storage:
   not counted twice.
 - Per-queue aggregates are the unit the handoff's balancing and dashboard work will read;
   no schema change is needed for a per-queue view, only for new rollup granularities.
-- `recorded_events` grows one row per consumed event. Pruning with the retention windows
-  is deferred with them; it needs the event timestamp added back when it lands.
+- The database is bounded: ids live 72 hours, minute buckets 7 days. An event
+  redelivered after its id was pruned would be counted again, but the stream's own
+  `telemetry.retention` window is far shorter than 72 hours in practice.
+- Schema changes before the first release are applied by recreating the database;
+  golang-migrate (handoff §5) arrives with the first upgrade that must preserve data.
 - A single connection (`SetMaxOpenConns(1)`) serialises writes; that is enough for one
   consumer and is revisited when the read API arrives.

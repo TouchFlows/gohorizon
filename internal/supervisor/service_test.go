@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/gohorizon/gohorizon/internal/config"
+	"github.com/gohorizon/gohorizon/internal/metrics"
 	"github.com/gohorizon/gohorizon/internal/process"
 	"github.com/gohorizon/gohorizon/internal/redis"
 	"github.com/gohorizon/gohorizon/internal/telemetry"
@@ -328,6 +329,34 @@ func TestServiceConsumesTelemetryEndToEnd(t *testing.T) {
 	}
 	if buckets[0].DurationMS != 1500 {
 		t.Errorf("duration = %d, want the reported 1500ms", buckets[0].DurationMS)
+	}
+}
+
+func TestServicePrunesOldMetricsHistory(t *testing.T) {
+	store, err := metrics.Open(filepath.Join(t.TempDir(), "metrics.db"))
+	if err != nil {
+		t.Fatalf("metrics.Open: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := store.Close(); err != nil {
+			t.Errorf("Close: %v", err)
+		}
+	})
+
+	old := time.Now().Add(-8 * 24 * time.Hour)
+	if err := store.RecordJob(context.Background(), "old", "emails", "processed", 1, old); err != nil {
+		t.Fatalf("RecordJob: %v", err)
+	}
+
+	service := &Service{store: store, log: slog.New(slog.NewTextHandler(io.Discard, nil))}
+	service.pruneOnce(context.Background())
+
+	buckets, err := store.Buckets(context.Background(), "emails", old.Add(-time.Hour), time.Now())
+	if err != nil {
+		t.Fatalf("Buckets: %v", err)
+	}
+	if len(buckets) != 0 {
+		t.Errorf("buckets = %+v, want the 8-day-old aggregate pruned", buckets)
 	}
 }
 

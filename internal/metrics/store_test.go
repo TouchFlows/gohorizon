@@ -141,6 +141,97 @@ func TestHistorySurvivesReopen(t *testing.T) {
 	}
 }
 
+func TestPruneDropsHistoryPastTheHandoffWindows(t *testing.T) {
+	store := openStore(t, filepath.Join(t.TempDir(), "metrics.db"))
+	ctx := context.Background()
+	now := time.Date(2026, 11, 20, 12, 0, 0, 0, time.UTC)
+
+	records := []struct {
+		id   string
+		at   time.Time
+		note string
+	}{
+		{"fresh", now.Add(-time.Hour), "within both windows"},
+		{"raw-expired", now.Add(-rawRetention - time.Hour), "id expired, aggregate stays"},
+		{"minute-expired", now.Add(-minuteRetention - time.Hour), "both expired"},
+	}
+	for _, record := range records {
+		if err := store.RecordJob(ctx, record.id, "emails", "processed", 10, record.at); err != nil {
+			t.Fatalf("RecordJob(%s): %v", record.id, err)
+		}
+	}
+
+	pruned, err := store.Prune(ctx, now)
+	if err != nil {
+		t.Fatalf("Prune: %v", err)
+	}
+	// Two ids expire (72h) but only one bucket (7 days): the 4-day-old aggregate stays.
+	if pruned.Events != 2 || pruned.Buckets != 1 {
+		t.Errorf("pruned = %+v, want 2 event ids and 1 bucket", pruned)
+	}
+
+	buckets, err := store.Buckets(ctx, "emails", now.Add(-minuteRetention), now)
+	if err != nil {
+		t.Fatalf("Buckets: %v", err)
+	}
+	if len(buckets) != 2 {
+		t.Fatalf("buckets = %d, want the fresh and the 4-day-old minute", len(buckets))
+	}
+	if totalJobs(buckets[len(buckets)-1]) != 1 || buckets[len(buckets)-1].DurationMS != 10 {
+		t.Errorf("newest bucket = %+v, want the fresh job", buckets[len(buckets)-1])
+	}
+
+	// Pruning is idempotent: a second pass finds nothing to do.
+	again, err := store.Prune(ctx, now)
+	if err != nil {
+		t.Fatalf("Prune again: %v", err)
+	}
+	if again.Events != 0 || again.Buckets != 0 {
+		t.Errorf("second prune = %+v, want nothing left to remove", again)
+	}
+}
+
+func TestPruneKeepsRowsJustInsideTheWindow(t *testing.T) {
+	store := openStore(t, filepath.Join(t.TempDir(), "metrics.db"))
+	ctx := context.Background()
+	now := time.Date(2026, 11, 20, 12, 0, 0, 0, time.UTC)
+
+	// One second inside the raw window: its id survives, so a replay is still absorbed.
+	rawEdge := now.Add(-rawRetention + time.Second)
+	if err := store.RecordJob(ctx, "raw-edge", "emails", "processed", 10, rawEdge); err != nil {
+		t.Fatalf("RecordJob: %v", err)
+	}
+	// One second inside the minute window: the aggregate stays even though its id is
+	// past the 72-hour raw window (the documented tradeoff).
+	bucketEdge := now.Add(-minuteRetention + time.Second)
+	if err := store.RecordJob(ctx, "bucket-edge", "emails", "processed", 10, bucketEdge); err != nil {
+		t.Fatalf("RecordJob: %v", err)
+	}
+
+	pruned, err := store.Prune(ctx, now)
+	if err != nil {
+		t.Fatalf("Prune: %v", err)
+	}
+	if pruned.Events != 1 || pruned.Buckets != 0 {
+		t.Errorf("pruned = %+v, want only the 7-day-old event id removed", pruned)
+	}
+
+	if err := store.RecordJob(ctx, "raw-edge", "emails", "processed", 10, rawEdge); err != nil {
+		t.Fatalf("RecordJob replay: %v", err)
+	}
+	buckets, err := store.Buckets(ctx, "emails", now.Add(-minuteRetention), now)
+	if err != nil {
+		t.Fatalf("Buckets: %v", err)
+	}
+	var jobs int64
+	for _, bucket := range buckets {
+		jobs += totalJobs(bucket)
+	}
+	if jobs != 2 {
+		t.Errorf("jobs = %d over %d buckets, want both aggregates and the replay absorbed", jobs, len(buckets))
+	}
+}
+
 func TestOpenCreatesTheParentDirectory(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "nested", "state", "metrics.db")
 

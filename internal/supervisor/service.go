@@ -25,6 +25,10 @@ const (
 	lockTTL     = 30 * time.Second
 	lockRenew   = 10 * time.Second
 	lockTimeout = 5 * time.Second
+
+	// pruneInterval bounds how far the metrics database can outgrow its retention
+	// windows between two prune passes.
+	pruneInterval = time.Hour
 )
 
 // ErrLocked is returned when another instance owns the supervisor lock. Startup
@@ -175,6 +179,38 @@ func (s *Service) Close() error {
 	return err
 }
 
+// pruneLoop keeps the metrics database from growing without bound: it prunes on startup
+// and then hourly (docs/adr/0007). It is a no-op when history is disabled.
+func (s *Service) pruneLoop(ctx context.Context) {
+	if s.store == nil {
+		return
+	}
+	s.pruneOnce(ctx)
+	ticker := time.NewTicker(pruneInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			s.pruneOnce(ctx)
+		}
+	}
+}
+
+func (s *Service) pruneOnce(ctx context.Context) {
+	pruneCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	pruned, err := s.store.Prune(pruneCtx, time.Now())
+	if err != nil {
+		s.log.Warn("metrics retention pruning failed", "error", err)
+		return
+	}
+	if pruned.Events > 0 || pruned.Buckets > 0 {
+		s.log.Info("pruned metrics history", "events", pruned.Events, "buckets", pruned.Buckets)
+	}
+}
+
 // noteStopReason hands a reported WorkerStopping reason to the manager that owns the
 // worker. An unmatched reason belongs to a worker this instance no longer tracks.
 func (s *Service) noteStopReason(worker, reason string) {
@@ -243,6 +279,12 @@ func (s *Service) Run(ctx context.Context) error {
 	go func() {
 		defer wg.Done()
 		s.renewLoop(runCtx)
+	}()
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		s.pruneLoop(runCtx)
 	}()
 
 	wg.Wait()
