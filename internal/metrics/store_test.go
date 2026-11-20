@@ -25,6 +25,10 @@ func at(minute int) time.Time {
 	return time.Date(2026, 11, 20, 10, minute, 30, 0, time.UTC)
 }
 
+func totalJobs(bucket Bucket) int64 {
+	return bucket.Processed + bucket.Released + bucket.Failed + bucket.TimedOut
+}
+
 func TestRecordAggregatesPerQueuePerMinuteAndOutcome(t *testing.T) {
 	store := openStore(t, filepath.Join(t.TempDir(), "metrics.db"))
 	ctx := context.Background()
@@ -56,16 +60,16 @@ func TestRecordAggregatesPerQueuePerMinuteAndOutcome(t *testing.T) {
 		t.Fatalf("emails buckets = %d, want 2 (one per minute)", len(emails))
 	}
 	first := emails[0]
-	if first.Jobs != 3 || first.Processed != 2 || first.Failed != 1 || first.Released != 0 {
+	if totalJobs(first) != 3 || first.Processed != 2 || first.Failed != 1 || first.Released != 0 {
 		t.Errorf("first bucket = %+v, want 3 jobs, 2 processed, 1 failed", first)
 	}
 	if first.DurationMS != 2500 {
 		t.Errorf("first bucket duration = %d, want 2500", first.DurationMS)
 	}
-	if !first.Start.Equal(at(1).Truncate(BucketSize)) {
+	if !first.Start.Equal(at(1).Truncate(time.Minute)) {
 		t.Errorf("bucket start = %s, want the minute of 10:01", first.Start)
 	}
-	if second := emails[1]; second.TimedOut != 1 || second.Jobs != 1 {
+	if second := emails[1]; second.TimedOut != 1 || totalJobs(second) != 1 {
 		t.Errorf("second bucket = %+v, want the timed-out job alone", second)
 	}
 
@@ -94,7 +98,7 @@ func TestRecordIsIdempotentByEventID(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Buckets: %v", err)
 	}
-	if len(buckets) != 1 || buckets[0].Jobs != 1 || buckets[0].DurationMS != 100 {
+	if len(buckets) != 1 || totalJobs(buckets[0]) != 1 || buckets[0].DurationMS != 100 {
 		t.Fatalf("buckets = %+v, want the event counted once", buckets)
 	}
 }
@@ -132,8 +136,8 @@ func TestHistorySurvivesReopen(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Buckets: %v", err)
 	}
-	if buckets[0].Jobs != 1 {
-		t.Errorf("jobs = %d, want the replayed event absorbed after restart", buckets[0].Jobs)
+	if jobs := totalJobs(buckets[0]); jobs != 1 {
+		t.Errorf("jobs = %d, want the replayed event absorbed after restart", jobs)
 	}
 }
 
