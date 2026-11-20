@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/gohorizon/gohorizon/internal/config"
+	"github.com/gohorizon/gohorizon/internal/metrics"
 	"github.com/gohorizon/gohorizon/internal/process"
 	"github.com/gohorizon/gohorizon/internal/redis"
 	"github.com/gohorizon/gohorizon/internal/telemetry"
@@ -328,6 +329,92 @@ func TestServiceConsumesTelemetryEndToEnd(t *testing.T) {
 	}
 	if buckets[0].DurationMS != 1500 {
 		t.Errorf("duration = %d, want the reported 1500ms", buckets[0].DurationMS)
+	}
+}
+
+// TestServicePrunesOldMetricsAtStartup seeds the database a previous run would have
+// left behind, then proves the running service removes what is past the retention
+// windows before it is asked to do anything.
+func TestServicePrunesOldMetricsAtStartup(t *testing.T) {
+	const address = "127.0.0.1:6379"
+
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	raw := goredis.NewClient(&goredis.Options{Addr: address})
+	defer raw.Close()
+	if err := raw.Ping(ctx).Err(); err != nil {
+		t.Skipf("redis at %s is unavailable: %v", address, err)
+	}
+
+	// The worker only has to stay up; this test is about the database.
+	t.Setenv("GOHORIZON_TEST_WORKER_EXIT", filepath.Join(t.TempDir(), "never"))
+	t.Setenv("GOHORIZON_TEST_CAPABILITIES", capabilitiesPayload("90"))
+
+	cfg := preflightConfig(t, 60)
+	cfg.Redis.Address = address
+	cfg.Applications[0].ID = "prune" + strconv.FormatInt(time.Now().UnixNano(), 36)
+	old := time.Now().Add(-8 * 24 * time.Hour)
+
+	seed, err := metrics.Open(cfg.Storage.Path)
+	if err != nil {
+		t.Fatalf("metrics.Open: %v", err)
+	}
+	if err := seed.RecordJob(ctx, "old-event", "emails", "processed", 10, old); err != nil {
+		t.Fatalf("seed old metric: %v", err)
+	}
+	if err := seed.RecordJob(ctx, "fresh-event", "emails", "processed", 10, time.Now().Add(-time.Hour)); err != nil {
+		t.Fatalf("seed fresh metric: %v", err)
+	}
+	if err := seed.Close(); err != nil {
+		t.Fatalf("close seed store: %v", err)
+	}
+
+	service, err := New(ctx, cfg, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if service.store == nil {
+		t.Fatal("metrics history was not opened, so pruning cannot run")
+	}
+	stream := service.client.Keys().Events()
+
+	runCtx, stop := context.WithCancel(ctx)
+	runDone := make(chan error, 1)
+	go func() { runDone <- service.Run(runCtx) }()
+	t.Cleanup(func() {
+		stop()
+		select {
+		case <-runDone:
+		case <-time.After(15 * time.Second):
+			t.Error("the service did not stop within 15s")
+		}
+		if err := service.Close(); err != nil {
+			t.Errorf("Close: %v", err)
+		}
+		cleanupCtx, cleanup := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cleanup()
+		_ = raw.Del(cleanupCtx, stream, service.client.Keys().SupervisorLock()).Err()
+	})
+
+	from := old.Add(-time.Hour)
+	waitUntil(t, 10*time.Second, func() bool {
+		buckets, err := service.store.Buckets(context.Background(), "emails", from, time.Now())
+		return err == nil && len(buckets) == 1
+	}, "the startup prune to remove the 8-day-old bucket")
+
+	buckets, err := service.store.Buckets(ctx, "emails", from, time.Now())
+	if err != nil {
+		t.Fatalf("read metrics history: %v", err)
+	}
+	if len(buckets) != 1 {
+		t.Fatalf("buckets = %+v, want only the bucket inside the retention window", buckets)
+	}
+	if buckets[0].Start.Equal(old.Truncate(time.Minute)) {
+		t.Error("the 8-day-old bucket survived the startup prune")
+	}
+	if buckets[0].Processed != 1 || buckets[0].DurationMS != 10 {
+		t.Errorf("bucket = %+v, want the in-window job kept", buckets[0])
 	}
 }
 
