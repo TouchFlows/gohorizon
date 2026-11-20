@@ -1,0 +1,59 @@
+version: 1
+
+server:
+  listen: "127.0.0.1:8090"
+  metrics: true
+
+storage:
+  driver: sqlite
+  path: /var/lib/gohorizon/gohorizon.db
+
+redis:
+  address: "127.0.0.1:6379"
+  # The password is read from the environment at connect time. It is never stored in
+  # this file and never logged.
+  password_env: GOHORIZON_REDIS_PASSWORD
+  db: 0
+  tls: false
+
+applications:
+  - id: production
+    name: My Laravel Application
+    path: /var/www/application
+    php: /usr/bin/php
+    artisan: artisan
+    environment: production
+    # The queue connection name passed to queue:work. Check it with
+    # php artisan gohorizon:capabilities --json before deploying.
+    redis_connection: redis
+
+    supervisors:
+      - id: default-supervisor
+        # One worker serves one queue (ADR 0005). With min: 3 the three queues below
+        # each get exactly one worker.
+        queues:
+          - default
+          - emails
+          - notifications
+
+        # v1 supports "fixed" only. Milestone 4 adds simple/auto balancing.
+        balance:
+          strategy: fixed
+
+        workers:
+          min: 3
+          max: 5
+
+        worker:
+          sleep: 3
+          tries: 3
+          timeout: 60
+          # Megabytes, or a percentage of PHP's memory_limit (Laravel 13 supports both).
+          memory: 256
+          max_jobs: 1000
+          max_time: 3600
+
+        # Must exceed worker.timeout + worker.sleep so a graceful stop can finish the
+        # job in flight. Validation enforces this.
+        shutdown_grace: 120
+        restart_backoff: 5

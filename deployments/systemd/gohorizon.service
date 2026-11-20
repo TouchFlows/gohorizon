@@ -1,0 +1,30 @@
+[Unit]
+Description=GoHorizon Laravel queue control plane
+Documentation=https://github.com/gohorizon/gohorizon
+After=network-online.target redis-server.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=gohorizon
+Group=gohorizon
+# The Redis password is read from this file, not from gohorizon.yaml.
+EnvironmentFile=-/etc/gohorizon/gohorizon.env
+ExecStart=/opt/gohorizon/gohorizon run -config /etc/gohorizon/gohorizon.yaml
+Restart=on-failure
+RestartSec=5s
+# SIGTERM asks every worker to finish its current job; ShutdownGrace + queue:work's
+# own exit path decide how long that takes. Keep this above shutdown_grace.
+TimeoutStopSec=180s
+KillMode=mixed
+LimitNOFILE=8192
+NoNewPrivileges=true
+ProtectSystem=full
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/var/lib/gohorizon /var/log/gohorizon
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

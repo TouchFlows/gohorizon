@@ -1,0 +1,43 @@
+# ADR 0004 — Single-owner lock, and what happens when Redis is down
+
+**Status:** accepted (Milestone 1)
+**Implements:** handoff §2.9, §14 (single-instance ownership lock), §14 recovery rules.
+
+## Context
+
+Two supervisors must never manage the same worker pool, and telemetry must never stop
+jobs from executing. Those two requirements pull in opposite directions at startup:
+the ownership lock needs Redis, and worker execution does not.
+
+## Decision
+
+1. **Startup requires the lock.** Before spawning any worker, the service performs
+   `SET <coord:lock:supervisor> <owner> NX PX <ttl>`. If the key exists, the service
+   exits with a distinct error ("another GoHorizon instance holds the supervisor lock")
+   and never touches the worker pool. If Redis is unreachable at startup, the service
+   exits too: starting workers without a lock could double-manage a pool, and that
+   violates the invariant the lock exists to protect.
+2. **Lock ownership is observable.** TTL is 30s; the service renews every 10s with a
+   compare-and-pexpire Lua script, so a stalled instance cannot renew someone else's
+   lock. The owner token is a random UUID per process.
+3. **Losing Redis after startup degrades, it does not stop.** Supervision is local; a
+   Redis outage means no telemetry ingestion and a stale lock, not stopped workers.
+   Renewal failures are logged once per episode and reported through `/api/v1/health`
+   as `degraded` with `lock.renewal_error`. Workers keep running, restarts keep
+   happening, and no job is touched.
+4. **A lost lock is not a reason to kill workers.** If the key disappears or changes
+   owner, the running instance keeps supervising (killing a healthy pool is worse) but
+   reports `lock.held=false` as a critical condition. Recovery is deliberate: the
+   operator restarts the service, and the startup rule in (1) applies again.
+5. All lock timings are constants in one place; there is no configuration knob for
+   them in v1 (a knob invites two instances with mismatched TTLs).
+
+## Consequences
+
+- `systemd` should use `Restart=on-failure`: a lock conflict exits non-zero and does not
+  loop forever spawning workers.
+- Redis is a startup dependency but not a runtime single point of failure for job
+  execution, which is what "the Laravel application must remain usable if GoHorizon is
+  unavailable" (handoff §15) requires.
+- Failover between two GoHorizon instances is explicitly not implemented; the lock only
+  refuses the second one.
