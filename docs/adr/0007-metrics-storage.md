@@ -23,8 +23,8 @@ Two constraints shape the storage:
    the pure-Go build chosen in handoff §5). The directory is created if missing.
 2. **Aggregates, not an event log.** `job.finished` events are folded into
    `queue_buckets(queue, bucket_start, processed, released, failed, timed_out,
-   duration_ms)`, one row per queue per minute (UTC). The job count is the sum of the
-   outcome counters, so it is not stored twice. Minutes keep recent history useful at a
+   discarded, duration_ms)`, one row per queue per minute (UTC). The job count is the
+   sum of the outcome counters, so it is not stored twice. Minutes keep recent history useful at a
    row cost of one per queue per busy minute; the coarser hourly and daily rollups from
    handoff §9 are not implemented yet.
 3. **Exactly-once by event id.** `recorded_events(id, recorded_at)` is inserted in the
@@ -67,6 +67,9 @@ Two constraints shape the storage:
   `telemetry.retention` window is far shorter than 72 hours in practice.
 - Schema changes before the first release are applied by recreating the database;
   golang-migrate (handoff §5) arrives with the first upgrade that must preserve data.
+  `Open` checks the bucket tables for their counters and refuses an older shape, so a
+  database that predates `discarded` disables history with a clear warning instead of
+  failing every write the consumer would then retry forever.
 - A single connection (`SetMaxOpenConns(1)`) serialises writes and the read API's
   queries; that is enough for one consumer and a bounded range per request, and is
   revisited if read latency starts delaying ingestion.

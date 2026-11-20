@@ -23,8 +23,11 @@ name. Laravel 13 makes that insufficient:
 1. The package emits a **terminal event per attempt**, not one event per framework
    event. `JobProcessing` opens an attempt keyed by job UUID (fallback: job id);
    the next terminal event closes it with `outcome ∈ {processed, released, failed,
-   timed_out}`. Several Laravel events may collapse into one terminal record; the
-   record carries `attempt` and `duration_ms`.
+   timed_out, discarded}` — `discarded` for a job Laravel deletes instead of running
+   (missing models, explicit `delete()`). Several Laravel events may collapse into one
+   terminal record; the record carries `attempt` and `duration_ms`. The vocabulary is
+   one contract for both halves of the product: `tests/fixtures/telemetry-outcomes.json`
+   is read by the Go and PHP test suites, so neither can add an outcome alone.
 2. Status is derived from job flags (`hasFailed()`, `isReleased()`, `isDeleted()`), not
    from the event class. `JobProcessed` alone is never "success".
 3. Event shape (Redis Stream field `payload`, JSON):
@@ -63,4 +66,7 @@ name. Laravel 13 makes that insufficient:
 
 - One event per attempt means throughput numbers do not double-count retries.
 - The schema is versioned (`schema: 1`); Go rejects unknown schemas instead of guessing.
+- `discarded` is a fifth terminal outcome, not a failure and not a success: the
+  consumer accepts it and the store keeps it in its own counter, so a deleted job is
+  visible instead of being rejected as a malformed event.
 - Losing the buffer on SIGKILL is accepted: telemetry is observation, never a job ledger.

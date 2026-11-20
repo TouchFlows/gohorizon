@@ -167,7 +167,7 @@ func TestFailingIngestionIsVisibleWithoutFailingTheEndpoint(t *testing.T) {
 func TestMetricsReadsPersistedBuckets(t *testing.T) {
 	start := time.Date(2026, 11, 20, 21, 0, 0, 0, time.UTC)
 	provider := &stubProvider{buckets: []metrics.Bucket{
-		{Start: start, Processed: 12, Released: 1, Failed: 2, TimedOut: 3, DurationMS: 4567},
+		{Start: start, Processed: 12, Released: 1, Failed: 2, TimedOut: 3, Discarded: 4, DurationMS: 4567},
 	}}
 
 	recorder := get(t, provider,
@@ -200,7 +200,7 @@ func TestMetricsReadsPersistedBuckets(t *testing.T) {
 	}
 	bucket := payload.Buckets[0]
 	if !bucket.Start.Equal(start) || bucket.Processed != 12 || bucket.Released != 1 ||
-		bucket.Failed != 2 || bucket.TimedOut != 3 || bucket.DurationMS != 4567 {
+		bucket.Failed != 2 || bucket.TimedOut != 3 || bucket.Discarded != 4 || bucket.DurationMS != 4567 {
 		t.Errorf("bucket = %+v, want the stored counters", bucket)
 	}
 }

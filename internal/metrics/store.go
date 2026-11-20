@@ -45,6 +45,7 @@ CREATE TABLE IF NOT EXISTS queue_buckets (
 	released INTEGER NOT NULL DEFAULT 0,
 	failed INTEGER NOT NULL DEFAULT 0,
 	timed_out INTEGER NOT NULL DEFAULT 0,
+	discarded INTEGER NOT NULL DEFAULT 0,
 	duration_ms INTEGER NOT NULL DEFAULT 0,
 	PRIMARY KEY (queue, bucket_start)
 );
@@ -56,6 +57,7 @@ CREATE TABLE IF NOT EXISTS queue_hourly_buckets (
 	released INTEGER NOT NULL DEFAULT 0,
 	failed INTEGER NOT NULL DEFAULT 0,
 	timed_out INTEGER NOT NULL DEFAULT 0,
+	discarded INTEGER NOT NULL DEFAULT 0,
 	duration_ms INTEGER NOT NULL DEFAULT 0,
 	PRIMARY KEY (queue, bucket_start)
 );
@@ -67,6 +69,7 @@ CREATE TABLE IF NOT EXISTS queue_daily_buckets (
 	released INTEGER NOT NULL DEFAULT 0,
 	failed INTEGER NOT NULL DEFAULT 0,
 	timed_out INTEGER NOT NULL DEFAULT 0,
+	discarded INTEGER NOT NULL DEFAULT 0,
 	duration_ms INTEGER NOT NULL DEFAULT 0,
 	PRIMARY KEY (queue, bucket_start)
 );
@@ -79,6 +82,7 @@ var outcomeColumns = map[string]string{
 	"released":  "released",
 	"failed":    "failed",
 	"timed_out": "timed_out",
+	"discarded": "discarded",
 }
 
 // Bucket is one queue's aggregate for one minute. The job count is the sum of the
@@ -90,6 +94,7 @@ type Bucket struct {
 	Released   int64     `json:"released"`
 	Failed     int64     `json:"failed"`
 	TimedOut   int64     `json:"timed_out"`
+	Discarded  int64     `json:"discarded"`
 	DurationMS int64     `json:"duration_ms"`
 }
 
@@ -173,7 +178,50 @@ func Open(path string, retention Retention) (*Store, error) {
 		_ = db.Close()
 		return nil, fmt.Errorf("migrate metrics database %s: %w", path, err)
 	}
+	// CREATE TABLE IF NOT EXISTS leaves an older table's shape alone, so a database
+	// written before a counter existed would fail every insert and read. Refusing it
+	// disables history with the service's usual warning instead of stalling ingestion on
+	// batches that can never be acknowledged (docs/adr/0007).
+	if err := requireBucketColumns(db); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("metrics database %s: %w", path, err)
+	}
 	return &Store{db: db, retention: retention.withDefaults()}, nil
+}
+
+// bucketColumns are the columns every aggregate table must have. The tables are fixed
+// literals; nothing from a request reaches this check.
+var bucketColumns = []string{
+	"queue", "bucket_start", "processed", "released", "failed", "timed_out", "discarded", "duration_ms",
+}
+
+func requireBucketColumns(db *sql.DB) error {
+	for _, table := range []string{"queue_buckets", "queue_hourly_buckets", "queue_daily_buckets"} {
+		rows, err := db.Query(`SELECT name FROM pragma_table_info(?)`, table)
+		if err != nil {
+			return fmt.Errorf("inspect table %s: %w", table, err)
+		}
+		present := make(map[string]bool)
+		for rows.Next() {
+			var name string
+			if err := rows.Scan(&name); err != nil {
+				_ = rows.Close()
+				return fmt.Errorf("inspect table %s: %w", table, err)
+			}
+			present[name] = true
+		}
+		err = rows.Err()
+		_ = rows.Close()
+		if err != nil {
+			return fmt.Errorf("inspect table %s: %w", table, err)
+		}
+		for _, column := range bucketColumns {
+			if !present[column] {
+				return fmt.Errorf("table %s predates the %q column; delete the database file to rebuild history", table, column)
+			}
+		}
+	}
+	return nil
 }
 
 func (s *Store) Close() error { return s.db.Close() }
@@ -300,9 +348,9 @@ func (s *Store) Rollup(ctx context.Context, now time.Time) error {
 // The modulo constants are time.Hour and 24 hours in seconds. The WHERE clause also keeps
 // SQLite's upsert parser from reading ON as a join constraint.
 const hourlyRollup = `
-INSERT INTO queue_hourly_buckets (queue, bucket_start, processed, released, failed, timed_out, duration_ms)
+INSERT INTO queue_hourly_buckets (queue, bucket_start, processed, released, failed, timed_out, discarded, duration_ms)
 SELECT queue, bucket_start - (bucket_start % 3600),
-	SUM(processed), SUM(released), SUM(failed), SUM(timed_out), SUM(duration_ms)
+	SUM(processed), SUM(released), SUM(failed), SUM(timed_out), SUM(discarded), SUM(duration_ms)
 FROM queue_buckets
 WHERE bucket_start < ?
 GROUP BY queue, bucket_start - (bucket_start % 3600)
@@ -311,12 +359,13 @@ ON CONFLICT(queue, bucket_start) DO UPDATE SET
 	released = excluded.released,
 	failed = excluded.failed,
 	timed_out = excluded.timed_out,
+	discarded = excluded.discarded,
 	duration_ms = excluded.duration_ms`
 
 const dailyRollup = `
-INSERT INTO queue_daily_buckets (queue, bucket_start, processed, released, failed, timed_out, duration_ms)
+INSERT INTO queue_daily_buckets (queue, bucket_start, processed, released, failed, timed_out, discarded, duration_ms)
 SELECT queue, bucket_start - (bucket_start % 86400),
-	SUM(processed), SUM(released), SUM(failed), SUM(timed_out), SUM(duration_ms)
+	SUM(processed), SUM(released), SUM(failed), SUM(timed_out), SUM(discarded), SUM(duration_ms)
 FROM queue_hourly_buckets
 WHERE bucket_start < ?
 GROUP BY queue, bucket_start - (bucket_start % 86400)
@@ -325,6 +374,7 @@ ON CONFLICT(queue, bucket_start) DO UPDATE SET
 	released = excluded.released,
 	failed = excluded.failed,
 	timed_out = excluded.timed_out,
+	discarded = excluded.discarded,
 	duration_ms = excluded.duration_ms`
 
 // bucketTable maps a read or prune target to its table, rejecting anything that is not
@@ -356,7 +406,7 @@ func (s *Store) Buckets(ctx context.Context, resolution Resolution, queue string
 		return nil, err
 	}
 	rows, err := s.db.QueryContext(ctx, `
-SELECT bucket_start, processed, released, failed, timed_out, duration_ms
+SELECT bucket_start, processed, released, failed, timed_out, discarded, duration_ms
 FROM `+table+`
 WHERE queue = ? AND bucket_start >= ? AND bucket_start < ?
 ORDER BY bucket_start`,
@@ -371,7 +421,7 @@ ORDER BY bucket_start`,
 		var bucket Bucket
 		var start int64
 		if err := rows.Scan(&start, &bucket.Processed, &bucket.Released,
-			&bucket.Failed, &bucket.TimedOut, &bucket.DurationMS); err != nil {
+			&bucket.Failed, &bucket.TimedOut, &bucket.Discarded, &bucket.DurationMS); err != nil {
 			return nil, fmt.Errorf("scan queue %q history: %w", queue, err)
 		}
 		bucket.Start = time.Unix(start, 0).UTC()

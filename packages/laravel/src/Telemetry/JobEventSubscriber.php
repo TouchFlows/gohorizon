@@ -36,17 +36,17 @@ final class JobEventSubscriber
             // JobProcessed fires for deleted/over-limit jobs too. Status comes from the
             // job flags, not from the event class.
             $outcome = match (true) {
-                $event->job->hasFailed() => 'failed',
-                $event->job->isReleased() => 'released',
-                $event->job->isDeleted() => 'discarded',
-                default => 'processed',
+                $event->job->hasFailed() => Outcome::FAILED,
+                $event->job->isReleased() => Outcome::RELEASED,
+                $event->job->isDeleted() => Outcome::DISCARDED,
+                default => Outcome::PROCESSED,
             };
 
             $this->recorder->jobFinished($event->job, $outcome);
         }));
 
         $events->listen(JobReleasedAfterException::class, fn (JobReleasedAfterException $event) => $this->guard(
-            fn () => $this->recorder->jobFinished($event->job, 'released', null, [
+            fn () => $this->recorder->jobFinished($event->job, Outcome::RELEASED, null, [
                 'backoff_seconds' => (int) $event->backoff,
             ])
         ));
@@ -58,11 +58,11 @@ final class JobEventSubscriber
         ));
 
         $events->listen(JobFailed::class, fn (JobFailed $event) => $this->guard(
-            fn () => $this->recorder->jobFinished($event->job, 'failed', $event->exception)
+            fn () => $this->recorder->jobFinished($event->job, Outcome::FAILED, $event->exception)
         ));
 
         $events->listen(JobTimedOut::class, fn (JobTimedOut $event) => $this->guard(
-            fn () => $this->recorder->jobFinished($event->job, 'timed_out')
+            fn () => $this->recorder->jobFinished($event->job, Outcome::TIMED_OUT)
         ));
 
         $events->listen(WorkerStopping::class, fn (WorkerStopping $event) => $this->guard(

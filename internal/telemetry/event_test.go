@@ -1,6 +1,10 @@
 package telemetry
 
 import (
+	"encoding/json"
+	"os"
+	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -31,6 +35,36 @@ func TestDecodeReadsTheDocumentedJobEvent(t *testing.T) {
 	}
 	if event.At.IsZero() {
 		t.Error("at was not parsed")
+	}
+}
+
+func TestOutcomesMatchTheSharedVocabulary(t *testing.T) {
+	raw, err := os.ReadFile(filepath.Join("..", "..", "tests", "fixtures", "telemetry-outcomes.json"))
+	if err != nil {
+		t.Fatalf("read the shared outcome fixture: %v", err)
+	}
+	var fixture struct {
+		Schema      int      `json:"schema"`
+		JobOutcomes []string `json:"job_outcomes"`
+	}
+	if err := json.Unmarshal(raw, &fixture); err != nil {
+		t.Fatalf("decode the shared outcome fixture: %v", err)
+	}
+	if fixture.Schema != SchemaVersion {
+		t.Errorf("fixture schema = %d, want %d", fixture.Schema, SchemaVersion)
+	}
+	if !slices.Equal(Outcomes, fixture.JobOutcomes) {
+		t.Errorf("Outcomes = %v, want the shared fixture %v", Outcomes, fixture.JobOutcomes)
+	}
+}
+
+func TestDecodeAcceptsEverySharedOutcome(t *testing.T) {
+	for _, outcome := range Outcomes {
+		t.Run(outcome, func(t *testing.T) {
+			if _, err := Decode(jobEvent("evt-"+outcome, outcome)); err != nil {
+				t.Fatalf("Decode(%s): %v", outcome, err)
+			}
+		})
 	}
 }
 

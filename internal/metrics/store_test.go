@@ -2,7 +2,12 @@ package metrics
 
 import (
 	"context"
+	"database/sql"
+	"encoding/json"
+	"os"
 	"path/filepath"
+	"slices"
+	"strings"
 	"testing"
 	"time"
 )
@@ -31,7 +36,83 @@ func at(minute int) time.Time {
 }
 
 func totalJobs(bucket Bucket) int64 {
-	return bucket.Processed + bucket.Released + bucket.Failed + bucket.TimedOut
+	return bucket.Processed + bucket.Released + bucket.Failed + bucket.TimedOut + bucket.Discarded
+}
+
+// readJobOutcomes reads the vocabulary the Laravel package and the consumer share, so
+// this package's counters cannot drift from it either (docs/adr/0006).
+func readJobOutcomes(t *testing.T) []string {
+	t.Helper()
+	raw, err := os.ReadFile(filepath.Join("..", "..", "tests", "fixtures", "telemetry-outcomes.json"))
+	if err != nil {
+		t.Fatalf("read the shared outcome fixture: %v", err)
+	}
+	var fixture struct {
+		JobOutcomes []string `json:"job_outcomes"`
+	}
+	if err := json.Unmarshal(raw, &fixture); err != nil {
+		t.Fatalf("decode the shared outcome fixture: %v", err)
+	}
+	return fixture.JobOutcomes
+}
+
+func TestOutcomeColumnsMatchTheSharedVocabulary(t *testing.T) {
+	outcomes := readJobOutcomes(t)
+
+	counters := make([]string, 0, len(outcomeColumns))
+	for outcome := range outcomeColumns {
+		counters = append(counters, outcome)
+	}
+	slices.Sort(counters)
+	expected := slices.Clone(outcomes)
+	slices.Sort(expected)
+	if !slices.Equal(counters, expected) {
+		t.Fatalf("counters = %v, want the shared outcomes %v", counters, expected)
+	}
+
+	// Every outcome in the fixture must also be aggregatable, not just named.
+	store := openStore(t, filepath.Join(t.TempDir(), "metrics.db"))
+	ctx := context.Background()
+	for _, outcome := range outcomes {
+		if err := store.RecordJob(ctx, "e-"+outcome, "emails", outcome, 10, at(1)); err != nil {
+			t.Fatalf("RecordJob(%s): %v", outcome, err)
+		}
+	}
+	buckets, err := store.Buckets(ctx, ResolutionMinute, "emails", at(0), at(2))
+	if err != nil {
+		t.Fatalf("Buckets: %v", err)
+	}
+	if len(buckets) != 1 || totalJobs(buckets[0]) != int64(len(outcomes)) {
+		t.Fatalf("buckets = %+v, want every shared outcome counted in one minute", buckets)
+	}
+}
+
+func TestOpenRefusesADatabaseFromBeforeTheDiscardedCounter(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "metrics.db")
+	legacy, err := sql.Open("sqlite", "file:"+path)
+	if err != nil {
+		t.Fatalf("open legacy database: %v", err)
+	}
+	// The shape this package wrote before the discarded counter existed.
+	_, err = legacy.Exec(`CREATE TABLE queue_buckets (
+		queue TEXT NOT NULL, bucket_start INTEGER NOT NULL,
+		processed INTEGER NOT NULL DEFAULT 0, released INTEGER NOT NULL DEFAULT 0,
+		failed INTEGER NOT NULL DEFAULT 0, timed_out INTEGER NOT NULL DEFAULT 0,
+		duration_ms INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (queue, bucket_start))`)
+	if err != nil {
+		t.Fatalf("create legacy table: %v", err)
+	}
+	if err := legacy.Close(); err != nil {
+		t.Fatalf("close legacy database: %v", err)
+	}
+
+	_, err = Open(path, DefaultRetention())
+	if err == nil {
+		t.Fatal("Open accepted a database whose counters predate the shared vocabulary")
+	}
+	if !strings.Contains(err.Error(), `"discarded"`) || !strings.Contains(err.Error(), "delete the database file") {
+		t.Errorf("error = %q, want the missing counter and the way out", err)
+	}
 }
 
 func TestRecordAggregatesPerQueuePerMinuteAndOutcome(t *testing.T) {
@@ -250,6 +331,9 @@ func TestRollupFoldsClosedMinutesIntoHoursAndDays(t *testing.T) {
 		{"b", "emails", "failed", 200, time.Date(2026, 11, 20, 10, 35, 0, 0, time.UTC)},
 		{"c", "emails", "processed", 300, time.Date(2026, 11, 20, 11, 20, 0, 0, time.UTC)},
 		{"d", "reports", "released", 50, time.Date(2026, 11, 20, 10, 10, 0, 0, time.UTC)},
+		// Every counter, including the one the package only recently started emitting,
+		// has to survive the rollup.
+		{"f", "emails", "discarded", 150, time.Date(2026, 11, 20, 10, 15, 0, 0, time.UTC)},
 		// The hour in progress is not folded yet.
 		{"e", "emails", "processed", 400, time.Date(2026, 11, 20, 12, 10, 0, 0, time.UTC)},
 	}
@@ -271,8 +355,8 @@ func TestRollupFoldsClosedMinutesIntoHoursAndDays(t *testing.T) {
 	}
 	ten := hours[0]
 	if !ten.Start.Equal(time.Date(2026, 11, 20, 10, 0, 0, 0, time.UTC)) ||
-		ten.Processed != 1 || ten.Failed != 1 || ten.DurationMS != 300 {
-		t.Errorf("10:00 hour = %+v, want both 10:xx minutes summed", ten)
+		ten.Processed != 1 || ten.Failed != 1 || ten.Discarded != 1 || ten.DurationMS != 450 {
+		t.Errorf("10:00 hour = %+v, want the 10:xx minutes summed with the discarded counter", ten)
 	}
 	if eleven := hours[1]; eleven.Start.Hour() != 11 || eleven.Processed != 1 || eleven.DurationMS != 300 {
 		t.Errorf("11:00 hour = %+v, want the single 11:20 job", eleven)
@@ -287,8 +371,8 @@ func TestRollupFoldsClosedMinutesIntoHoursAndDays(t *testing.T) {
 	}
 	day := days[0]
 	if !day.Start.Equal(time.Date(2026, 11, 20, 0, 0, 0, 0, time.UTC)) ||
-		totalJobs(day) != 3 || day.DurationMS != 600 {
-		t.Errorf("day = %+v, want only the three closed hours", day)
+		totalJobs(day) != 4 || day.Discarded != 1 || day.DurationMS != 750 {
+		t.Errorf("day = %+v, want only the four closed-hour jobs", day)
 	}
 
 	// Queues roll up independently.

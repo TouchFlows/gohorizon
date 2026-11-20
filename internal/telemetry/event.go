@@ -9,6 +9,7 @@ package telemetry
 import (
 	"encoding/json"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 )
@@ -22,13 +23,11 @@ const (
 	TypeWorkerStopped = "worker.stopped"
 )
 
-// Outcome values the Laravel package derives from the job flags.
-var outcomes = map[string]bool{
-	"processed": true,
-	"released":  true,
-	"failed":    true,
-	"timed_out": true,
-}
+// Outcomes is the closed set of terminal job outcomes, in the order the Laravel
+// package documents them. tests/fixtures/telemetry-outcomes.json is the same
+// vocabulary; both test suites read it, so an outcome cannot be added on one side
+// alone (docs/adr/0006).
+var Outcomes = []string{"processed", "released", "failed", "timed_out", "discarded"}
 
 // Event is a telemetry record. Only the fields the consumer acts on are decoded; the
 // rest of the payload is ignored so the schema can grow without breaking ingestion.
@@ -88,8 +87,8 @@ func (e Event) validate() error {
 	case TypeJobFinished:
 		if e.Job == nil {
 			add("%s requires a job object", TypeJobFinished)
-		} else if !outcomes[e.Job.Outcome] {
-			add("job.outcome %q is not one of processed, released, failed, timed_out", e.Job.Outcome)
+		} else if !slices.Contains(Outcomes, e.Job.Outcome) {
+			add("job.outcome %q is not one of %s", e.Job.Outcome, strings.Join(Outcomes, ", "))
 		} else if strings.TrimSpace(e.Job.Queue) == "" {
 			add("%s requires job.queue: metrics are aggregated per queue", TypeJobFinished)
 		}
