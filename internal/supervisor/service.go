@@ -254,7 +254,16 @@ func (s *Service) Report() health.Report {
 		report.Application = app.ID
 		report.Environment = app.Environment
 	}
-	if !held {
+	stats := s.consumer.Stats()
+	report.Telemetry = health.Telemetry{
+		Events:     stats.Events,
+		Duplicates: stats.Duplicates,
+		Invalid:    stats.Invalid,
+		Errors:     stats.Errors,
+		Failing:    stats.Failing,
+		LastError:  stats.LastError,
+	}
+	if !held || stats.Failing {
 		report.Status = "degraded"
 	}
 

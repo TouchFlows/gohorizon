@@ -9,6 +9,7 @@ type Report struct {
 	Environment   string       `json:"environment,omitempty"`
 	UptimeSeconds int64        `json:"uptime_seconds"`
 	Lock          Lock         `json:"lock"`
+	Telemetry     Telemetry    `json:"telemetry"`
 	Supervisors   []Supervisor `json:"supervisors"`
 }
 
@@ -16,6 +17,17 @@ type Lock struct {
 	Held      bool   `json:"held"`
 	Degraded  bool   `json:"degraded"`
 	LastError string `json:"last_error,omitempty"`
+}
+
+// Telemetry is the ingestion path: counters since start plus whether it is failing
+// right now. A failing ingestion path degrades the report but never the workers.
+type Telemetry struct {
+	Events     int    `json:"events"`
+	Duplicates int    `json:"duplicates"`
+	Invalid    int    `json:"invalid"`
+	Errors     int    `json:"errors"`
+	Failing    bool   `json:"failing"`
+	LastError  string `json:"last_error,omitempty"`
 }
 
 type Supervisor struct {

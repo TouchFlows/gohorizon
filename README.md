@@ -20,7 +20,7 @@ Milestone 1 (proof of concept) in progress. Implemented:
   previous supervisor, exit-code classification (0/12 recycle vs crash).
 - Telemetry ingestion: a consumer group on the events stream that deduplicates by
   event id, acknowledges what it handles and retries Redis failures without touching
-  the workers.
+  the workers. Its counters and live failure state are on `GET /api/v1/health`.
 - Read-only `GET /api/v1/health`.
 - `gohorizon/laravel` package: configuration, job lifecycle telemetry to a Redis Stream,
   `gohorizon:capabilities`, `gohorizon:inspect`.

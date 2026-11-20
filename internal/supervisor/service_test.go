@@ -2,14 +2,18 @@ package supervisor
 
 import (
 	"context"
+	"errors"
 	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gohorizon/gohorizon/internal/config"
+	"github.com/gohorizon/gohorizon/internal/redis"
+	"github.com/gohorizon/gohorizon/internal/telemetry"
 )
 
 // TestCapabilitiesHelperProcess stands in for the application's `php artisan`. When it
@@ -100,6 +104,64 @@ func TestNewPassesPreflightForACompatibleLaunch(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "connect to redis") {
 		t.Fatalf("error = %q, want the redis connection failure", err)
+	}
+}
+
+// failingStream fails every read, so a running consumer reports a live failure.
+type failingStream struct{}
+
+func (failingStream) EnsureEventsGroup(context.Context, string) error { return nil }
+
+func (failingStream) ReadEventsGroup(context.Context, string, string, string, int64, time.Duration) ([]redis.StreamMessage, error) {
+	return nil, errors.New("redis is down")
+}
+
+func (failingStream) AckEvents(context.Context, string, ...string) error { return nil }
+
+func TestReportSurfacesFailingTelemetryIngestion(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	consumer, err := telemetry.New(failingStream{}, telemetry.Spec{
+		Application: "production",
+		Environment: "production",
+		MinBackoff:  time.Millisecond,
+		MaxBackoff:  5 * time.Millisecond,
+		Logger:      logger,
+	})
+	if err != nil {
+		t.Fatalf("telemetry.New: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		consumer.Run(ctx)
+	}()
+	t.Cleanup(func() {
+		cancel()
+		<-done
+	})
+
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) && !consumer.Stats().Failing {
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	service := &Service{
+		cfg:      preflightConfig(t, 60),
+		log:      logger,
+		consumer: consumer,
+		started:  time.Now(),
+	}
+	// Isolate the telemetry signal from the ownership-lock one.
+	service.lockHeld = true
+
+	report := service.Report()
+	if !report.Telemetry.Failing || report.Telemetry.Errors == 0 || report.Telemetry.LastError == "" {
+		t.Fatalf("telemetry = %+v, want the ingestion failure visible", report.Telemetry)
+	}
+	if report.Status != "degraded" {
+		t.Errorf("status = %q, want degraded while ingestion is failing", report.Status)
 	}
 }
 
