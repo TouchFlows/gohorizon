@@ -10,6 +10,7 @@ type Report struct {
 	UptimeSeconds int64        `json:"uptime_seconds"`
 	Lock          Lock         `json:"lock"`
 	Telemetry     Telemetry    `json:"telemetry"`
+	Queues        Queues       `json:"queues"`
 	Supervisors   []Supervisor `json:"supervisors"`
 }
 
@@ -29,6 +30,26 @@ type Telemetry struct {
 	Errors     int    `json:"errors"`
 	Failing    bool   `json:"failing"`
 	LastError  string `json:"last_error,omitempty"`
+}
+
+// Queues is the last queue-depth sample taken through the package's inspection
+// command. It is body-only: a missing or failing package leaves the report status
+// alone, because a failed health check must not restart a supervisor whose workers are
+// healthy (docs/adr/0001, docs/adr/0004 item 6).
+//
+// A count the driver cannot report is null rather than zero.
+type Queues struct {
+	Connection string       `json:"connection,omitempty"`
+	Error      string       `json:"error,omitempty"`
+	Depths     []QueueDepth `json:"depths"`
+}
+
+type QueueDepth struct {
+	Queue    string `json:"queue"`
+	Pending  *int   `json:"pending"`
+	Reserved *int   `json:"reserved"`
+	Delayed  *int   `json:"delayed"`
+	Size     *int   `json:"size"`
 }
 
 type Supervisor struct {

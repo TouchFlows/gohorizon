@@ -41,7 +41,11 @@ itself considers internal.
 4. Go schedules inspection by executing the adapter command in the application
    directory with the configured PHP binary. A package that is not installed degrades
    the feature (counts unavailable, "adapter_missing" capability) instead of breaking
-   supervision.
+   supervision. Queue depth is sampled on an interval (15 s) for the queues the
+   supervisors launch and appears on `/api/v1/health`; a failed or absent inspection
+   sets `queues.error` in the body but never drops the report below `ok`, because a
+   failed health check would restart supervisors whose workers are healthy
+   (docs/adr/0004 item 6).
 
 ## Consequences
 

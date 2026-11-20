@@ -59,6 +59,57 @@ func TestHealthExposesTelemetryCounters(t *testing.T) {
 	}
 }
 
+func TestHealthExposesQueueDepth(t *testing.T) {
+	pending, reserved, delayed, size := 5, 1, 2, 8
+	recorder := getHealth(t, health.Report{
+		Status: "ok",
+		Queues: health.Queues{
+			Connection: "redis",
+			Depths: []health.QueueDepth{
+				{Queue: "default", Pending: &pending, Reserved: &reserved, Delayed: &delayed, Size: &size},
+				{Queue: "sync-only"},
+			},
+		},
+	})
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", recorder.Code)
+	}
+
+	var payload struct {
+		Queues struct {
+			Connection string `json:"connection"`
+			Error      string `json:"error"`
+			Depths     []struct {
+				Queue    string `json:"queue"`
+				Pending  *int   `json:"pending"`
+				Reserved *int   `json:"reserved"`
+				Delayed  *int   `json:"delayed"`
+				Size     *int   `json:"size"`
+			} `json:"depths"`
+		} `json:"queues"`
+	}
+	if err := json.Unmarshal(recorder.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode body: %v", err)
+	}
+	if payload.Queues.Connection != "redis" || payload.Queues.Error != "" {
+		t.Errorf("queues = %+v, want the inspection's connection and no error", payload.Queues)
+	}
+	if len(payload.Queues.Depths) != 2 {
+		t.Fatalf("depths = %+v, want both queues", payload.Queues.Depths)
+	}
+	depth := payload.Queues.Depths[0]
+	if depth.Pending == nil || *depth.Pending != 5 || depth.Reserved == nil || *depth.Reserved != 1 ||
+		depth.Delayed == nil || *depth.Delayed != 2 || depth.Size == nil || *depth.Size != 8 {
+		t.Errorf("depth = %+v, want the reported counts", depth)
+	}
+	// A driver without counts reports nothing, and the body must say null rather than
+	// invent a zero.
+	if payload.Queues.Depths[1].Pending != nil {
+		t.Errorf("pending = %v, want null for a driver that cannot report it", *payload.Queues.Depths[1].Pending)
+	}
+}
+
 func TestFailingIngestionIsVisibleWithoutFailingTheEndpoint(t *testing.T) {
 	recorder := getHealth(t, health.Report{
 		Status: "ok",

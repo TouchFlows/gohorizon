@@ -10,9 +10,11 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/gohorizon/gohorizon/internal/adapter"
 	"github.com/gohorizon/gohorizon/internal/config"
 	"github.com/gohorizon/gohorizon/internal/process"
 	"github.com/gohorizon/gohorizon/internal/redis"
@@ -188,6 +190,132 @@ func TestReportSurfacesFailingTelemetryIngestion(t *testing.T) {
 	service.lockHeld = false
 	if status := service.Report().Status; status != "degraded" {
 		t.Errorf("status = %q, want degraded once the lock is lost", status)
+	}
+}
+
+// stubInspector answers the queue-depth probe without an application.
+type stubInspector struct {
+	inspection adapter.Inspection
+	err        error
+}
+
+func (s *stubInspector) Queues(context.Context, string, []string) (adapter.Inspection, error) {
+	if s.err != nil {
+		return adapter.Inspection{}, s.err
+	}
+	return s.inspection, nil
+}
+
+func queueTestService(t *testing.T, inspector queueInspector) *Service {
+	t.Helper()
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	service := &Service{
+		cfg: preflightConfig(t, 60),
+		log: logger,
+		// Report reads the consumer; a zero-value consumer has zero counters.
+		consumer:  &telemetry.Consumer{},
+		inspector: inspector,
+		queues:    []string{"default"},
+		started:   time.Now(),
+	}
+	// Isolate the queue signal from the ownership-lock one.
+	service.lockHeld = true
+	return service
+}
+
+func TestHealthReportsQueueDepthFromTheAdapter(t *testing.T) {
+	pending, reserved, delayed, size := 12, 1, 3, 16
+	service := queueTestService(t, &stubInspector{inspection: adapter.Inspection{
+		Connection: "redis",
+		Queues: []adapter.QueueDepth{
+			{Queue: "default", Pending: &pending, Reserved: &reserved, Delayed: &delayed, Size: &size},
+		},
+	}})
+
+	service.sampleQueues(context.Background())
+
+	report := service.Report()
+	if report.Status != "ok" {
+		t.Errorf("status = %q, want ok", report.Status)
+	}
+	if report.Queues.Connection != "redis" || report.Queues.Error != "" {
+		t.Errorf("queues = %+v, want the adapter's connection and no error", report.Queues)
+	}
+	if len(report.Queues.Depths) != 1 {
+		t.Fatalf("depths = %+v, want one queue", report.Queues.Depths)
+	}
+	depth := report.Queues.Depths[0]
+	if depth.Queue != "default" || depth.Pending == nil || *depth.Pending != 12 ||
+		depth.Reserved == nil || *depth.Reserved != 1 ||
+		depth.Delayed == nil || *depth.Delayed != 3 ||
+		depth.Size == nil || *depth.Size != 16 {
+		t.Errorf("depth = %+v, want the counts the adapter reported", depth)
+	}
+}
+
+func TestQueueInspectionFailureLeavesTheStatusAlone(t *testing.T) {
+	inspector := &stubInspector{err: errors.New("gohorizon:inspect produced no output")}
+	service := queueTestService(t, inspector)
+
+	service.sampleQueues(context.Background())
+
+	report := service.Report()
+	// The package is missing or the command failed: the body says so, the status does
+	// not, so a health check cannot restart supervisors whose workers are fine.
+	if report.Status != "ok" {
+		t.Errorf("status = %q, want ok while only inspection is failing", report.Status)
+	}
+	if report.Queues.Error == "" {
+		t.Fatal("queues.error is empty, want the inspection failure in the body")
+	}
+	if len(report.Queues.Depths) != 0 {
+		t.Errorf("depths = %+v, want none for a failed inspection", report.Queues.Depths)
+	}
+
+	// The next sample recovers without restarting anything.
+	inspector.err = nil
+	inspector.inspection = adapter.Inspection{
+		Connection: "redis",
+		Queues:     []adapter.QueueDepth{{Queue: "default"}},
+	}
+	service.sampleQueues(context.Background())
+
+	report = service.Report()
+	if report.Status != "ok" || report.Queues.Error != "" {
+		t.Errorf("report = %+v, want the recovered inspection with no error", report.Queues)
+	}
+	if len(report.Queues.Depths) != 1 || report.Queues.Depths[0].Pending != nil {
+		t.Errorf("depths = %+v, want the queue with its unreported counts left nil", report.Queues.Depths)
+	}
+}
+
+// countingInspector samples successfully and counts how often it was asked.
+type countingInspector struct{ calls atomic.Int32 }
+
+func (c *countingInspector) Queues(context.Context, string, []string) (adapter.Inspection, error) {
+	c.calls.Add(1)
+	return adapter.Inspection{Connection: "redis", Queues: []adapter.QueueDepth{{Queue: "default"}}}, nil
+}
+
+func TestQueueLoopSamplesOnItsInterval(t *testing.T) {
+	inspector := &countingInspector{}
+	service := queueTestService(t, inspector)
+	service.queueInterval = 10 * time.Millisecond
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		service.queueLoop(ctx)
+	}()
+
+	waitUntil(t, 2*time.Second, func() bool { return inspector.calls.Load() >= 2 }, "the queue loop to sample twice")
+
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("queueLoop did not return after cancellation")
 	}
 }
 

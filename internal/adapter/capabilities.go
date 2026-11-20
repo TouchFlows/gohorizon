@@ -28,7 +28,7 @@ const (
 // errUnavailable means the application could not answer: the package is not
 // installed, artisan failed, or the output was not the documented JSON. The caller
 // degrades the preflight instead of failing supervision (docs/adr/0001).
-var errUnavailable = errors.New("gohorizon/laravel capabilities are unavailable")
+var errUnavailable = errors.New("gohorizon/laravel adapter is unavailable")
 
 // retryAfterValue is a connection's retry_after as the application reports it: a
 // number, a numeric string, or null (0) for drivers with no reservation window.
@@ -107,21 +107,23 @@ func decodeCapabilities(out []byte) (Capabilities, error) {
 	if text == "" {
 		return Capabilities{}, errors.New("gohorizon:capabilities produced no output")
 	}
-	// The command prints one JSON line; an application that prints something first
-	// must not silently disable the preflight, so take the last object line.
-	payload := text
-	if idx := strings.LastIndex(text, "\n{"); idx >= 0 {
-		payload = strings.TrimSpace(text[idx+1:])
-	}
-
 	var caps Capabilities
-	if err := json.Unmarshal([]byte(payload), &caps); err != nil {
+	if err := json.Unmarshal([]byte(payloadLine(text)), &caps); err != nil {
 		return Capabilities{}, fmt.Errorf("decode gohorizon:capabilities output: %w", err)
 	}
 	if caps.Schema == 0 {
 		return Capabilities{}, errors.New("gohorizon:capabilities output has no schema")
 	}
 	return caps, nil
+}
+
+// payloadLine returns the last JSON object line of command output: an application that
+// prints something before its payload must not silently disable the caller.
+func payloadLine(text string) string {
+	if idx := strings.LastIndex(text, "\n{"); idx >= 0 {
+		return strings.TrimSpace(text[idx+1:])
+	}
+	return text
 }
 
 func summarise(s string) string {

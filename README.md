@@ -25,6 +25,11 @@ Milestone 1 (proof of concept) in progress. Implemented:
   minute buckets in SQLite at `storage.path`, deduplicated by event id, so history
   survives a restart. Event ids are pruned after 72 hours and minute buckets after 7
   days (handoff §9), at startup and hourly. Reading it over HTTP is a later slice.
+- Queue depth: every 15 seconds the service runs `gohorizon:inspect` for the queues
+  its supervisors launch and reports each queue's `pending`, `reserved`, `delayed` and
+  `size` on `GET /api/v1/health`. Counts a driver cannot report are `null`, and a
+  missing package or failing command only fills in `queues.error` — the status stays
+  `ok`, so a health check cannot restart healthy workers over a failed inspection.
 - Read-only `GET /api/v1/health`.
 - `gohorizon/laravel` package: configuration, job lifecycle telemetry to a Redis Stream,
   `gohorizon:capabilities`, `gohorizon:inspect`.
@@ -39,7 +44,7 @@ cmd/gohorizon          CLI and service entrypoint
 internal/config        YAML loading, env expansion, validation
 internal/redis         key ownership and the typed Redis client
 internal/process       worker state machine, launch specs, process manager
-internal/adapter       gohorizon:capabilities probe and launch preflight
+internal/adapter       gohorizon:capabilities probe, queue inspection, launch preflight
 internal/telemetry     events stream consumer, dedupe and counters
 internal/metrics       SQLite per-queue aggregates (historical metrics)
 internal/supervisor    lock + managers + health report

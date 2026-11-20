@@ -30,11 +30,21 @@ const (
 	// retention windows between two prune passes. It is a field on the service so a
 	// test can watch the scheduled pass without waiting an hour.
 	defaultPruneInterval = time.Hour
+
+	// defaultQueueInterval is how often queue depth is sampled through the adapter.
+	// Counts are observations, never an execution ledger (docs/adr/0001).
+	defaultQueueInterval = 15 * time.Second
 )
 
 // ErrLocked is returned when another instance owns the supervisor lock. Startup
 // aborts: two supervisors must never manage the same pool (docs/adr/0004).
 var ErrLocked = errors.New("another GoHorizon instance holds the supervisor lock")
+
+// queueInspector is the adapter surface queue depth is sampled through
+// (docs/adr/0001). adapter.Probe implements it.
+type queueInspector interface {
+	Queues(ctx context.Context, connection string, queues []string) (adapter.Inspection, error)
+}
 
 type Service struct {
 	cfg      *config.Config
@@ -44,13 +54,17 @@ type Service struct {
 	store    *metrics.Store
 	managers []*process.Manager
 
+	inspector     queueInspector
+	queues        []string
+	queueInterval time.Duration
 	pruneInterval time.Duration
 	started       time.Time
 	owner         string
 
-	mu       sync.Mutex
-	lockHeld bool
-	lockErr  string
+	mu         sync.Mutex
+	lockHeld   bool
+	lockErr    string
+	queueDepth health.Queues
 }
 
 func New(ctx context.Context, cfg *config.Config, log *slog.Logger) (*Service, error) {
@@ -93,6 +107,9 @@ func New(ctx context.Context, cfg *config.Config, log *slog.Logger) (*Service, e
 		client:        client,
 		started:       time.Now(),
 		owner:         fmt.Sprintf("%s-%d", version.Version, time.Now().UnixNano()),
+		inspector:     probe,
+		queues:        configuredQueues(app),
+		queueInterval: defaultQueueInterval,
 		pruneInterval: defaultPruneInterval,
 	}
 
@@ -216,6 +233,73 @@ func (s *Service) pruneOnce(ctx context.Context) {
 	}
 }
 
+// queueLoop samples queue depth through the Laravel adapter. A missing package or a
+// failing command leaves an error in the report body and never affects the workers
+// (docs/adr/0001).
+func (s *Service) queueLoop(ctx context.Context) {
+	if s.inspector == nil || len(s.queues) == 0 {
+		return
+	}
+	s.sampleQueues(ctx)
+	ticker := time.NewTicker(s.queueInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			s.sampleQueues(ctx)
+		}
+	}
+}
+
+func (s *Service) sampleQueues(ctx context.Context) {
+	inspection, err := s.inspector.Queues(ctx, s.cfg.Application().RedisConnection, s.queues)
+	if err != nil {
+		s.mu.Lock()
+		changed := s.queueDepth.Error != err.Error()
+		s.queueDepth = health.Queues{Error: err.Error()}
+		s.mu.Unlock()
+		if changed {
+			s.log.Warn("queue depth unavailable; the application's inspection command failed", "error", err)
+		}
+		return
+	}
+
+	depths := make([]health.QueueDepth, 0, len(inspection.Queues))
+	for _, queue := range inspection.Queues {
+		depths = append(depths, health.QueueDepth{
+			Queue:    queue.Queue,
+			Pending:  queue.Pending,
+			Reserved: queue.Reserved,
+			Delayed:  queue.Delayed,
+			Size:     queue.Size,
+		})
+	}
+	s.mu.Lock()
+	recovered := s.queueDepth.Error != ""
+	s.queueDepth = health.Queues{Connection: inspection.Connection, Depths: depths}
+	s.mu.Unlock()
+	if recovered {
+		s.log.Info("queue depth inspection recovered")
+	}
+}
+
+// configuredQueues lists every queue the supervisors launch workers for, once.
+func configuredQueues(app *config.Application) []string {
+	seen := make(map[string]bool)
+	var queues []string
+	for _, sup := range app.Supervisors {
+		for _, queue := range sup.Queues {
+			if !seen[queue] {
+				seen[queue] = true
+				queues = append(queues, queue)
+			}
+		}
+	}
+	return queues
+}
+
 // noteStopReason hands a reported WorkerStopping reason to the manager that owns the
 // worker. An unmatched reason belongs to a worker this instance no longer tracks.
 func (s *Service) noteStopReason(worker, reason string) {
@@ -292,6 +376,12 @@ func (s *Service) Run(ctx context.Context) error {
 		s.pruneLoop(runCtx)
 	}()
 
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		s.queueLoop(runCtx)
+	}()
+
 	wg.Wait()
 	close(errs)
 	for err := range errs {
@@ -338,6 +428,7 @@ func (s *Service) setLock(held bool, lastErr string) {
 func (s *Service) Report() health.Report {
 	s.mu.Lock()
 	held, lockErr := s.lockHeld, s.lockErr
+	queues := s.queueDepth
 	s.mu.Unlock()
 
 	app := s.cfg.Application()
@@ -346,6 +437,7 @@ func (s *Service) Report() health.Report {
 		Version:       version.Version,
 		UptimeSeconds: int64(time.Since(s.started).Seconds()),
 		Lock:          health.Lock{Held: held, Degraded: lockErr != "", LastError: lockErr},
+		Queues:        queues,
 	}
 	if app != nil {
 		report.Application = app.ID
