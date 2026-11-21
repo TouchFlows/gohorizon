@@ -547,8 +547,6 @@ func (h *harness) fetchHistoryFor(base, queue string) (history, error) {
 	return payload, nil
 }
 
-// eventually polls until check passes. It reports the last failure, so a timeout says
-// what was actually wrong instead of only that nothing happened.
 // storedJob is one row of the jobs table the running service wrote.
 type storedJob struct {
 	Class          string
@@ -583,6 +581,8 @@ func (h *harness) storedJobs() ([]storedJob, error) {
 	return jobs, rows.Err()
 }
 
+// eventually polls until check passes. It reports the last failure, so a timeout says
+// what was actually wrong instead of only that nothing happened.
 func eventually(t *testing.T, timeout time.Duration, what string, check func() error) {
 	t.Helper()
 	deadline := time.Now().Add(timeout)

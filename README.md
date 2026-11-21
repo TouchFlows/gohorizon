@@ -35,9 +35,10 @@ Milestone 1 (proof of concept) in progress. Implemented:
 - Historical metrics: every consumed `job.finished` event is stored as one `jobs` row
   (identity, class, queue, attempts, duration and exception) and aggregated into per-queue
   minute buckets in SQLite at `storage.path`, deduplicated by event id, so history
-  survives a restart. Job rows share the raw retention window and are pruned with it. Each pass (startup and hourly) folds closed minutes into hourly
-  buckets and closed hours into daily ones before pruning event ids, minutes, hours and
-  days past their windows. The windows follow handoff §9 and are configurable under
+  survives a restart. Job rows share the raw retention window and are pruned with it.
+  Each pass (startup and hourly) folds closed minutes into hourly buckets and closed
+  hours into daily ones before pruning event ids, job rows, minutes, hours and days past
+  their windows. The windows follow handoff §9 and are configurable under
   `storage.retention` (defaults: raw 72 h, minutes 7 d, hours 30 d, days 365 d).
   `GET /api/v1/metrics?resolution=…` reads any of the three levels back.
 - Queue depth: every 15 seconds the service runs `gohorizon:inspect` for the queues
