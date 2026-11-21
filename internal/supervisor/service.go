@@ -284,9 +284,9 @@ func (s *Service) pruneOnce(ctx context.Context) {
 		s.log.Warn("metrics retention pruning failed", "error", err)
 		return
 	}
-	if pruned.Events > 0 || pruned.Minutes > 0 || pruned.Hourly > 0 || pruned.Daily > 0 {
-		s.log.Info("pruned metrics history", "events", pruned.Events, "minutes", pruned.Minutes,
-			"hours", pruned.Hourly, "days", pruned.Daily)
+	if pruned.Events > 0 || pruned.Jobs > 0 || pruned.Minutes > 0 || pruned.Hourly > 0 || pruned.Daily > 0 {
+		s.log.Info("pruned metrics history", "events", pruned.Events, "jobs", pruned.Jobs,
+			"minutes", pruned.Minutes, "hours", pruned.Hourly, "days", pruned.Daily)
 	}
 }
 

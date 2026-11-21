@@ -4,6 +4,7 @@ package integration_test
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -21,6 +22,7 @@ import (
 	"time"
 
 	goredis "github.com/redis/go-redis/v9"
+	_ "modernc.org/sqlite"
 
 	"github.com/gohorizon/gohorizon/internal/adapter"
 	"github.com/gohorizon/gohorizon/internal/metrics"
@@ -547,6 +549,40 @@ func (h *harness) fetchHistoryFor(base, queue string) (history, error) {
 
 // eventually polls until check passes. It reports the last failure, so a timeout says
 // what was actually wrong instead of only that nothing happened.
+// storedJob is one row of the jobs table the running service wrote.
+type storedJob struct {
+	Class          string
+	Queue          string
+	Outcome        string
+	ExceptionClass string
+}
+
+// storedJobs reads the database the running service owns. It stays open in WAL mode, so a
+// second connection sees committed rows without disturbing the supervisor.
+func (h *harness) storedJobs() ([]storedJob, error) {
+	db, err := sql.Open("sqlite", "file:"+filepath.Join(h.dir, "metrics.db")+"?_pragma=busy_timeout(5000)")
+	if err != nil {
+		return nil, err
+	}
+	defer db.Close()
+
+	rows, err := db.Query(`SELECT class, queue, outcome, exception_class FROM jobs ORDER BY finished_at`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var jobs []storedJob
+	for rows.Next() {
+		var job storedJob
+		if err := rows.Scan(&job.Class, &job.Queue, &job.Outcome, &job.ExceptionClass); err != nil {
+			return nil, err
+		}
+		jobs = append(jobs, job)
+	}
+	return jobs, rows.Err()
+}
+
 func eventually(t *testing.T, timeout time.Duration, what string, check func() error) {
 	t.Helper()
 	deadline := time.Now().Add(timeout)

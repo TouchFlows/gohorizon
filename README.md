@@ -32,9 +32,10 @@ Milestone 1 (proof of concept) in progress. Implemented:
   event id, validates the job identity each record carries (id, or the uuid when Laravel
   assigned one, plus its class, attempts and an exception's class when there is one),
   acknowledges what it handles and retries Redis failures without touching the workers. Its counters and live failure state are on `GET /api/v1/health`.
-- Historical metrics: every consumed `job.finished` event is aggregated into per-queue
+- Historical metrics: every consumed `job.finished` event is stored as one `jobs` row
+  (identity, class, queue, attempts, duration and exception) and aggregated into per-queue
   minute buckets in SQLite at `storage.path`, deduplicated by event id, so history
-  survives a restart. Each pass (startup and hourly) folds closed minutes into hourly
+  survives a restart. Job rows share the raw retention window and are pruned with it. Each pass (startup and hourly) folds closed minutes into hourly
   buckets and closed hours into daily ones before pruning event ids, minutes, hours and
   days past their windows. The windows follow handoff §9 and are configurable under
   `storage.retention` (defaults: raw 72 h, minutes 7 d, hours 30 d, days 365 d).
@@ -71,7 +72,7 @@ internal/redis         key ownership and the typed Redis client
 internal/process       worker state machine, launch specs, process manager
 internal/adapter       gohorizon:capabilities probe, queue inspection, launch preflight
 internal/telemetry     events stream consumer, dedupe and counters
-internal/metrics       SQLite per-queue aggregates (historical metrics)
+internal/metrics       SQLite job rows and per-queue aggregates (historical metrics)
 internal/supervisor    lock + managers + health report
 internal/api           HTTP routes
 packages/laravel       Composer package (gohorizon/laravel)

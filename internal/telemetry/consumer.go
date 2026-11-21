@@ -8,6 +8,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/gohorizon/gohorizon/internal/metrics"
 	"github.com/gohorizon/gohorizon/internal/redis"
 )
 
@@ -57,9 +58,9 @@ type Spec struct {
 	Sink JobSink
 }
 
-// JobSink receives one finished job. *metrics.Store implements it.
+// JobSink receives one finished job attempt. *metrics.Store implements it.
 type JobSink interface {
-	RecordJob(ctx context.Context, eventID, queue, outcome string, durationMS int64, at time.Time) error
+	RecordJob(ctx context.Context, job metrics.JobRecord) error
 }
 
 // Stats is what the consumer has observed. Failing describes right now, not history.
@@ -238,7 +239,7 @@ func (c *Consumer) handle(ctx context.Context, messages []redis.StreamMessage) e
 		}
 
 		if event.Type == TypeJobFinished && c.spec.Sink != nil {
-			if err := c.spec.Sink.RecordJob(ctx, event.ID, event.Job.Queue, event.Job.Outcome, event.Job.DurationMS, event.At); err != nil {
+			if err := c.spec.Sink.RecordJob(ctx, jobRecord(event)); err != nil {
 				c.failed(err)
 				// Nothing in this batch is acknowledged: the drain path retries it, and
 				// the sink's idempotency keeps the retry from counting twice.
@@ -262,6 +263,29 @@ func (c *Consumer) handle(ctx context.Context, messages []redis.StreamMessage) e
 		return err
 	}
 	return nil
+}
+
+// jobRecord is the store's view of one finished attempt. The identity is the decoded
+// job's, so history and the recorder name the same job whether or not Laravel gave it a
+// uuid.
+func jobRecord(event Event) metrics.JobRecord {
+	record := metrics.JobRecord{
+		EventID:    event.ID,
+		JobID:      event.Job.Identity(),
+		UUID:       event.Job.UUID,
+		Class:      event.Job.Class,
+		Queue:      event.Job.Queue,
+		Connection: event.Job.Connection,
+		Outcome:    event.Job.Outcome,
+		Attempts:   event.Job.Attempts,
+		DurationMS: event.Job.DurationMS,
+		FinishedAt: event.At,
+	}
+	if event.Job.Exception != nil {
+		record.ExceptionClass = event.Job.Exception.Class
+		record.ExceptionMessage = event.Job.Exception.Message
+	}
+	return record
 }
 
 // Stats returns a point-in-time copy of the counters.

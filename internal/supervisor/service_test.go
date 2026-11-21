@@ -329,7 +329,7 @@ func TestBucketsReadsPersistedHistory(t *testing.T) {
 	t.Cleanup(func() { _ = store.Close() })
 
 	at := time.Now().Add(-2 * time.Minute)
-	if err := store.RecordJob(context.Background(), "event-1", "emails", "processed", 120, at); err != nil {
+	if err := store.RecordJob(context.Background(), job("event-1", "emails", "processed", 120, at)); err != nil {
 		t.Fatalf("seed metric: %v", err)
 	}
 
@@ -344,7 +344,7 @@ func TestBucketsReadsPersistedHistory(t *testing.T) {
 
 	// The resolution reaches the store: a closed hour is readable as hourly history.
 	closed := at.Add(-time.Hour)
-	if err := store.RecordJob(context.Background(), "event-2", "emails", "failed", 80, closed); err != nil {
+	if err := store.RecordJob(context.Background(), job("event-2", "emails", "failed", 80, closed)); err != nil {
 		t.Fatalf("seed closed-hour metric: %v", err)
 	}
 	if err := store.Rollup(context.Background(), time.Now()); err != nil {
@@ -609,10 +609,10 @@ func TestServicePrunesMetricsOnStartup(t *testing.T) {
 	running := startService(t, func(service *Service) {
 		service.pruneInterval = time.Hour
 		// One bucket past the 7-day window, one inside it.
-		if err := service.store.RecordJob(context.Background(), "old-event", "emails", "processed", 10, old); err != nil {
+		if err := service.store.RecordJob(context.Background(), job("old-event", "emails", "processed", 10, old)); err != nil {
 			t.Fatalf("seed old metric: %v", err)
 		}
-		if err := service.store.RecordJob(context.Background(), "fresh-event", "emails", "processed", 10, time.Now().Add(-time.Hour)); err != nil {
+		if err := service.store.RecordJob(context.Background(), job("fresh-event", "emails", "processed", 10, time.Now().Add(-time.Hour))); err != nil {
 			t.Fatalf("seed fresh metric: %v", err)
 		}
 	})
@@ -655,7 +655,7 @@ func TestServicePrunesMetricsOnSchedule(t *testing.T) {
 	})
 
 	old := time.Now().Add(-9 * 24 * time.Hour)
-	if err := running.service.store.RecordJob(running.ctx, "loop-old", "emails", "processed", 10, old); err != nil {
+	if err := running.service.store.RecordJob(running.ctx, job("loop-old", "emails", "processed", 10, old)); err != nil {
 		t.Fatalf("seed metric for the scheduled pass: %v", err)
 	}
 
@@ -746,6 +746,22 @@ func TestShouldFenceAtTheSilenceBoundary(t *testing.T) {
 // than its queue list: round-robin slots 0..min-1 leave the tail of the list unserved, so
 // startup says which queues those are instead of leaving it to be discovered. An equal or
 // larger pool is silent, because nothing is missing.
+// job builds the record a consumer would hand the store for one finished attempt.
+func job(id, queue, outcome string, durationMS int64, at time.Time) metrics.JobRecord {
+	return metrics.JobRecord{
+		EventID:    id,
+		JobID:      "job-" + id,
+		UUID:       "uuid-" + id,
+		Class:      `App\Jobs\Synthetic`,
+		Queue:      queue,
+		Connection: "redis",
+		Outcome:    outcome,
+		Attempts:   1,
+		DurationMS: durationMS,
+		FinishedAt: at,
+	}
+}
+
 func TestShortPoolNamesTheQueuesItCannotServe(t *testing.T) {
 	tests := []struct {
 		name    string

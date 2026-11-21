@@ -37,6 +37,31 @@ func totalJobs(bucket Bucket) int64 {
 	return bucket.Processed + bucket.Released + bucket.Failed + bucket.TimedOut
 }
 
+// job builds the record a consumer would hand the store for one finished attempt.
+func job(id, queue, outcome string, durationMS int64, at time.Time) JobRecord {
+	return JobRecord{
+		EventID:    id,
+		JobID:      "job-" + id,
+		UUID:       "uuid-" + id,
+		Class:      `App\Jobs\Synthetic`,
+		Queue:      queue,
+		Connection: "redis",
+		Outcome:    outcome,
+		Attempts:   1,
+		DurationMS: durationMS,
+		FinishedAt: at,
+	}
+}
+
+func countJobRows(t *testing.T, store *Store) int {
+	t.Helper()
+	var rows int
+	if err := store.db.QueryRow(`SELECT COUNT(*) FROM jobs`).Scan(&rows); err != nil {
+		t.Fatalf("count job rows: %v", err)
+	}
+	return rows
+}
+
 // readJobOutcomes reads the vocabulary the Laravel package and the consumer share, so
 // this package's counters cannot drift from it either (docs/adr/0006).
 func readJobOutcomes(t *testing.T) []string {
@@ -72,7 +97,7 @@ func TestOutcomeColumnsMatchTheSharedVocabulary(t *testing.T) {
 	store := openStore(t, filepath.Join(t.TempDir(), "metrics.db"))
 	ctx := context.Background()
 	for _, outcome := range outcomes {
-		if err := store.RecordJob(ctx, "e-"+outcome, "emails", outcome, 10, at(1)); err != nil {
+		if err := store.RecordJob(ctx, job("e-"+outcome, "emails", outcome, 10, at(1))); err != nil {
 			t.Fatalf("RecordJob(%s): %v", outcome, err)
 		}
 	}
@@ -103,7 +128,7 @@ func TestRecordAggregatesPerQueuePerMinuteAndOutcome(t *testing.T) {
 		{"e5", "reports", "released", 40, at(1)},
 	}
 	for _, record := range records {
-		if err := store.RecordJob(ctx, record.id, record.queue, record.outcome, record.duration, record.at); err != nil {
+		if err := store.RecordJob(ctx, job(record.id, record.queue, record.outcome, record.duration, record.at)); err != nil {
 			t.Fatalf("RecordJob(%s): %v", record.id, err)
 		}
 	}
@@ -142,11 +167,11 @@ func TestRecordIsIdempotentByEventID(t *testing.T) {
 	store := openStore(t, filepath.Join(t.TempDir(), "metrics.db"))
 	ctx := context.Background()
 
-	if err := store.RecordJob(ctx, "same", "emails", "processed", 100, at(1)); err != nil {
+	if err := store.RecordJob(ctx, job("same", "emails", "processed", 100, at(1))); err != nil {
 		t.Fatalf("RecordJob: %v", err)
 	}
 	// The stream is at-least-once: the same event id can arrive again after a crash.
-	if err := store.RecordJob(ctx, "same", "emails", "processed", 100, at(1)); err != nil {
+	if err := store.RecordJob(ctx, job("same", "emails", "processed", 100, at(1))); err != nil {
 		t.Fatalf("RecordJob replay: %v", err)
 	}
 
@@ -159,6 +184,60 @@ func TestRecordIsIdempotentByEventID(t *testing.T) {
 	}
 }
 
+func TestRecordStoresTheJobIdentityAndItsException(t *testing.T) {
+	store := openStore(t, filepath.Join(t.TempDir(), "metrics.db"))
+	ctx := context.Background()
+
+	record := job("e1", "emails", "failed", 750, at(1))
+	record.Attempts = 3
+	record.ExceptionClass = "RuntimeException"
+	record.ExceptionMessage = "the fixture always fails"
+	if err := store.RecordJob(ctx, record); err != nil {
+		t.Fatalf("RecordJob: %v", err)
+	}
+
+	var got struct {
+		jobID, uuid, class, queue, connection, outcome string
+		attempts, duration                             int64
+		finishedAt                                     int64
+		exceptionClass, exceptionMessage               string
+	}
+	err := store.db.QueryRow(`SELECT job_id, uuid, class, queue, connection, outcome, attempts,
+		duration_ms, finished_at, exception_class, exception_message FROM jobs WHERE id = ?`, "e1").
+		Scan(&got.jobID, &got.uuid, &got.class, &got.queue, &got.connection, &got.outcome,
+			&got.attempts, &got.duration, &got.finishedAt, &got.exceptionClass, &got.exceptionMessage)
+	if err != nil {
+		t.Fatalf("read job row: %v", err)
+	}
+	if got.jobID != "job-e1" || got.uuid != "uuid-e1" || got.class != `App\Jobs\Synthetic` {
+		t.Errorf("identity = %+v, want the job id, uuid and class preserved", got)
+	}
+	if got.queue != "emails" || got.connection != "redis" || got.outcome != "failed" {
+		t.Errorf("routing = %+v, want queue, connection and outcome preserved", got)
+	}
+	if got.attempts != 3 || got.duration != 750 || got.finishedAt != at(1).Unix() {
+		t.Errorf("attempt = %+v, want attempts, duration and finish time preserved", got)
+	}
+	if got.exceptionClass != "RuntimeException" || got.exceptionMessage != "the fixture always fails" {
+		t.Errorf("exception = %q/%q, want it stored", got.exceptionClass, got.exceptionMessage)
+	}
+
+	// A replayed stream entry must not duplicate the row, and the counters still agree.
+	if err := store.RecordJob(ctx, record); err != nil {
+		t.Fatalf("RecordJob replay: %v", err)
+	}
+	if rows := countJobRows(t, store); rows != 1 {
+		t.Errorf("job rows = %d, want the replay absorbed", rows)
+	}
+	buckets, err := store.Buckets(ctx, ResolutionMinute, "emails", at(0), at(3))
+	if err != nil {
+		t.Fatalf("Buckets: %v", err)
+	}
+	if len(buckets) != 1 || buckets[0].Failed != 1 {
+		t.Errorf("buckets = %+v, want the job counted once", buckets)
+	}
+}
+
 func TestHistorySurvivesReopen(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "metrics.db")
 	ctx := context.Background()
@@ -167,7 +246,7 @@ func TestHistorySurvivesReopen(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
-	if err := first.RecordJob(ctx, "e1", "emails", "processed", 750, at(1)); err != nil {
+	if err := first.RecordJob(ctx, job("e1", "emails", "processed", 750, at(1))); err != nil {
 		t.Fatalf("RecordJob: %v", err)
 	}
 	if err := first.Close(); err != nil {
@@ -185,7 +264,7 @@ func TestHistorySurvivesReopen(t *testing.T) {
 	}
 
 	// The id survives too, so a replay after the restart is still absorbed.
-	if err := second.RecordJob(ctx, "e1", "emails", "processed", 750, at(1)); err != nil {
+	if err := second.RecordJob(ctx, job("e1", "emails", "processed", 750, at(1))); err != nil {
 		t.Fatalf("RecordJob after reopen: %v", err)
 	}
 	buckets, err = second.Buckets(ctx, ResolutionMinute, "emails", at(0), at(3))
@@ -211,7 +290,7 @@ func TestPruneDropsHistoryPastTheHandoffWindows(t *testing.T) {
 		{"minute-expired", now.Add(-minuteRetention - time.Hour)},
 	}
 	for _, record := range records {
-		if err := store.RecordJob(ctx, record.id, "emails", "processed", 10, record.at); err != nil {
+		if err := store.RecordJob(ctx, job(record.id, "emails", "processed", 10, record.at)); err != nil {
 			t.Fatalf("RecordJob(%s): %v", record.id, err)
 		}
 	}
@@ -220,9 +299,13 @@ func TestPruneDropsHistoryPastTheHandoffWindows(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Prune: %v", err)
 	}
-	// Two ids expire (72h) but only one bucket (7 days): the 4-day-old aggregate stays.
-	if pruned.Events != 2 || pruned.Minutes != 1 {
-		t.Errorf("pruned = %+v, want 2 event ids and 1 bucket", pruned)
+	// Two ids and their rows expire (72h) but only one bucket (7 days): the 4-day-old
+	// aggregate stays.
+	if pruned.Events != 2 || pruned.Jobs != 2 || pruned.Minutes != 1 {
+		t.Errorf("pruned = %+v, want 2 event ids, 2 job rows and 1 bucket", pruned)
+	}
+	if rows := countJobRows(t, store); rows != 1 {
+		t.Errorf("job rows = %d, want only the fresh job kept", rows)
 	}
 
 	buckets, err := store.Buckets(ctx, ResolutionMinute, "emails", now.Add(-minuteRetention), now)
@@ -241,7 +324,7 @@ func TestPruneDropsHistoryPastTheHandoffWindows(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Prune again: %v", err)
 	}
-	if again.Events != 0 || again.Minutes != 0 {
+	if again.Events != 0 || again.Jobs != 0 || again.Minutes != 0 {
 		t.Errorf("second prune = %+v, want nothing left to remove", again)
 	}
 }
@@ -253,13 +336,13 @@ func TestPruneKeepsRowsJustInsideTheWindow(t *testing.T) {
 
 	// One second inside the raw window: its id survives, so a replay is still absorbed.
 	rawEdge := now.Add(-rawRetention + time.Second)
-	if err := store.RecordJob(ctx, "raw-edge", "emails", "processed", 10, rawEdge); err != nil {
+	if err := store.RecordJob(ctx, job("raw-edge", "emails", "processed", 10, rawEdge)); err != nil {
 		t.Fatalf("RecordJob: %v", err)
 	}
 	// One second inside the minute window: the aggregate stays even though its id is
 	// past the 72-hour raw window (the documented tradeoff).
 	bucketEdge := now.Add(-minuteRetention + time.Second)
-	if err := store.RecordJob(ctx, "bucket-edge", "emails", "processed", 10, bucketEdge); err != nil {
+	if err := store.RecordJob(ctx, job("bucket-edge", "emails", "processed", 10, bucketEdge)); err != nil {
 		t.Fatalf("RecordJob: %v", err)
 	}
 
@@ -267,11 +350,13 @@ func TestPruneKeepsRowsJustInsideTheWindow(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Prune: %v", err)
 	}
-	if pruned.Events != 1 || pruned.Minutes != 0 {
-		t.Errorf("pruned = %+v, want only the 7-day-old event id removed", pruned)
+	// The id and the row of the 7-day-old job go on the raw window; its month-old minute
+	// bucket stays, because aggregates outlive the rows they were built from.
+	if pruned.Events != 1 || pruned.Jobs != 1 || pruned.Minutes != 0 {
+		t.Errorf("pruned = %+v, want the old id and row removed but not the bucket", pruned)
 	}
 
-	if err := store.RecordJob(ctx, "raw-edge", "emails", "processed", 10, rawEdge); err != nil {
+	if err := store.RecordJob(ctx, job("raw-edge", "emails", "processed", 10, rawEdge)); err != nil {
 		t.Fatalf("RecordJob replay: %v", err)
 	}
 	buckets, err := store.Buckets(ctx, ResolutionMinute, "emails", now.Add(-minuteRetention), now)
@@ -305,7 +390,7 @@ func TestRollupFoldsClosedMinutesIntoHoursAndDays(t *testing.T) {
 		{"e", "emails", "processed", 400, time.Date(2026, 11, 20, 12, 10, 0, 0, time.UTC)},
 	}
 	for _, record := range records {
-		if err := store.RecordJob(ctx, record.id, record.queue, record.outcome, record.duration, record.at); err != nil {
+		if err := store.RecordJob(ctx, job(record.id, record.queue, record.outcome, record.duration, record.at)); err != nil {
 			t.Fatalf("RecordJob(%s): %v", record.id, err)
 		}
 	}
@@ -357,7 +442,7 @@ func TestRollupIsIdempotentAndAbsorbsLateMinutes(t *testing.T) {
 	ctx := context.Background()
 	now := time.Date(2026, 11, 20, 12, 30, 0, 0, time.UTC)
 
-	if err := store.RecordJob(ctx, "a", "emails", "processed", 100, time.Date(2026, 11, 20, 10, 5, 0, 0, time.UTC)); err != nil {
+	if err := store.RecordJob(ctx, job("a", "emails", "processed", 100, time.Date(2026, 11, 20, 10, 5, 0, 0, time.UTC))); err != nil {
 		t.Fatalf("RecordJob: %v", err)
 	}
 	for i := 0; i < 2; i++ {
@@ -375,7 +460,7 @@ func TestRollupIsIdempotentAndAbsorbsLateMinutes(t *testing.T) {
 	}
 
 	// A stream entry delivered after its hour was folded is picked up by the next pass.
-	if err := store.RecordJob(ctx, "late", "emails", "failed", 50, time.Date(2026, 11, 20, 10, 40, 0, 0, time.UTC)); err != nil {
+	if err := store.RecordJob(ctx, job("late", "emails", "failed", 50, time.Date(2026, 11, 20, 10, 40, 0, 0, time.UTC))); err != nil {
 		t.Fatalf("RecordJob(late): %v", err)
 	}
 	if err := store.Rollup(ctx, now); err != nil {
@@ -398,7 +483,7 @@ func TestRollupKeepsHistoryPastTheMinuteWindow(t *testing.T) {
 	// Older than minute retention but inside hourly retention: a restart must roll it up
 	// before the prune that would otherwise delete it.
 	at := now.Add(-20 * 24 * time.Hour)
-	if err := store.RecordJob(ctx, "old", "emails", "processed", 10, at); err != nil {
+	if err := store.RecordJob(ctx, job("old", "emails", "processed", 10, at)); err != nil {
 		t.Fatalf("RecordJob: %v", err)
 	}
 	if err := store.Rollup(ctx, now); err != nil {
@@ -430,15 +515,15 @@ func TestPruneUsesTheConfiguredRawWindow(t *testing.T) {
 
 	// 30 hours old: past the configured 24-hour raw window, inside the 72-hour default,
 	// and inside the default minute window, so only the id may go.
-	if err := store.RecordJob(context.Background(), "id", "emails", "processed", 10, now.Add(-30*time.Hour)); err != nil {
+	if err := store.RecordJob(context.Background(), job("id", "emails", "processed", 10, now.Add(-30*time.Hour))); err != nil {
 		t.Fatalf("RecordJob: %v", err)
 	}
 	pruned, err := store.Prune(context.Background(), now)
 	if err != nil {
 		t.Fatalf("Prune: %v", err)
 	}
-	if pruned.Events != 1 || pruned.Minutes != 0 {
-		t.Errorf("pruned = %+v, want only the id removed by the 24-hour window", pruned)
+	if pruned.Events != 1 || pruned.Jobs != 1 || pruned.Minutes != 0 {
+		t.Errorf("pruned = %+v, want only the id and its row removed by the 24-hour window", pruned)
 	}
 }
 
@@ -456,7 +541,7 @@ func TestPruneUsesTheConfiguredRetentionPerLevel(t *testing.T) {
 	// 79 hours old: past every window except the 90-hour daily one (its day starts 84
 	// hours before now).
 	old := now.Add(-79 * time.Hour)
-	if err := store.RecordJob(ctx, "old", "emails", "processed", 10, old); err != nil {
+	if err := store.RecordJob(ctx, job("old", "emails", "processed", 10, old)); err != nil {
 		t.Fatalf("RecordJob: %v", err)
 	}
 	if err := store.Rollup(ctx, now); err != nil {
@@ -467,8 +552,8 @@ func TestPruneUsesTheConfiguredRetentionPerLevel(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Prune: %v", err)
 	}
-	if pruned.Events != 1 || pruned.Minutes != 1 || pruned.Hourly != 1 || pruned.Daily != 0 {
-		t.Fatalf("pruned = %+v, want the id, minute and hour gone but the day kept", pruned)
+	if pruned.Events != 1 || pruned.Jobs != 1 || pruned.Minutes != 1 || pruned.Hourly != 1 || pruned.Daily != 0 {
+		t.Fatalf("pruned = %+v, want the id, job row, minute and hour gone but the day kept", pruned)
 	}
 
 	// The daily aggregate outlives the hourly rows it was built from, then expires on its
@@ -486,7 +571,7 @@ func TestOpenCreatesTheParentDirectory(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "nested", "state", "metrics.db")
 
 	store := openStore(t, path)
-	if err := store.RecordJob(context.Background(), "e1", "emails", "processed", 1, at(1)); err != nil {
+	if err := store.RecordJob(context.Background(), job("e1", "emails", "processed", 1, at(1))); err != nil {
 		t.Fatalf("RecordJob: %v", err)
 	}
 }
@@ -509,7 +594,7 @@ func TestRecordRejectsRecordsItCannotAggregate(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			if err := store.RecordJob(ctx, tc.eventID, tc.queue, tc.outcome, 1, tc.start); err == nil {
+			if err := store.RecordJob(ctx, job(tc.eventID, tc.queue, tc.outcome, 1, tc.start)); err == nil {
 				t.Fatal("RecordJob accepted a record it cannot aggregate")
 			}
 		})

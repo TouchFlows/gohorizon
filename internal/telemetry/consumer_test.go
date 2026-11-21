@@ -3,7 +3,6 @@ package telemetry
 import (
 	"context"
 	"errors"
-	"fmt"
 	"io"
 	"log/slog"
 	"strings"
@@ -11,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gohorizon/gohorizon/internal/metrics"
 	"github.com/gohorizon/gohorizon/internal/redis"
 )
 
@@ -336,24 +336,24 @@ func TestWorkerStoppedDeliversItsReasonOnce(t *testing.T) {
 
 type recordingSink struct {
 	mu   sync.Mutex
-	jobs []string
+	jobs []metrics.JobRecord
 	err  error
 }
 
-func (r *recordingSink) RecordJob(_ context.Context, eventID, queue, outcome string, durationMS int64, _ time.Time) error {
+func (r *recordingSink) RecordJob(_ context.Context, job metrics.JobRecord) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.err != nil {
 		return r.err
 	}
-	r.jobs = append(r.jobs, fmt.Sprintf("%s %s %s %d", eventID, queue, outcome, durationMS))
+	r.jobs = append(r.jobs, job)
 	return nil
 }
 
-func (r *recordingSink) recorded() []string {
+func (r *recordingSink) recorded() []metrics.JobRecord {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	return append([]string(nil), r.jobs...)
+	return append([]metrics.JobRecord(nil), r.jobs...)
 }
 
 func (r *recordingSink) fail(err error) {
@@ -382,9 +382,17 @@ func TestJobEventsReachTheSinkOnce(t *testing.T) {
 		t.Fatalf("handle duplicate: %v", err)
 	}
 
-	want := []string{"evt-1 emails processed 1841"}
-	if got := sink.recorded(); len(got) != 1 || got[0] != want[0] {
-		t.Errorf("sink records = %v, want %v once", got, want)
+	got := sink.recorded()
+	if len(got) != 1 {
+		t.Fatalf("sink records = %v, want one", got)
+	}
+	want := metrics.JobRecord{
+		EventID: "evt-1", JobID: "u-1", UUID: "u-1", Class: `App\Jobs\SendMail`,
+		Queue: "emails", Connection: "redis", Outcome: "processed", Attempts: 2,
+		DurationMS: 1841, FinishedAt: mustTime(t, "2026-11-20T10:11:12.345Z"),
+	}
+	if got[0] != want {
+		t.Errorf("sink record = %+v, want %+v", got[0], want)
 	}
 	if stats := consumer.Stats(); stats.Events != 1 || stats.Duplicates != 1 {
 		t.Errorf("stats = %+v, want one event and one duplicate", stats)
@@ -469,6 +477,15 @@ func TestSeenSetForgetsIdsOutsideItsWindow(t *testing.T) {
 	if !seen.add("b") {
 		t.Error("add(b) rejected an id the re-admitted a pushed out")
 	}
+}
+
+func mustTime(t *testing.T, value string) time.Time {
+	t.Helper()
+	parsed, err := time.Parse(time.RFC3339Nano, value)
+	if err != nil {
+		t.Fatalf("parse %s: %v", value, err)
+	}
+	return parsed
 }
 
 func waitFor(t *testing.T, timeout time.Duration, condition func() bool, description string) {

@@ -38,6 +38,29 @@ CREATE TABLE IF NOT EXISTS recorded_events (
 	recorded_at INTEGER NOT NULL
 );
 
+-- One row per finished job attempt: what an operator reads as job history. It is a raw
+-- observation, pruned on the same window as the event ids (docs/adr/0007).
+CREATE TABLE IF NOT EXISTS jobs (
+	id TEXT PRIMARY KEY,
+	job_id TEXT NOT NULL,
+	uuid TEXT NOT NULL DEFAULT '',
+	class TEXT NOT NULL,
+	queue TEXT NOT NULL,
+	connection TEXT NOT NULL DEFAULT '',
+	outcome TEXT NOT NULL,
+	attempts INTEGER NOT NULL,
+	duration_ms INTEGER NOT NULL,
+	finished_at INTEGER NOT NULL,
+	exception_class TEXT NOT NULL DEFAULT '',
+	exception_message TEXT NOT NULL DEFAULT ''
+);
+
+-- Newest-first by outcome, queue or job: the three questions job history asks.
+CREATE INDEX IF NOT EXISTS jobs_finished_at ON jobs (finished_at DESC, id);
+CREATE INDEX IF NOT EXISTS jobs_job_id ON jobs (job_id, finished_at DESC);
+CREATE INDEX IF NOT EXISTS jobs_queue_finished_at ON jobs (queue, finished_at DESC);
+CREATE INDEX IF NOT EXISTS jobs_outcome_finished_at ON jobs (outcome, finished_at DESC);
+
 CREATE TABLE IF NOT EXISTS queue_buckets (
 	queue TEXT NOT NULL,
 	bucket_start INTEGER NOT NULL,
@@ -91,6 +114,25 @@ type Bucket struct {
 	Failed     int64     `json:"failed"`
 	TimedOut   int64     `json:"timed_out"`
 	DurationMS int64     `json:"duration_ms"`
+}
+
+// JobRecord is one finished job as the consumer hands it to the store: the observation an
+// operator reads as job history. EventID is the stream entry and deduplicates it, JobID is
+// the job's identity (its uuid, or the publisher's `id:` fallback), and a job that ran more
+// than once has one row per attempt. The exception fields are empty when none was thrown.
+type JobRecord struct {
+	EventID          string
+	JobID            string
+	UUID             string
+	Class            string
+	Queue            string
+	Connection       string
+	Outcome          string
+	Attempts         int
+	DurationMS       int64
+	FinishedAt       time.Time
+	ExceptionClass   string
+	ExceptionMessage string
 }
 
 // ErrDisabled reports that history was never opened: storage.driver is not sqlite, or
@@ -181,14 +223,15 @@ func (s *Store) Close() error { return s.db.Close() }
 // Pruned reports how much history one Prune removed, per level.
 type Pruned struct {
 	Events  int64
+	Jobs    int64
 	Minutes int64
 	Hourly  int64
 	Daily   int64
 }
 
-// Prune drops raw event ids and each aggregate level older than its configured window.
-// It is the only bound on the database's growth, so it runs at startup and hourly, after
-// Rollup has folded everything the prune is about to delete.
+// Prune drops raw event ids and job rows and each aggregate level older than its configured
+// window. It is the only bound on the database's growth, so it runs at startup and hourly,
+// after Rollup has folded everything the prune is about to delete.
 func (s *Store) Prune(ctx context.Context, now time.Time) (Pruned, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -204,6 +247,16 @@ func (s *Store) Prune(ctx context.Context, now time.Time) (Pruned, error) {
 	}
 	if pruned.Events, err = result.RowsAffected(); err != nil {
 		return Pruned{}, fmt.Errorf("count pruned event ids: %w", err)
+	}
+
+	// Job rows are raw data too: same window, same pass, no second notion of "raw".
+	result, err = tx.ExecContext(ctx, `DELETE FROM jobs WHERE finished_at < ?`,
+		now.Add(-s.retention.Raw).UTC().Unix())
+	if err != nil {
+		return Pruned{}, fmt.Errorf("prune job rows: %w", err)
+	}
+	if pruned.Jobs, err = result.RowsAffected(); err != nil {
+		return Pruned{}, fmt.Errorf("count pruned job rows: %w", err)
 	}
 
 	if pruned.Minutes, err = pruneBuckets(ctx, tx, ResolutionMinute, now.Add(-s.retention.Minute)); err != nil {
@@ -222,20 +275,21 @@ func (s *Store) Prune(ctx context.Context, now time.Time) (Pruned, error) {
 	return pruned, nil
 }
 
-// RecordJob adds one finished job to its queue's minute bucket. It is idempotent by
-// event id: the stream is at-least-once, so a replay after a crash must not double
-// count. It satisfies the telemetry consumer's sink.
-func (s *Store) RecordJob(ctx context.Context, eventID, queue, outcome string, durationMS int64, at time.Time) error {
-	if eventID == "" || queue == "" {
-		return errors.New("metrics record requires an event id and a queue")
+// RecordJob stores one finished job attempt and adds it to its queue's minute bucket. It is
+// idempotent by event id: the stream is at-least-once, so a replay after a crash must not
+// duplicate the row or double count. It satisfies the telemetry consumer's sink.
+func (s *Store) RecordJob(ctx context.Context, job JobRecord) error {
+	if job.EventID == "" || job.JobID == "" || job.Class == "" || job.Queue == "" {
+		return errors.New("metrics record requires an event id, a job id, a class and a queue")
 	}
-	column, ok := outcomeColumns[outcome]
+	column, ok := outcomeColumns[job.Outcome]
 	if !ok {
-		return fmt.Errorf("unknown job outcome %q", outcome)
+		return fmt.Errorf("unknown job outcome %q", job.Outcome)
 	}
-	if durationMS < 0 || at.IsZero() {
-		return fmt.Errorf("invalid job record for event %s", eventID)
+	if job.DurationMS < 0 || job.Attempts < 0 || job.FinishedAt.IsZero() {
+		return fmt.Errorf("invalid job record for event %s", job.EventID)
 	}
+	at := job.FinishedAt
 
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -245,16 +299,33 @@ func (s *Store) RecordJob(ctx context.Context, eventID, queue, outcome string, d
 
 	result, err := tx.ExecContext(ctx,
 		`INSERT INTO recorded_events (id, recorded_at) VALUES (?, ?) ON CONFLICT(id) DO NOTHING`,
-		eventID, at.UTC().Unix())
+		job.EventID, at.UTC().Unix())
 	if err != nil {
 		return fmt.Errorf("record event id: %w", err)
 	}
-	inserted, err := result.RowsAffected()
+	eventInserted, err := result.RowsAffected()
 	if err != nil {
 		return fmt.Errorf("check event id: %w", err)
 	}
-	if inserted == 0 {
-		return tx.Commit() // already counted before a replay
+
+	// The row is keyed by the event, so replaying an entry fills nothing twice. A row that
+	// is already there still counts as recorded even if its event id was pruned.
+	result, err = tx.ExecContext(ctx, `
+INSERT INTO jobs (id, job_id, uuid, class, queue, connection, outcome, attempts,
+	duration_ms, finished_at, exception_class, exception_message)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+ON CONFLICT(id) DO NOTHING`,
+		job.EventID, job.JobID, job.UUID, job.Class, job.Queue, job.Connection, job.Outcome,
+		job.Attempts, job.DurationMS, at.UTC().Unix(), job.ExceptionClass, job.ExceptionMessage)
+	if err != nil {
+		return fmt.Errorf("record job row: %w", err)
+	}
+	jobInserted, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("check job row: %w", err)
+	}
+	if eventInserted == 0 || jobInserted == 0 {
+		return tx.Commit() // already recorded before a replay
 	}
 
 	query := fmt.Sprintf(`INSERT INTO queue_buckets (queue, bucket_start, duration_ms, %[1]s)
@@ -263,7 +334,7 @@ ON CONFLICT(queue, bucket_start) DO UPDATE SET
 	duration_ms = duration_ms + excluded.duration_ms,
 	%[1]s = %[1]s + 1`, column)
 	bucket := at.UTC().Truncate(bucketSize).Unix()
-	if _, err := tx.ExecContext(ctx, query, queue, bucket, durationMS); err != nil {
+	if _, err := tx.ExecContext(ctx, query, job.Queue, bucket, job.DurationMS); err != nil {
 		return fmt.Errorf("aggregate job metric: %w", err)
 	}
 	if err := tx.Commit(); err != nil {

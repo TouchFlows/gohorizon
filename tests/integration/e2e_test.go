@@ -116,6 +116,28 @@ func TestRealWorkerRunsJobsAndReportsThemOnTheAPI(t *testing.T) {
 		}
 		return nil
 	})
+
+	// The rows, not just the counters: history must name a real job's class and carry a
+	// real failure's exception, which is what proves the decoded identity is stored.
+	eventually(t, 30*time.Second, "the real jobs in the jobs table", func() error {
+		stored, err := h.storedJobs()
+		if err != nil {
+			return err
+		}
+		var markers, failures int
+		for _, job := range stored {
+			switch {
+			case job.Outcome == "processed" && job.Class == `App\Jobs\RecordMarker` && job.Queue == testQueue:
+				markers++
+			case job.Outcome == "failed" && job.Class == `App\Jobs\AlwaysFails` && job.ExceptionClass == "RuntimeException":
+				failures++
+			}
+		}
+		if markers < 1 || failures < 1 {
+			return fmt.Errorf("processed RecordMarker rows=%d, failed AlwaysFails rows=%d of %d", markers, failures, len(stored))
+		}
+		return nil
+	})
 }
 
 // TestOneWorkerPerQueueRunsItsOwnJobs proves the shape people deploy: one supervisor over

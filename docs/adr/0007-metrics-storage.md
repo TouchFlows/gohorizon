@@ -21,12 +21,22 @@ Two constraints shape the storage:
 
 1. **SQLite at `storage.path`**, opened by `internal/metrics` (driver: `modernc.org/sqlite`,
    the pure-Go build chosen in handoff §5). The directory is created if missing.
-2. **Aggregates, not an event log.** `job.finished` events are folded into
+2. **Aggregates plus one row per attempt.** `job.finished` events are folded into
    `queue_buckets(queue, bucket_start, processed, released, failed, timed_out,
    duration_ms)`, one row per queue per minute (UTC). The job count is the
    sum of the outcome counters, so it is not stored twice. Minutes keep recent history useful at a
    row cost of one per queue per busy minute; the coarser hourly and daily rollups from
    handoff §9 are not implemented yet.
+
+   The same write also stores the attempt itself in
+   `jobs(id, job_id, uuid, class, queue, connection, outcome, attempts, duration_ms,
+   finished_at, exception_class, exception_message)`, keyed by the event id so a replay
+   cannot duplicate it. `job_id` is the job's identity — its uuid, or `id:` plus the queue
+   job id when Laravel assigned none, which is the fallback the recorder itself uses — so
+   the attempts of one job can be read together. Indexes serve the questions job history
+   asks: `(finished_at DESC, id)`, `(job_id, finished_at DESC)`, `(queue, finished_at
+   DESC)` and `(outcome, finished_at DESC)`. These rows are observations, not a ledger:
+   they are bounded by the raw window, and a missing row never affects a worker.
 3. **Exactly-once by event id.** `recorded_events(id, recorded_at)` is inserted in the
    same transaction as the bucket update, and a duplicate insert aborts the update. This
    makes the sink idempotent across restarts, which is what allows a safe retry.
@@ -44,7 +54,7 @@ Two constraints shape the storage:
    (minute by default), read-only; the dashboard remains a later slice.
 7. **Bounded growth follows handoff §9.** `Rollup` folds closed minute buckets into
    hourly buckets and closed hourly buckets into daily ones; `Prune` then deletes event
-   ids and each aggregate level past its window. Both run at startup and then hourly,
+   ids, job rows and each aggregate level past its window. Both run at startup and then hourly,
    rollup first: pruning minutes before rolling them up would leave holes in the hours
    and days built from them, so a failed rollup skips that prune pass. Windows come from
    `storage.retention` (defaults 72 h raw — the upper end of the handoff's window, so an
@@ -62,7 +72,10 @@ Two constraints shape the storage:
   not counted twice.
 - Per-queue aggregates exist at minute, hour and day resolution for the handoff's
   balancing and dashboard work; `GET /api/v1/metrics?resolution=` serves all three.
-- The database is bounded: ids live 72 hours, minute buckets 7 days. An event
+- The database is bounded: ids and job rows live 72 hours, minute buckets 7 days, so
+  job history is a recent window, not an archive, and a failed job older than it is gone.
+  Volume is the cost: a busy queue writes one row per attempt, which dwarfs the aggregates,
+  and the prune pass is the only bound. An event
   redelivered after its id was pruned would be counted again, but the stream's own
   `telemetry.retention` window is far shorter than 72 hours in practice.
 - Schema changes before the first release are applied by recreating the database;
