@@ -30,6 +30,17 @@ describe('isHistory', () => {
     expect(isHistory({ ...history, resolution: 'weekly' })).toBe(false)
     expect(isHistory({ ...history, buckets: null })).toBe(false)
   })
+
+  it('rejects a bucket whose duration the screen would draw as NaN', () => {
+    expect(
+      isHistory({
+        ...history,
+        buckets: [
+          { start: '2026-11-21T12:00:00Z', processed: 1, released: 0, failed: 0, timed_out: 0 },
+        ],
+      }),
+    ).toBe(false)
+  })
 })
 
 const jobPage = {

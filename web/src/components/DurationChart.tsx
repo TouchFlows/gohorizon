@@ -15,13 +15,16 @@ export default function DurationChart({ model, resolution }: { model: ChartModel
   const plotHeight = height - padding * 2
   const slot = plotWidth / model.buckets.length
   const barWidth = Math.max(1, slot - 1)
+  // The caption reports the slowest bucket, not the scale: a store where every attempt
+  // finished in under a millisecond has no 1 ms peak, it has no peak at all.
+  const peak = Math.max(0, ...model.buckets.map((bucket) => bucket.averageMs))
 
   return (
     <figure className="chart chart--duration">
       <svg
         viewBox={`0 0 ${width} ${height}`}
         role="img"
-        aria-label={`Average duration per attempt over ${model.buckets.length} buckets, peak ${model.maxAverageMs} ms`}
+        aria-label={`Average duration per attempt over ${model.buckets.length} buckets, peak average ${peak} ms`}
       >
         <line
           x1={padding}
@@ -54,7 +57,7 @@ export default function DurationChart({ model, resolution }: { model: ChartModel
 
       <figcaption className="chart__caption">
         <span className="chart__axis">Average duration per attempt</span>
-        <span className="chart__total">{model.maxAverageMs} ms peak average</span>
+        <span className="chart__total">{peak} ms peak average</span>
       </figcaption>
     </figure>
   )
