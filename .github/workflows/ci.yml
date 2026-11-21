@@ -49,8 +49,8 @@ jobs:
       - name: go test
         run: go test -race -count=1 ./...
 
-      # The fixture keeps its lock file untracked, so this resolves the pinned ranges
-      # rather than replaying an exact dependency set.
+      # The fixture's lock file is tracked, so this replays the exact dependency set
+      # the suite was last run against.
       - name: Install the acceptance fixture
         working-directory: tests/fixtures/laravel-app
         run: composer install --no-interaction --no-progress

@@ -89,7 +89,8 @@ a second one. The tests are skipped unless `GOHORIZON_E2E=1`, so `go test ./...`
 fast and needs no PHP.
 
 The fixture is `tests/fixtures/laravel-app`: a Laravel 13 app with the package installed
-by path. Its `vendor/` and `composer.lock` are ignored, so install them once. The suite
+by path. Its `composer.lock` is tracked so everyone runs the same dependency set, and
+`vendor/` is ignored, so install it once. The suite
 expects Redis at `127.0.0.1:6379`, works in database 15 and deletes only the keys it
 created:
 
