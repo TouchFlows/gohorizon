@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { isHealthReport } from './api'
+import { isHealthReport, isHistory } from './api'
 
 const report = {
   status: 'ok',
@@ -10,6 +10,27 @@ const report = {
   queues: { depths: [] },
   supervisors: [],
 }
+
+const history = {
+  queue: 'default',
+  resolution: 'minute',
+  from: '2026-11-21T12:00:00Z',
+  to: '2026-11-21T12:05:00Z',
+  buckets: [{ start: '2026-11-21T12:00:00Z', processed: 1, released: 0, failed: 0, timed_out: 0, duration_ms: 120 }],
+}
+
+describe('isHistory', () => {
+  it('accepts a history the chart can draw', () => {
+    expect(isHistory(history)).toBe(true)
+    expect(isHistory({ ...history, buckets: [] })).toBe(true)
+  })
+
+  it('rejects a bucket without the counters a column needs', () => {
+    expect(isHistory({ ...history, buckets: [{ start: '2026-11-21T12:00:00Z', processed: 1 }] })).toBe(false)
+    expect(isHistory({ ...history, resolution: 'weekly' })).toBe(false)
+    expect(isHistory({ ...history, buckets: null })).toBe(false)
+  })
+})
 
 describe('isHealthReport', () => {
   it('accepts a report the screens can render', () => {
