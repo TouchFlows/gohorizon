@@ -603,6 +603,27 @@ func (h *harness) fetchJob(base, identity string) (jobSummary, error) {
 	return job, nil
 }
 
+// fetchExposition reads the Prometheus endpoint, so an acceptance test proves the scrape
+// route answers on the real binary and not only in the router's tests.
+func (h *harness) fetchExposition(base string) (string, error) {
+	resp, err := http.Get(base + "/metrics")
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("/metrics returned %d", resp.StatusCode)
+	}
+	if got := resp.Header.Get("Content-Type"); got != "text/plain; version=0.0.4; charset=utf-8" {
+		return "", fmt.Errorf("/metrics content type = %q, want the exposition format", got)
+	}
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", err
+	}
+	return string(body), nil
+}
+
 // storedJob is one row of the jobs table the running service wrote.
 type storedJob struct {
 	Class          string

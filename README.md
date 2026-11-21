@@ -50,7 +50,9 @@ Milestone 1 (proof of concept) in progress. Implemented:
   report are `null`, and a missing package or failing command only fills in
   `queues.error` — the status stays `ok`, so a health check cannot restart healthy
   workers over a failed inspection.
-- Read-only `GET /api/v1/health`.
+- Read-only `GET /api/v1/health`, and `GET /metrics` for a Prometheus scrape of the same
+  state: `gohorizon_up`, `gohorizon_lock_held`, telemetry counters by result, queue depth
+  by state, and workers by state and crash loops per supervisor.
 - `gohorizon/laravel` package: configuration, job lifecycle telemetry to a Redis Stream,
   `gohorizon:capabilities`, `gohorizon:inspect`.
 
@@ -73,8 +75,19 @@ the queue job id (the same `id:` fallback the recorder uses). A malformed query 
 unknown identity a 404, unavailable history a 503, and a store failure a 500 without the
 database path.
 
+`GET /metrics` serves the state `/api/v1/health` reports in the Prometheus text format
+(`text/plain; version=0.0.4; charset=utf-8`), without a client library:
+`gohorizon_up`, `gohorizon_lock_held`,
+`gohorizon_telemetry_events_total{result="event|duplicate|invalid|error"}`,
+`gohorizon_queue_jobs{queue,state="pending|reserved|delayed"}`,
+`gohorizon_workers{supervisor,state}` and `gohorizon_crash_looping_workers{supervisor}`.
+A count the driver could not report has no sample rather than a zero, and label values are
+escaped as the format requires. Both `/metrics` and `/api/v1/health` are unauthenticated
+like the rest of the API today: keep them behind the reverse proxy until Milestone 3 adds
+authentication.
+
 Not implemented yet: the React dashboard, authentication, balancing, failed-job
-administration, Prometheus exposition.
+administration.
 
 ## Layout
 

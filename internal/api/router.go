@@ -36,6 +36,10 @@ func NewRouter(provider Provider, log *slog.Logger) http.Handler {
 	r := chi.NewRouter()
 	r.Use(recoverer(log))
 
+	// The scrape path is the conventional one, outside the versioned API: a Prometheus
+	// configuration names it, not a client written against this service.
+	r.Get("/metrics", metricsExposition(provider))
+
 	r.Route("/api/v1", func(r chi.Router) {
 		r.Get("/health", func(w http.ResponseWriter, _ *http.Request) {
 			report := provider.Report()

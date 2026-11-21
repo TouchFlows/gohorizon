@@ -162,6 +162,26 @@ func TestRealWorkerRunsJobsAndReportsThemOnTheAPI(t *testing.T) {
 		}
 		return fmt.Errorf("%d failed jobs, none an AlwaysFails with its exception", len(listed))
 	})
+
+	// The scrape reads the same state, from the same binary, in the format Prometheus parses.
+	eventually(t, 30*time.Second, "the pool and its queues on /metrics", func() error {
+		body, err := h.fetchExposition(base)
+		if err != nil {
+			return err
+		}
+		for _, want := range []string{
+			"gohorizon_up 1",
+			"gohorizon_lock_held 1",
+			`gohorizon_queue_jobs{queue="` + testQueue + `",state="pending"}`,
+			`gohorizon_workers{supervisor="`,
+			`gohorizon_crash_looping_workers{supervisor="`,
+		} {
+			if !strings.Contains(body, want) {
+				return fmt.Errorf("/metrics has no %q", want)
+			}
+		}
+		return nil
+	})
 }
 
 // TestOneWorkerPerQueueRunsItsOwnJobs proves the shape people deploy: one supervisor over
