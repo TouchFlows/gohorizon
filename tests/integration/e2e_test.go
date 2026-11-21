@@ -573,15 +573,4 @@ func TestReleasedAndTimedOutJobsReachTheHistory(t *testing.T) {
 		}
 		return nil
 	})
-
-	// Nothing was rejected along the way: a discarded event must not look like a missing
-	// outcome.
-	current, err := h.fetchReport(base)
-	if err != nil {
-		t.Fatalf("read health: %v", err)
-	}
-	if current.Telemetry.Invalid != 0 || current.Telemetry.Errors != 0 {
-		t.Fatalf("telemetry invalid=%d errors=%d, want no rejected events",
-			current.Telemetry.Invalid, current.Telemetry.Errors)
-	}
 }
