@@ -81,8 +81,9 @@ database path.
 `gohorizon_telemetry_events_total{result="event|duplicate|invalid|error"}`,
 `gohorizon_queue_jobs{queue,state="pending|reserved|delayed"}`,
 `gohorizon_workers{supervisor,state}` and `gohorizon_crash_looping_workers{supervisor}`.
-A count the driver could not report has no sample rather than a zero, and label values are
-escaped as the format requires. Both `/metrics` and `/api/v1/health` are unauthenticated
+The `error` result counts Redis failures that were retried, not failed jobs. A count the
+driver could not report has no sample rather than a zero, and label values are escaped as
+the format requires. Both `/metrics` and `/api/v1/health` are unauthenticated
 like the rest of the API today: keep them behind the reverse proxy until Milestone 3 adds
 authentication.
 

@@ -61,8 +61,9 @@ func exposition(report health.Report) string {
 	writeSample(&b, metricLockHeld, held)
 
 	// These are counters since start, so zero is a fact about the run and is always written.
+	// "error" is a Redis read, ack or sink failure that was retried, not a failed job.
 	writeFamily(&b, metricTelemetryEvents, "counter",
-		"Events the telemetry consumer has handled since start, by result.")
+		"Telemetry outcomes since start, by result: events handled, duplicates, discarded invalid events and retried Redis failures.")
 	writeSample(&b, metricTelemetryEvents, report.Telemetry.Events, "result", "event")
 	writeSample(&b, metricTelemetryEvents, report.Telemetry.Duplicates, "result", "duplicate")
 	writeSample(&b, metricTelemetryEvents, report.Telemetry.Invalid, "result", "invalid")
@@ -84,8 +85,7 @@ func exposition(report health.Report) string {
 		}
 	}
 
-	writeFamily(&b, metricWorkers, "gauge",
-		"Workers a supervisor has in each state it currently occupies.")
+	writeFamily(&b, metricWorkers, "gauge", "Workers a supervisor has in each state.")
 	for _, supervisor := range report.Supervisors {
 		counts := make(map[string]int, len(supervisor.Workers))
 		for _, worker := range supervisor.Workers {

@@ -19,7 +19,7 @@ func prometheusReport() health.Report {
 		Telemetry: health.Telemetry{Events: 42, Duplicates: 3, Invalid: 1, Errors: 2},
 		Queues: health.Queues{
 			Depths: []health.QueueDepth{
-				{Queue: "reports", Pending: &pending, OldestPendingError: "RedisException"},
+				{Queue: "reports", Pending: &pending}, // only one of its three counts is known
 				{Queue: "default", Pending: &pending, Reserved: &reserved},
 			},
 		},

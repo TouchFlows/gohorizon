@@ -1,4 +1,5 @@
-// Package api exposes the read-only operational endpoints needed in Milestone 1.
+// Package api exposes the read-only operational endpoints: health, queue and job history,
+// and the Prometheus scrape of the same state.
 package api
 
 import (
