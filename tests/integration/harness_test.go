@@ -126,7 +126,7 @@ func newHarness(t *testing.T) *harness {
 // loopback URL the command will serve.
 func (h *harness) writeConfig() (string, string) {
 	h.t.Helper()
-	return h.writeConfigAt(testRedisAddr)
+	return h.writeConfigFor(testRedisAddr, []string{testQueue}, 1)
 }
 
 // writeConfigAt is writeConfig with the control plane's Redis address overridden, so a
@@ -135,8 +135,20 @@ func (h *harness) writeConfig() (string, string) {
 // what makes an outage here an outage of the control plane alone.
 func (h *harness) writeConfigAt(address string) (string, string) {
 	h.t.Helper()
+	return h.writeConfigFor(address, []string{testQueue}, 1)
+}
+
+// writeConfigFor is writeConfigAt with the supervisor's shape overridden: the queues it
+// launches workers for and how many workers it runs. max mirrors min because fixed
+// allocation takes its pool size from min.
+func (h *harness) writeConfigFor(address string, queues []string, workers int) (string, string) {
+	h.t.Helper()
 
 	listen := fmt.Sprintf("127.0.0.1:%d", freePort(h.t))
+	var queueLines strings.Builder
+	for _, queue := range queues {
+		fmt.Fprintf(&queueLines, "          - %s\n", queue)
+	}
 	src := fmt.Sprintf(`version: 1
 
 server:
@@ -162,12 +174,11 @@ applications:
     supervisors:
       - id: e2e
         queues:
-          - %s
-        balance:
+%s        balance:
           strategy: fixed
         workers:
-          min: 1
-          max: 1
+          min: %d
+          max: %d
         worker:
           sleep: 1
           tries: 1
@@ -184,7 +195,9 @@ applications:
 		h.fixture,
 		h.php,
 		testEnvironment,
-		testQueue,
+		queueLines.String(),
+		workers,
+		workers,
 	)
 
 	path := filepath.Join(h.dir, "gohorizon.yaml")
@@ -286,14 +299,28 @@ func (i *instance) terminate(t *testing.T) {
 	}
 }
 
-// dispatch enqueues one fixture job through Laravel itself, so the test never writes a
-// queue payload by hand.
+// dispatch enqueues one fixture job on the test queue through Laravel itself, so the test
+// never writes a queue payload by hand.
 func (h *harness) dispatch(kind, argument string) error {
+	return h.dispatchTo(testQueue, kind, argument)
+}
+
+// dispatchTo enqueues one fixture job on a named queue, so a test can prove which worker
+// ran it. The queue travels in the environment the fixture already reads; the harness's
+// own value is replaced rather than duplicated, because a duplicate variable leaves the
+// winner up to libc.
+func (h *harness) dispatchTo(queue, kind, argument string) error {
 	cmd := exec.Command(h.php, "dispatch.php", kind, argument)
 	cmd.Dir = h.fixture
-	cmd.Env = os.Environ()
+	for _, entry := range os.Environ() {
+		if strings.HasPrefix(entry, "GOHORIZON_E2E_QUEUE=") {
+			continue
+		}
+		cmd.Env = append(cmd.Env, entry)
+	}
+	cmd.Env = append(cmd.Env, "GOHORIZON_E2E_QUEUE="+queue)
 	if out, err := cmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("dispatch %s: %w\n%s", kind, err, out)
+		return fmt.Errorf("dispatch %s to %s: %w\n%s", kind, queue, err, out)
 	}
 	return nil
 }
@@ -432,6 +459,7 @@ type reportSupervisor struct {
 
 type reportWorker struct {
 	UUID     string `json:"uuid"`
+	Queue    string `json:"queue"`
 	PID      int    `json:"pid"`
 	State    string `json:"state"`
 	Restarts int    `json:"restarts"`
@@ -504,7 +532,13 @@ func (h history) totals() (processed, failed int) {
 }
 
 func (h *harness) fetchHistory(base string) (history, error) {
-	resp, err := http.Get(base + "/api/v1/metrics?queue=" + testQueue)
+	return h.fetchHistoryFor(base, testQueue)
+}
+
+// fetchHistoryFor reads one queue's history, so a test can prove the queues are accounted
+// for separately instead of pooling into one bucket.
+func (h *harness) fetchHistoryFor(base, queue string) (history, error) {
+	resp, err := http.Get(base + "/api/v1/metrics?queue=" + queue)
 	if err != nil {
 		return history{}, err
 	}

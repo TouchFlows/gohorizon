@@ -21,11 +21,13 @@ import (
 	"time"
 )
 
+// awaitRunning waits until the configured pool is at its desired size and healthy, so the
+// single-worker tests and the two-queue pool share one definition of ready.
 func awaitRunning(h *harness, base string) report {
 	h.t.Helper()
 
 	var latest report
-	eventually(h.t, 40*time.Second, "one running worker reported as healthy", func() error {
+	eventually(h.t, 40*time.Second, "the desired pool running and reported as healthy", func() error {
 		current, err := h.fetchReport(base)
 		if err != nil {
 			return err
@@ -35,11 +37,16 @@ func awaitRunning(h *harness, base string) report {
 			return fmt.Errorf("status is %q", current.Status)
 		}
 		sup := current.supervisor(h.t)
-		if sup.Running != 1 {
+		if sup.Running != sup.Desired {
 			return fmt.Errorf("running=%d, desired=%d", sup.Running, sup.Desired)
 		}
-		if len(sup.Workers) != 1 || sup.Workers[0].State != "running" {
-			return fmt.Errorf("workers=%+v", sup.Workers)
+		if len(sup.Workers) != sup.Desired {
+			return fmt.Errorf("workers=%+v, want %d", sup.Workers, sup.Desired)
+		}
+		for _, worker := range sup.Workers {
+			if worker.State != "running" {
+				return fmt.Errorf("worker %s is %s", worker.UUID, worker.State)
+			}
 		}
 		return nil
 	})
@@ -109,6 +116,62 @@ func TestRealWorkerRunsJobsAndReportsThemOnTheAPI(t *testing.T) {
 		}
 		return nil
 	})
+}
+
+// TestOneWorkerPerQueueRunsItsOwnJobs proves the shape people deploy: one supervisor over
+// two queues with one worker each. Allocation is round-robin per slot, so a slip would
+// leave one queue with two workers and the other with none — and the per-queue history
+// would then attribute both jobs to the same queue.
+func TestOneWorkerPerQueueRunsItsOwnJobs(t *testing.T) {
+	first, second := testQueue+"-a", testQueue+"-b"
+
+	h := newHarness(t)
+	configPath, base := h.writeConfigFor(testRedisAddr, []string{first, second}, 2)
+	h.startBinary(h.buildBinary(), configPath)
+	pool := awaitRunning(h, base).supervisor(t)
+
+	workers := map[string]int{}
+	for _, worker := range pool.Workers {
+		workers[worker.Queue]++
+	}
+	if workers[first] != 1 || workers[second] != 1 {
+		t.Fatalf("worker queues = %v, want one worker on each of %s and %s", workers, first, second)
+	}
+
+	// Both jobs are dispatched before either is awaited, so the assertions hold while the
+	// two workers are running side by side.
+	markers := map[string]string{
+		first:  filepath.Join(h.dir, "marker-a.txt"),
+		second: filepath.Join(h.dir, "marker-b.txt"),
+	}
+	for queue, marker := range markers {
+		if err := h.dispatchTo(queue, "marker", marker); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for queue, marker := range markers {
+		eventually(t, 30*time.Second, "the job dispatched to "+queue+" to run", func() error {
+			_, err := os.Stat(marker)
+			return err
+		})
+		requireRuns(t, marker, 0, 1)
+	}
+
+	// Each queue's history holds exactly its own job: a shared bucket would let a job run
+	// by the wrong worker hide.
+	for queue := range markers {
+		eventually(t, 30*time.Second, "the processed job for "+queue+" in /metrics", func() error {
+			saved, err := h.fetchHistoryFor(base, queue)
+			if err != nil {
+				return err
+			}
+			processed, failed := saved.totals()
+			if processed != 1 || failed != 0 {
+				return fmt.Errorf("processed=%d failed=%d, want exactly its own job", processed, failed)
+			}
+			return nil
+		})
+	}
 }
 
 // TestGracefulStopFinishesTheInFlightJobExactlyOnce proves the promise a graceful stop
