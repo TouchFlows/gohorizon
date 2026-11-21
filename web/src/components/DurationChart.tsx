@@ -33,6 +33,11 @@ export default function DurationChart({ model, resolution }: { model: ChartModel
           y2={padding + plotHeight}
           stroke="var(--line)"
         />
+        {/* The label carries the number the caption used to, in the one place it reads as a
+            scale: the top of the plot, which is what a full-height column means. */}
+        <text className="chart__scale" x={padding} y={padding - 10}>
+          {peak} ms
+        </text>
         {model.buckets.map((bucket, index) => {
           // A bucket that ran nothing has nothing to average; drawing it would claim a job
           // took no time at all.
@@ -57,7 +62,6 @@ export default function DurationChart({ model, resolution }: { model: ChartModel
 
       <figcaption className="chart__caption">
         <span className="chart__axis">Average duration per attempt</span>
-        <span className="chart__total">{peak} ms peak average</span>
       </figcaption>
     </figure>
   )

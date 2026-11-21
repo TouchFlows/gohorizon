@@ -30,6 +30,11 @@ export default function OutcomeChart({ model, resolution }: { model: ChartModel;
           y2={padding + plotHeight}
           stroke="var(--line)"
         />
+        {/* The top of the scale, so a full-height column is a number and not a guess. It
+            sits in the margin above the plot, where no column can reach it. */}
+        <text className="chart__scale" x={padding} y={padding - 10}>
+          {model.max} {model.max === 1 ? 'job' : 'jobs'}
+        </text>
         {model.buckets.map((bucket, index) => {
           const x = padding + index * slot
           let baseline = padding + plotHeight

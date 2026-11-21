@@ -316,6 +316,12 @@ a {
   border-radius: 10px;
 }
 
+.chart__scale {
+  font-size: 10px;
+  fill: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
 .chart__caption {
   display: flex;
   flex-wrap: wrap;
