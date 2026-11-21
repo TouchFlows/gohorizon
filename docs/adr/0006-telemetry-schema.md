@@ -72,8 +72,10 @@ name. Laravel 13 makes that insufficient:
 - The outcome set is closed at four values. An event carrying anything else is rejected
   and counted as invalid, so a typo in the publisher cannot quietly invent a new column.
 - The consumer validates the identity the payload already carries: a `job.finished`
-  without `job.uuid` or `job.class`, a negative `attempts`, or an `exception` without a
-  class is rejected rather than stored unattributably. Both fields were verified present
-  in the success and failure entries a real fixture worker published, so the check cannot
-  reject a payload the package emits.
+  without `job.id` or `job.class`, a negative `attempts`, or an `exception` without a
+  class is rejected rather than stored unattributably. The queue job id is required, not
+  the uuid: Laravel assigns a uuid when it pushes a job, but one that reached the queue
+  another way has none, and rejecting those would lose their metrics. A job's identity is
+  its uuid when present and `id:` plus the queue job id otherwise — the same fallback the
+  recorder uses to match an attempt to its start, so both halves name a job identically.
 - Losing the buffer on SIGKILL is accepted: telemetry is observation, never a job ledger.

@@ -71,6 +71,33 @@ func TestDecodeReadsWhatARealWorkerPublished(t *testing.T) {
 	}
 }
 
+func TestDecodeKeepsJobsPublishedWithoutAUUID(t *testing.T) {
+	// A job pushed by something other than Laravel's dispatcher has no uuid; the queue
+	// job id is then the only identity, and dropping the event would lose its metrics.
+	payload := strings.Replace(jobEvent("evt-1", "processed"), `"uuid":"u-1",`, "", 1)
+
+	event, err := Decode(payload)
+	if err != nil {
+		t.Fatalf("Decode a job without a uuid: %v", err)
+	}
+	if event.Job.UUID != "" {
+		t.Errorf("uuid = %q, want it absent", event.Job.UUID)
+	}
+	if got := event.Job.Identity(); got != "id:1" {
+		t.Errorf("Identity() = %q, want the recorder's id: fallback", got)
+	}
+}
+
+func TestIdentityPrefersTheUUID(t *testing.T) {
+	event, err := Decode(jobEvent("evt-1", "processed"))
+	if err != nil {
+		t.Fatalf("Decode: %v", err)
+	}
+	if got := event.Job.Identity(); got != "u-1" {
+		t.Errorf("Identity() = %q, want the published uuid", got)
+	}
+}
+
 func TestDecodeReadsThePublishedFailureWithItsException(t *testing.T) {
 	const published = `{"schema": 1, "id": "62586ab0-3d98-45a4-a253-1e7396702497", "type": "job.finished", "application": "gohorizon-e2e", "environment": "e2e", "worker": "unknown", "at": "2026-11-21T14:08:49.458Z", "job": {"uuid": "7b128a5c-3571-4f25-bc26-527920230969", "id": "K3BF2fnLUHK69xBoeMSA4PCi1zfMkYxS", "class": "App\\Jobs\\AlwaysFails", "connection": "redis", "queue": "default", "attempts": 1, "outcome": "failed", "duration_ms": 9, "exception": {"class": "RuntimeException", "message": "the acceptance fixture always fails"}}, "tags": []}`
 
@@ -146,7 +173,7 @@ func TestDecodeRejectsEventsTheConsumerCannotTrust(t *testing.T) {
 		{"job event without a job", `{"schema":1,"id":"e","type":"job.finished","application":"production","environment":"production","at":"2026-11-20T10:11:12.345Z"}`, "requires a job object"},
 		{"worker event without a body", `{"schema":1,"id":"e","type":"worker.stopped","application":"production","environment":"production","at":"2026-11-20T10:11:12.345Z"}`, "requires a worker_event"},
 		{"missing timestamp", strings.Replace(jobEvent("evt-1", "processed"), `"at":"2026-11-20T10:11:12.345Z",`, "", 1), "at is required"},
-		{"missing job uuid", strings.Replace(jobEvent("evt-1", "processed"), `"uuid":"u-1",`, "", 1), "job.uuid"},
+		{"missing job id", strings.Replace(jobEvent("evt-1", "processed"), `"id":"1",`, "", 1), "job.id"},
 		{"missing job class", strings.Replace(jobEvent("evt-1", "processed"), `"class":"App\\Jobs\\SendMail",`, "", 1), "job.class"},
 		{"negative attempts", strings.Replace(jobEvent("evt-1", "processed"), `"attempts":2`, `"attempts":-1`, 1), "job.attempts"},
 		{"exception without a class", strings.Replace(jobEvent("evt-1", "failed"), `"exception":null`, `"exception":{"message":"boom"}`, 1), "job.exception"},

@@ -56,6 +56,17 @@ type jobPayload struct {
 	Exception  *Exception `json:"exception"`
 }
 
+// Identity is the key that ties attempts of one job together: the uuid Laravel assigned
+// when there is one, otherwise "id:" plus the queue job id. That fallback is the
+// recorder's own (it keys in-flight attempts the same way), so both halves agree on what
+// names a job when no uuid was published.
+func (j *jobPayload) Identity() string {
+	if uuid := strings.TrimSpace(j.UUID); uuid != "" {
+		return uuid
+	}
+	return "id:" + strings.TrimSpace(j.ID)
+}
+
 // Exception is the failure a throwing attempt carries. The publisher sanitizes and
 // truncates the message before publishing it (docs/adr/0006); the consumer only
 // transports it, and `Message` is the sanitized text to show an operator.
@@ -107,11 +118,12 @@ func (e Event) validate() error {
 			add("%s requires job.queue: metrics are aggregated per queue", TypeJobFinished)
 		}
 		// A record without an identity cannot be attributed to a job, so it is refused
-		// rather than stored as an anonymous row. Every real payload carries both: the
-		// fixture's success and failure entries were captured and checked.
+		// rather than stored as an anonymous row. Laravel assigns a uuid when it pushes
+		// a job, but a job that reached the queue some other way has none, so the queue
+		// job id is the identity that must be there.
 		if e.Job != nil {
-			if strings.TrimSpace(e.Job.UUID) == "" {
-				add("%s requires job.uuid: job history is keyed by it", TypeJobFinished)
+			if strings.TrimSpace(e.Job.ID) == "" {
+				add("%s requires job.id: it identifies a job Laravel gave no uuid", TypeJobFinished)
 			}
 			if strings.TrimSpace(e.Job.Class) == "" {
 				add("%s requires job.class: it is what an operator reads in history", TypeJobFinished)
