@@ -51,6 +51,10 @@ jobs:
         working-directory: web
         run: npm run build
 
+      - name: Test the dashboard
+        working-directory: web
+        run: npm test
+
       - name: Check the committed bundle
         run: |
           if [ -n "$(git status --porcelain -- web/dist)" ]; then

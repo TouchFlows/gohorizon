@@ -53,9 +53,11 @@ Milestone 1 (proof of concept) in progress. Implemented:
 - Read-only `GET /api/v1/health`, and `GET /metrics` for a Prometheus scrape of the same
   state: `gohorizon_up`, `gohorizon_lock_held`, telemetry counters by result, queue depth
   by state, and workers by state and crash loops per supervisor.
-- Dashboard shell served at `/`: the Vite bundle under `web/` is embedded in the binary,
-  hashed assets are cached forever, `index.html` is not cached, and a client route falls
-  back to it (docs/adr/0008).
+- Dashboard served at `/`: an overview, queues and workers screen reading
+  `/api/v1/health` every 5 s, where a 503 is shown as a degraded service rather than an
+  error page and a count the driver could not report reads `unknown`, not `0`. The Vite
+  bundle under `web/` is embedded in the binary, hashed assets are cached forever,
+  `index.html` is not cached, and a client route falls back to it (docs/adr/0008).
 - `gohorizon/laravel` package: configuration, job lifecycle telemetry to a Redis Stream,
   `gohorizon:capabilities`, `gohorizon:inspect`.
 
@@ -131,6 +133,12 @@ on the UI, the Vite dev server is quicker:
 cd web
 npm run dev
 ```
+
+The dev server proxies `/api` to `http://127.0.0.1:8090` — the address in
+`examples/gohorizon.yaml` — so components call the same paths in development and in the
+binary; set `GOHORIZON_API` to point it at a service somewhere else. `npm test` runs the
+vitest suite over the pure view-model functions: report to screen, age formatting, and
+unreported counts staying `unknown`.
 
 ## Running locally
 
