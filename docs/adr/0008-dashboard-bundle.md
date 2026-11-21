@@ -61,8 +61,9 @@ whether a payload can be drawn at all. Behaviour that needs a server is not test
 `tests/browser` is the one browser test: a Playwright smoke against the compiled binary, the
 fixture application's worker and a real store, asserting that the overview shows the service's
 status and the queue it supervises, that the jobs page shows an attempt the worker ran, that the
-failed page shows a failed attempt with the exception it threw, and that a deep link outside the
-navigation returns the shell. It runs in CI after the acceptance
+failed page shows a failed attempt with the exception it threw, that the metrics page charts
+both attempts in the minute they ran and reports an empty daily window as empty, and that a
+deep link outside the navigation returns the shell. It runs in CI after the acceptance
 suite, because it needs the fixture and Redis that suite installs.
 
 ## Consequences

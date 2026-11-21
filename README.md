@@ -181,8 +181,9 @@ One browser test follows them: `tests/browser` (Playwright) starts the compiled 
 against the same fixture and a real store, dispatches a job that succeeds and one that throws,
 and asserts through Chromium that the overview shows the service's status and the queue it
 supervises, that the jobs page shows the attempt the worker ran, that the failed page shows the
-failed attempt with the exception it threw, and that a deep link outside the navigation returns
-the shell instead of a 404. It is skipped unless `GOHORIZON_E2E=1` too, and CI fails when it is:
+failed attempt with the exception it threw, that the metrics page charts both attempts in the
+minute they ran and reports an empty daily window as empty, and that a deep link outside the
+navigation returns the shell instead of a 404. It is skipped unless `GOHORIZON_E2E=1` too, and CI fails when it is:
 
 ```sh
 cd tests/browser

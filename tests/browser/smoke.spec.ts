@@ -61,6 +61,9 @@ const skipReason =
 let dir = ''
 let base = ''
 let service: ChildProcess | undefined
+// failedAt is when the failing attempt finished, which is the minute the chart must draw it
+// in: read from the API rather than from the clock the browser happens to see.
+let failedAt = ''
 
 test.describe('the dashboard against the real binary', () => {
   test.skip(skipReason !== null, skipReason ?? '')
@@ -106,13 +109,17 @@ test.describe('the dashboard against the real binary', () => {
       job.class === 'App\\Jobs\\RecordMarker',
     )
 
-    await waitForJob(
+    const failed = await waitForJob(
       'record the exception the failed job threw',
       `queue=${queue}&outcome=failed`,
       (job) =>
         job.class === 'App\\Jobs\\AlwaysFails' &&
         job.exception?.message === 'the acceptance fixture always fails',
     )
+    if (failed.finished_at === undefined) {
+      throw new Error('the failed attempt is recorded without a finished_at')
+    }
+    failedAt = failed.finished_at
   })
 
   test.afterAll(() => {
@@ -148,6 +155,40 @@ test.describe('the dashboard against the real binary', () => {
     await expect(
       page.getByRole('cell', { name: 'RuntimeException: the acceptance fixture always fails' }),
     ).toBeVisible()
+  })
+
+  test('the metrics chart draws the attempts in the minute they ran', async ({ page }) => {
+    await page.goto(`${base}/#/metrics`)
+
+    await expect(page.getByRole('heading', { name: 'Metrics' })).toBeVisible()
+    await expect(page.getByLabel('Queue')).toHaveValue('gohorizon-smoke')
+    await expect(page.getByRole('button', { name: 'minute' })).toHaveAttribute('aria-pressed', 'true')
+
+    // One processed attempt and one failed one, and nothing else in the window: the store is
+    // fresh for every run, so any third column would mean a job ran twice.
+    await expect(page.getByRole('img', { name: /2 jobs$/ })).toBeVisible()
+
+    // The column is named by the minute the failure landed in, formatted by the page itself,
+    // so this still asserts the right bucket when a run straddles a minute boundary.
+    const minute = await page.evaluate(
+      (finishedAt) =>
+        new Date(finishedAt).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' }),
+      failedAt,
+    )
+    await expect(page.locator('svg rect', { hasText: `${minute} — failed: 1` })).toBeVisible()
+  })
+
+  test('a daily window is empty, and the chip says which resolution is drawn', async ({ page }) => {
+    await page.goto(`${base}/#/metrics`)
+    await expect(page.getByLabel('Queue')).toHaveValue('gohorizon-smoke')
+
+    // Nothing is folded into the daily table until an hour has closed, so a store this young
+    // has no daily rows: the page has to say that rather than draw a flat line at zero.
+    await page.getByRole('button', { name: 'daily' }).click()
+
+    await expect(page.getByRole('button', { name: 'daily' })).toHaveAttribute('aria-pressed', 'true')
+    await expect(page.getByRole('button', { name: 'minute' })).toHaveAttribute('aria-pressed', 'false')
+    await expect(page.getByText('No data in this window.')).toBeVisible()
   })
 
   test('a deep link outside the navigation loads the shell instead of a 404', async ({ page }) => {
@@ -261,23 +302,32 @@ async function waitFor(what: string, condition: () => Promise<boolean>): Promise
 }
 
 // RecordedJob is the part of a stored attempt these waits read: that the worker ran this
-// class at all, and, for a failed one, what it threw.
+// class at all, what it threw when it failed, and when it finished.
 interface RecordedJob {
   class?: string
+  finished_at?: string
   exception?: { message?: string } | null
 }
 
-// waitForJob polls the job endpoint until one recorded attempt matches, because a browser
-// cannot be asked to show a row the recorder has not written yet.
+// waitForJob polls the job endpoint until one recorded attempt matches and returns it,
+// because a browser cannot be asked to show a row the recorder has not written yet.
 async function waitForJob(
   what: string,
   query: string,
   matches: (job: RecordedJob) => boolean,
-): Promise<void> {
-  await waitFor(what, async () => {
-    const page = (await getJSON(`${base}/api/v1/jobs?${query}&limit=10`)) as { jobs?: RecordedJob[] }
-    return (page.jobs ?? []).some(matches)
-  })
+): Promise<RecordedJob> {
+  await waitFor(what, async () => (await jobsPage(query)).some(matches))
+
+  const match = (await jobsPage(query)).find(matches)
+  if (match === undefined) {
+    throw new Error(`the service did ${what}, but its page no longer lists it`)
+  }
+  return match
+}
+
+async function jobsPage(query: string): Promise<RecordedJob[]> {
+  const page = (await getJSON(`${base}/api/v1/jobs?${query}&limit=10`)) as { jobs?: RecordedJob[] }
+  return page.jobs ?? []
 }
 
 function readLog(): string {
