@@ -343,3 +343,74 @@ a {
 .chart__total {
   font-variant-numeric: tabular-nums;
 }
+
+.chip:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.table .exception {
+  max-width: 30rem;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.8125rem;
+  color: var(--warn);
+  overflow-wrap: anywhere;
+}
+
+.detail {
+  padding: 1rem 1.25rem;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--raised);
+}
+
+.detail__head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 1rem;
+}
+
+.detail__head h2 {
+  margin: 0;
+}
+
+.detail__fields {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 0.3rem 1.25rem;
+  margin: 1rem 0 0;
+  font-size: 0.875rem;
+}
+
+.detail__fields dt {
+  color: var(--muted);
+}
+
+.detail__fields dd {
+  margin: 0;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.8125rem;
+  overflow-wrap: anywhere;
+}
+
+.detail__exception {
+  margin-top: 1.25rem;
+}
+
+.detail__exception h3 {
+  margin: 0 0 0.4rem;
+  font-size: 0.9375rem;
+  font-weight: 600;
+}
+
+.detail__exception pre {
+  margin: 0;
+  padding: 0.75rem;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+  font-size: 0.8125rem;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}

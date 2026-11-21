@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { isHealthReport, isHistory } from './api'
+import { isHealthReport, isHistory, isJobPage } from './api'
 
 const report = {
   status: 'ok',
@@ -29,6 +29,47 @@ describe('isHistory', () => {
     expect(isHistory({ ...history, buckets: [{ start: '2026-11-21T12:00:00Z', processed: 1 }] })).toBe(false)
     expect(isHistory({ ...history, resolution: 'weekly' })).toBe(false)
     expect(isHistory({ ...history, buckets: null })).toBe(false)
+  })
+})
+
+const jobPage = {
+  jobs: [
+    {
+      id: '1774191600000-0',
+      job_id: '7',
+      uuid: '',
+      class: 'App\\Jobs\\Marker',
+      queue: 'default',
+      connection: 'default',
+      outcome: 'failed',
+      attempts: 3,
+      duration_ms: 120,
+      finished_at: '2026-11-21T20:40:00Z',
+      exception: { class: 'RuntimeException', message: 'boom' },
+    },
+  ],
+  next_before: '',
+}
+
+describe('isJobPage', () => {
+  it('accepts a page whose attempt failed and one whose attempt did not', () => {
+    expect(isJobPage(jobPage)).toBe(true)
+    expect(isJobPage({ jobs: [{ ...jobPage.jobs[0], exception: null }], next_before: 'c1' })).toBe(true)
+    expect(isJobPage({ jobs: [], next_before: '' })).toBe(true)
+  })
+
+  it('rejects an attempt that omits the exception instead of saying there was none', () => {
+    const withoutException: Record<string, unknown> = { ...jobPage.jobs[0] }
+    delete withoutException.exception
+
+    expect(isJobPage({ jobs: [withoutException], next_before: '' })).toBe(false)
+  })
+
+  it('rejects a page or attempt missing what the table reads', () => {
+    expect(isJobPage({ jobs: jobPage.jobs })).toBe(false)
+    expect(isJobPage({ ...jobPage, jobs: [{ ...jobPage.jobs[0], outcome: 7 }] })).toBe(false)
+    expect(isJobPage({ ...jobPage, jobs: [{ ...jobPage.jobs[0], exception: { class: 'E' } }] })).toBe(false)
+    expect(isJobPage(null)).toBe(false)
   })
 })
 

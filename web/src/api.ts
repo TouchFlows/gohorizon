@@ -163,6 +163,82 @@ export function isHistory(value: unknown): value is History {
   )
 }
 
+// One finished attempt as /api/v1/jobs returns it. Exception is null for an attempt that
+// threw nothing — never an empty object — which the table must show as "none", not blank.
+export interface JobException {
+  class: string
+  message: string
+}
+
+export interface Job {
+  id: string
+  job_id: string
+  uuid: string
+  class: string
+  queue: string
+  connection: string
+  outcome: string
+  attempts: number
+  duration_ms: number
+  finished_at: string
+  exception: JobException | null
+}
+
+export interface JobPage {
+  jobs: Job[]
+  // next_before is empty on the last page; otherwise it is the cursor for the page after.
+  next_before: string
+}
+
+export async function fetchJobs(query: string, signal?: AbortSignal): Promise<JobPage> {
+  const response = await fetch(`/api/v1/jobs?${query}`, {
+    signal,
+    headers: { Accept: 'application/json' },
+  })
+  if (response.status === 503) {
+    throw new HistoryUnavailable()
+  }
+  if (response.status !== 200) {
+    throw new Error(`/api/v1/jobs returned ${response.status}`)
+  }
+  const payload: unknown = await response.json()
+  if (!isJobPage(payload)) {
+    throw new Error('/api/v1/jobs did not return a page of jobs')
+  }
+  return payload
+}
+
+function isJob(value: unknown): value is Job {
+  if (typeof value !== 'object' || value === null) {
+    return false
+  }
+  const job = value as Partial<Job>
+  const exceptionOk =
+    job.exception === null ||
+    (typeof job.exception === 'object' &&
+      job.exception !== null &&
+      typeof job.exception.class === 'string' &&
+      typeof job.exception.message === 'string')
+  return (
+    typeof job.id === 'string' &&
+    typeof job.class === 'string' &&
+    typeof job.queue === 'string' &&
+    typeof job.outcome === 'string' &&
+    typeof job.attempts === 'number' &&
+    typeof job.duration_ms === 'number' &&
+    typeof job.finished_at === 'string' &&
+    exceptionOk
+  )
+}
+
+export function isJobPage(value: unknown): value is JobPage {
+  if (typeof value !== 'object' || value === null) {
+    return false
+  }
+  const page = value as Partial<JobPage>
+  return typeof page.next_before === 'string' && Array.isArray(page.jobs) && page.jobs.every(isJob)
+}
+
 // isHealthReport checks the fields a screen cannot render without. The rest of the report is
 // read defensively, so a report that grows a field never breaks the dashboard.
 export function isHealthReport(value: unknown): value is HealthReport {

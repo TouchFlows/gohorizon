@@ -1,8 +1,8 @@
 // The dashboard has three routes and no router dependency: the hash is the route, and the
 // server already serves the shell for any client path (docs/adr/0008).
-export type Route = 'overview' | 'queues' | 'workers' | 'metrics'
+export type Route = 'overview' | 'queues' | 'workers' | 'jobs' | 'failed' | 'metrics'
 
-const routes: Route[] = ['overview', 'queues', 'workers', 'metrics']
+const routes: Route[] = ['overview', 'queues', 'workers', 'jobs', 'failed', 'metrics']
 
 // parseRoute reads a location hash such as "#/queues". Anything unknown is the overview, so
 // an old bookmark or a typo still lands somewhere useful.
@@ -21,6 +21,10 @@ export function routeLabel(route: Route): string {
       return 'Queues'
     case 'workers':
       return 'Workers'
+    case 'jobs':
+      return 'Jobs'
+    case 'failed':
+      return 'Failed'
     case 'metrics':
       return 'Metrics'
     default:

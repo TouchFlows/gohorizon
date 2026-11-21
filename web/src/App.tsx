@@ -5,9 +5,10 @@ import { useHealth } from './useHealth'
 import Overview from './pages/Overview'
 import Queues from './pages/Queues'
 import Workers from './pages/Workers'
+import Jobs from './pages/Jobs'
 import Metrics from './pages/Metrics'
 
-const navigation: Route[] = ['overview', 'queues', 'workers', 'metrics']
+const navigation: Route[] = ['overview', 'queues', 'workers', 'jobs', 'failed', 'metrics']
 
 function useRoute(): Route {
   const [route, setRoute] = useState<Route>(() => parseRoute(window.location.hash))
@@ -61,6 +62,10 @@ export default function App() {
           <Queues report={report} />
         ) : route === 'workers' ? (
           <Workers report={report} />
+        ) : route === 'jobs' ? (
+          <Jobs report={report} />
+        ) : route === 'failed' ? (
+          <Jobs report={report} pinnedOutcome="failed" />
         ) : route === 'metrics' ? (
           <Metrics report={report} />
         ) : (
