@@ -97,19 +97,28 @@ test.describe('the dashboard against the real binary', () => {
       return Array.isArray(report.queues?.depths) && report.queues.depths.length > 0
     })
 
-    execFileSync(phpCommand, ['dispatch.php', 'marker', path.join(dir, 'smoke-marker')], {
-      cwd: fixture,
-      env: { ...process.env, ...fixtureEnv, GOHORIZON_E2E_QUEUE: queue },
-      stdio: 'inherit',
-    })
+    dispatch(phpCommand, 'marker', path.join(dir, 'smoke-marker'))
+    // A second job throws on purpose, so the failed screen has an attempt of its own to show.
+    dispatch(phpCommand, 'fail')
 
-    // The worker has to pick the job up and the recorder has to store it before a browser
-    // can be asked to show it.
+    // The worker has to pick the jobs up and the recorder has to store them before a browser
+    // can be asked to show them.
     await waitFor('record the job the worker ran', async () => {
       const page = (await getJSON(`${base}/api/v1/jobs?queue=${queue}&limit=10`)) as {
         jobs?: { class?: string }[]
       }
       return (page.jobs ?? []).some((job) => job.class === 'App\\Jobs\\RecordMarker')
+    })
+
+    await waitFor('record the exception the failed job threw', async () => {
+      const page = (await getJSON(`${base}/api/v1/jobs?queue=${queue}&outcome=failed&limit=10`)) as {
+        jobs?: { class?: string; exception?: { message?: string } | null }[]
+      }
+      return (page.jobs ?? []).some(
+        (job) =>
+          job.class === 'App\\Jobs\\AlwaysFails' &&
+          job.exception?.message === 'the acceptance fixture always fails',
+      )
     })
   })
 
@@ -138,6 +147,16 @@ test.describe('the dashboard against the real binary', () => {
     await expect(page.getByRole('cell', { name: 'processed', exact: true })).toBeVisible()
   })
 
+  test('the failed page renders the attempt with the exception it threw', async ({ page }) => {
+    await page.goto(`${base}/#/failed`)
+
+    await expect(page.getByRole('heading', { name: 'Failed jobs' })).toBeVisible()
+    await expect(page.getByRole('cell', { name: 'App\\Jobs\\AlwaysFails', exact: true })).toBeVisible()
+    await expect(
+      page.getByRole('cell', { name: 'RuntimeException: the acceptance fixture always fails' }),
+    ).toBeVisible()
+  })
+
   test('a deep link outside the navigation loads the shell instead of a 404', async ({ page }) => {
     const response = await page.goto(`${base}/queues/anything`)
 
@@ -148,6 +167,16 @@ test.describe('the dashboard against the real binary', () => {
     await expect(page.getByRole('link', { name: 'Jobs' })).toBeVisible()
   })
 })
+
+// dispatch queues one fixture job on the smoke's own queue, in the environment the service
+// and its worker read.
+function dispatch(php: string, ...args: string[]): void {
+  execFileSync(php, ['dispatch.php', ...args], {
+    cwd: fixture,
+    env: { ...process.env, ...fixtureEnv, GOHORIZON_E2E_QUEUE: queue },
+    stdio: 'inherit',
+  })
+}
 
 function commandOnPath(name: string): string | null {
   try {

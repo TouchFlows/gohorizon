@@ -60,8 +60,9 @@ transform, the history query, the jobs query and cursor trail, and the decoders 
 whether a payload can be drawn at all. Behaviour that needs a server is not tested there.
 `tests/browser` is the one browser test: a Playwright smoke against the compiled binary, the
 fixture application's worker and a real store, asserting that the overview shows the service's
-status and the queue it supervises, that the jobs page shows an attempt the worker ran, and
-that a deep link outside the navigation returns the shell. It runs in CI after the acceptance
+status and the queue it supervises, that the jobs page shows an attempt the worker ran, that the
+failed page shows a failed attempt with the exception it threw, and that a deep link outside the
+navigation returns the shell. It runs in CI after the acceptance
 suite, because it needs the fixture and Redis that suite installs.
 
 ## Consequences

@@ -178,10 +178,11 @@ reach the persisted history. The tests are skipped unless `GOHORIZON_E2E=1`, so
 `go test ./...` stays fast and needs no PHP.
 
 One browser test follows them: `tests/browser` (Playwright) starts the compiled binary
-against the same fixture and a real store, dispatches a job, and asserts through Chromium
-that the overview shows the service's status and the queue it supervises, that the jobs page
-shows the attempt the worker ran, and that a deep link outside the navigation returns the
-shell instead of a 404. It is skipped unless `GOHORIZON_E2E=1` too, and CI fails when it is:
+against the same fixture and a real store, dispatches a job that succeeds and one that throws,
+and asserts through Chromium that the overview shows the service's status and the queue it
+supervises, that the jobs page shows the attempt the worker ran, that the failed page shows the
+failed attempt with the exception it threw, and that a deep link outside the navigation returns
+the shell instead of a 404. It is skipped unless `GOHORIZON_E2E=1` too, and CI fails when it is:
 
 ```sh
 cd tests/browser
