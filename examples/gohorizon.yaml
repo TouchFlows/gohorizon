@@ -47,9 +47,12 @@ applications:
         balance:
           strategy: fixed
 
+        # Fixed allocation runs exactly this many workers, one queue per slot, so max
+        # must match min. Validation rejects a larger max; balancing (Milestone 4) is
+        # what makes it mean something.
         workers:
           min: 3
-          max: 5
+          max: 3
 
         worker:
           sleep: 3

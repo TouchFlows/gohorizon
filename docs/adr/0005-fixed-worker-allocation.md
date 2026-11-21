@@ -26,8 +26,9 @@ priority order, and per-queue scaling is impossible.
 3. `simple`/`auto`/`scaling_strategy` are rejected by configuration validation in v1
    with an error that names Milestone 4. Accepted-but-ignored strategies would make the
    dashboard lie about allocation.
-4. `workers.max` is validated and stored but unused until the balancing milestone;
-   growth beyond `min` is never automatic.
+4. Growth beyond `min` is never automatic, so `workers.max` must equal `workers.min`
+   under `fixed`: validation rejects a larger max with an error naming the balancing
+   milestone, rather than accepting a pool size the supervisor cannot reach.
 5. Queue-level metrics (pending, reserved, delayed) come from the adapter's inspection
    command, keyed by the same queue names used for allocation, so a later balancing
    decision reads the same names it would act on.

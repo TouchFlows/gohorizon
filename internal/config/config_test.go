@@ -34,7 +34,7 @@ applications:
           strategy: fixed
         workers:
           min: 2
-          max: 5
+          max: 2
         worker:
           sleep: 3
           tries: 3
@@ -232,6 +232,7 @@ func TestValidateRejectsEachDocumentedProblem(t *testing.T) {
 		{"bad memory", func(s string) string { return strings.Replace(s, "memory: 256", "memory: 120%", 1) }, "percentage"},
 		{"grace too short", func(s string) string { return strings.Replace(s, "shutdown_grace: 120", "shutdown_grace: 30", 1) }, "shutdown_grace"},
 		{"min above max", func(s string) string { return strings.Replace(s, "min: 2", "min: 9", 1) }, "must not exceed max"},
+		{"fixed pool with a larger max", func(s string) string { return strings.Replace(s, "max: 2", "max: 5", 1) }, "must equal min"},
 		{"bad queue name", func(s string) string {
 			return strings.Replace(s, "queues: [default, emails]", "queues: [default, \"e mails\"]", 1)
 		}, "not a valid queue name"},

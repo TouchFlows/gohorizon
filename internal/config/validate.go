@@ -194,6 +194,11 @@ func (a *Application) validate(errs *ValidationError, seenSupervisors map[string
 		}
 		if sup.Workers.Min > sup.Workers.Max {
 			errs.add("%s.workers: min (%d) must not exceed max (%d)", supLabel, sup.Workers.Min, sup.Workers.Max)
+		} else if sup.Balance.Strategy == "fixed" && sup.Workers.Min != sup.Workers.Max {
+			// fixed runs exactly min workers, so a larger max would accept a pool that can
+			// never grow. It becomes meaningful when balancing arrives.
+			errs.add("%s.workers: max (%d) must equal min (%d) under the fixed strategy, which runs exactly min workers; scaling arrives with balancing in Milestone 4",
+				supLabel, sup.Workers.Max, sup.Workers.Min)
 		}
 
 		w := sup.Worker
