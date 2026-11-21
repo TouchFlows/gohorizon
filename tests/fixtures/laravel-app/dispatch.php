@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 use App\Jobs\AlwaysFails;
 use App\Jobs\RecordMarker;
+use App\Jobs\SlowMarker;
 use Illuminate\Contracts\Console\Kernel;
 
 require __DIR__.'/vendor/autoload.php';
@@ -20,10 +21,13 @@ switch ($kind) {
     case 'marker':
         RecordMarker::dispatch($argument)->onQueue($queue);
         break;
+    case 'slow':
+        SlowMarker::dispatch($argument, (int) ($argv[3] ?? 3))->onQueue($queue);
+        break;
     case 'fail':
         AlwaysFails::dispatch()->onQueue($queue);
         break;
     default:
-        fwrite(STDERR, "usage: dispatch.php marker <path>|fail\n");
+        fwrite(STDERR, "usage: dispatch.php marker <path>|slow <path> [seconds]|fail\n");
         exit(2);
 }

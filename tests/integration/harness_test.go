@@ -20,6 +20,7 @@ import (
 
 	goredis "github.com/redis/go-redis/v9"
 
+	"github.com/gohorizon/gohorizon/internal/adapter"
 	"github.com/gohorizon/gohorizon/internal/process"
 )
 
@@ -27,6 +28,7 @@ const (
 	testApplication = "gohorizon-e2e"
 	testEnvironment = "e2e"
 	testQueue       = "gohorizon-e2e"
+	testConnection  = "redis"
 	testRedisDB     = 15
 	testRedisAddr   = "127.0.0.1:6379"
 )
@@ -91,6 +93,11 @@ func newHarness(t *testing.T) *harness {
 	t.Setenv("GOHORIZON_TELEMETRY_BATCH", "1")
 	t.Setenv("GOHORIZON_E2E_QUEUE", testQueue)
 
+	// A job whose worker dies is only recoverable through its reservation window: too
+	// long and the retry test waits a minute and a half, too short and it must stay
+	// above worker.timeout, which the preflight enforces.
+	t.Setenv("REDIS_QUEUE_RETRY_AFTER", "10")
+
 	h := &harness{t: t, root: root, fixture: fixture, php: php, dir: t.TempDir()}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
@@ -152,7 +159,7 @@ applications:
         worker:
           sleep: 1
           tries: 1
-          timeout: 10
+          timeout: 6
           memory: 128
         shutdown_grace: 30
         restart_backoff: 1
@@ -269,14 +276,99 @@ func (i *instance) terminate(t *testing.T) {
 
 // dispatch enqueues one fixture job through Laravel itself, so the test never writes a
 // queue payload by hand.
-func (h *harness) dispatch(kind, argument string) error {
-	cmd := exec.Command(h.php, "dispatch.php", kind, argument)
+func (h *harness) dispatch(kind string, args ...string) error {
+	cmd := exec.Command(h.php, append([]string{"dispatch.php", kind}, args...)...)
 	cmd.Dir = h.fixture
 	cmd.Env = os.Environ()
 	if out, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("dispatch %s: %w\n%s", kind, err, out)
 	}
 	return nil
+}
+
+// inspectQueues asks the application itself how much work its queue holds, through the
+// same documented command the service samples depth with. Nothing here reads a Laravel
+// queue key, so the assertions hold whatever layout the framework uses.
+func (h *harness) inspectQueues(ctx context.Context) (adapter.Inspection, error) {
+	probe := adapter.Probe{PHP: h.php, Artisan: "artisan", Dir: h.fixture}
+	return probe.Queues(ctx, testConnection, []string{testQueue})
+}
+
+// awaitQueueDepth waits until Laravel reports exactly these counts for the test queue.
+// It is how a test proves a job is still reserved (a killed worker did not lose it) or
+// gone (a graceful stop did not leave it behind).
+func awaitQueueDepth(t *testing.T, h *harness, pending, reserved int, what string) {
+	t.Helper()
+
+	eventually(t, 20*time.Second, what, func() error {
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+
+		inspection, err := h.inspectQueues(ctx)
+		if err != nil {
+			return err
+		}
+		row := inspection.Queues[0]
+		if row.Pending == nil || row.Reserved == nil {
+			return fmt.Errorf("inspection did not report pending and reserved: %+v", row)
+		}
+		if *row.Pending != pending || *row.Reserved != reserved {
+			return fmt.Errorf("pending=%d reserved=%d, want pending=%d reserved=%d",
+				*row.Pending, *row.Reserved, pending, reserved)
+		}
+		if row.Delayed != nil && *row.Delayed != 0 {
+			return fmt.Errorf("delayed=%d, want none", *row.Delayed)
+		}
+		return nil
+	})
+}
+
+// awaitStarted waits until the slow fixture job wrote its start line, so a test only
+// signals a worker it can prove is in the middle of a job.
+func awaitStarted(t *testing.T, marker string) {
+	t.Helper()
+
+	eventually(t, 30*time.Second, "the slow job to start inside the worker", func() error {
+		lines, err := markerLines(marker)
+		if err != nil {
+			return err
+		}
+		if lines["started"] == 0 {
+			return fmt.Errorf("no start line in %s yet", marker)
+		}
+		return nil
+	})
+}
+
+// markerLines counts the lines one of the fixture's marker files holds, so a test can
+// assert a job ran once instead of at least once.
+func markerLines(path string) (map[string]int, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	counts := make(map[string]int)
+	for _, line := range strings.Split(string(data), "\n") {
+		if line = strings.TrimSpace(line); line != "" {
+			counts[line]++
+		}
+	}
+	return counts, nil
+}
+
+// requireRuns asserts how many times the slow job started and finished. The counts are
+// exact on purpose: "at least once" would pass while a job ran twice.
+func requireRuns(t *testing.T, marker string, started, ran int) {
+	t.Helper()
+
+	lines, err := markerLines(marker)
+	if err != nil {
+		t.Fatalf("read %s: %v", marker, err)
+	}
+	if lines["started"] != started || lines["ran"] != ran {
+		t.Fatalf("%s: started=%d ran=%d, want started=%d ran=%d",
+			marker, lines["started"], lines["ran"], started, ran)
+	}
 }
 
 // report is the part of GET /api/v1/health the acceptance tests assert on.

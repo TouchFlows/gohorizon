@@ -2,8 +2,9 @@
 
 // Package integration_test proves Milestone 1's acceptance criteria against a real
 // Laravel 13 application, a real Redis and real queue workers: GoHorizon starts a
-// worker, the worker runs jobs, telemetry reaches the API, a crash is recovered, and a
-// supervisor restart adopts the running worker instead of spawning a duplicate.
+// worker, the worker runs jobs, telemetry reaches the API, a job in flight survives a
+// graceful stop and is retried after a hard kill, a crash is recovered, and a supervisor
+// restart adopts the running worker instead of spawning a duplicate.
 //
 // Run it with GOHORIZON_E2E=1 after installing the fixture (see README). Without the
 // variable every test skips, so `go test ./...` stays fast and hermetic.
@@ -104,6 +105,121 @@ func TestRealWorkerRunsJobsAndReportsThemOnTheAPI(t *testing.T) {
 		}
 		if _, failed := saved.totals(); failed < 1 {
 			return fmt.Errorf("failed=%d", failed)
+		}
+		return nil
+	})
+}
+
+// TestGracefulStopFinishesTheInFlightJobExactlyOnce proves the promise a graceful stop
+// makes: a job that is already running is not abandoned, and it is not run again. The
+// supervisor's consumer stops together with its workers, so the event the worker
+// publishes as its last job finishes is still unread when the service exits; the next
+// start must account for it exactly once.
+func TestGracefulStopFinishesTheInFlightJobExactlyOnce(t *testing.T) {
+	h := newHarness(t)
+	binary := h.buildBinary()
+	configPath, base := h.writeConfig()
+
+	first := h.startBinary(binary, configPath)
+	awaitRunning(h, base)
+
+	marker := filepath.Join(h.dir, "slow-stop.txt")
+	if err := h.dispatch("slow", marker); err != nil {
+		t.Fatal(err)
+	}
+	awaitStarted(t, marker)
+
+	sent := time.Now()
+	first.terminate(t)
+
+	info, err := os.Stat(marker)
+	if err != nil {
+		t.Fatalf("stat the slow job's marker: %v", err)
+	}
+	if info.ModTime().Before(sent) {
+		t.Fatal("the marker was last written before the SIGTERM, so the job had already finished")
+	}
+	requireRuns(t, marker, 1, 1)
+	awaitQueueDepth(t, h, 0, 0, "the finished job to leave nothing behind")
+
+	// Reading the event through a new process is what proves it was not lost with the
+	// supervisor that stopped before it could consume it.
+	second := h.startBinary(binary, configPath)
+	awaitRunning(h, base)
+	eventually(t, 30*time.Second, "the finished job accounted for once", func() error {
+		saved, err := h.fetchHistory(base)
+		if err != nil {
+			return err
+		}
+		if processed, failed := saved.totals(); processed != 1 || failed != 0 {
+			return fmt.Errorf("processed=%d failed=%d, want exactly one processed job", processed, failed)
+		}
+		return nil
+	})
+
+	// A duplicate event arrives through the stream, not the queue, so give ingestion a
+	// moment to show that it does not add a second one.
+	time.Sleep(2 * time.Second)
+	saved, err := h.fetchHistory(base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if processed, failed := saved.totals(); processed != 1 || failed != 0 {
+		t.Fatalf("processed=%d failed=%d after settling, want exactly one processed job", processed, failed)
+	}
+
+	second.terminate(t)
+}
+
+// TestKilledWorkerLeavesTheJobForLaravelToRetry proves a hard kill cannot lose a job.
+// The reservation Laravel holds is the only record of the in-flight job: the test shows
+// it survives the kill, expires, and is executed once by the replacement worker.
+func TestKilledWorkerLeavesTheJobForLaravelToRetry(t *testing.T) {
+	h := newHarness(t)
+	configPath, base := h.writeConfig()
+	h.startBinary(h.buildBinary(), configPath)
+
+	before := awaitRunning(h, base)
+	workerPID := before.supervisor(t).Workers[0].PID
+	if workerPID <= 0 {
+		t.Fatalf("worker pid = %d", workerPID)
+	}
+
+	marker := filepath.Join(h.dir, "slow-kill.txt")
+	if err := h.dispatch("slow", marker); err != nil {
+		t.Fatal(err)
+	}
+	awaitStarted(t, marker)
+
+	if err := syscall.Kill(workerPID, syscall.SIGKILL); err != nil {
+		t.Fatalf("kill worker %d: %v", workerPID, err)
+	}
+
+	// Nothing deletes a reservation when its worker dies; that entry is the only reason
+	// the job still exists after the kill.
+	awaitQueueDepth(t, h, 0, 1, "the killed worker's job to stay reserved")
+
+	eventually(t, 60*time.Second, "the replacement worker to run the retried job", func() error {
+		lines, err := markerLines(marker)
+		if err != nil {
+			return err
+		}
+		if lines["ran"] != 1 {
+			return fmt.Errorf("ran=%d, want the job completed once", lines["ran"])
+		}
+		return nil
+	})
+
+	// The first attempt died before finishing, so the replay is the only completed run.
+	requireRuns(t, marker, 2, 1)
+	awaitQueueDepth(t, h, 0, 0, "the retried job to leave nothing behind")
+	eventually(t, 30*time.Second, "the retried job accounted for once", func() error {
+		saved, err := h.fetchHistory(base)
+		if err != nil {
+			return err
+		}
+		if processed, failed := saved.totals(); processed != 1 || failed != 0 {
+			return fmt.Errorf("processed=%d failed=%d, want exactly one processed job", processed, failed)
 		}
 		return nil
 	})

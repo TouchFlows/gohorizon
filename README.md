@@ -82,8 +82,10 @@ and PHP binary before running the service.
 
 `tests/integration` drives a real service against a disposable Laravel application and a
 real Redis: a scheduled worker runs jobs end to end, telemetry reaches `/api/v1/health`
-and `/api/v1/metrics`, a killed worker is restarted, and a service restart adopts the
-running worker instead of launching a second one. The tests are skipped unless
+and `/api/v1/metrics`, a job in flight finishes exactly once when the service stops
+gracefully and is retried by Laravel when its worker is hard-killed, a killed worker is
+replaced, and a service restart adopts the running worker instead of launching a second
+one. The tests are skipped unless
 `GOHORIZON_E2E=1`, so `go test ./...` stays fast and needs no PHP.
 
 The fixture is `tests/fixtures/laravel-app`: a Laravel 13 app with the package installed
