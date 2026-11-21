@@ -39,4 +39,8 @@ priority order, and per-queue scaling is impossible.
 - The default pool for a single-queue application is unchanged: N workers on that queue.
 - An application with three queues and one worker still serves one queue only; the
   configuration must set `workers.min` to at least the number of queues it wants served
-  concurrently. Validation warns (does not fail) when `min < len(queues)`.
+  concurrently. Nothing detects an undersized pool: validation rejects pool sizes that
+  are non-positive, above the v1 ceiling, or unequal under `fixed`, and reports every
+  problem as an error, so it has no warning channel for this. The mapping is visible
+  instead in the `queues[slot % len(queues)]` assignment, which shows exactly which
+  queues the configured pool serves.
