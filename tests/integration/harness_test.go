@@ -11,6 +11,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -545,6 +546,61 @@ func (h *harness) fetchHistoryFor(base, queue string) (history, error) {
 		return history{}, fmt.Errorf("decode metrics: %w", err)
 	}
 	return payload, nil
+}
+
+// jobSummary is one attempt as the jobs API returns it.
+type jobSummary struct {
+	ID         string        `json:"id"`
+	JobID      string        `json:"job_id"`
+	Class      string        `json:"class"`
+	Queue      string        `json:"queue"`
+	Outcome    string        `json:"outcome"`
+	Attempts   int           `json:"attempts"`
+	DurationMS int64         `json:"duration_ms"`
+	Exception  *jobException `json:"exception"`
+}
+
+// jobException is the failure the API attaches to an attempt that threw.
+type jobException struct {
+	Class   string `json:"class"`
+	Message string `json:"message"`
+}
+
+// fetchJobs reads the history API, so an acceptance test proves the stored rows are reachable
+// over HTTP and not only by opening the database file.
+func (h *harness) fetchJobs(base, query string) ([]jobSummary, error) {
+	resp, err := http.Get(base + "/api/v1/jobs?" + query)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("jobs returned %d", resp.StatusCode)
+	}
+	var payload struct {
+		Jobs []jobSummary `json:"jobs"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
+		return nil, fmt.Errorf("decode jobs: %w", err)
+	}
+	return payload.Jobs, nil
+}
+
+// fetchJob reads one job's newest attempt by the identity the list reported.
+func (h *harness) fetchJob(base, identity string) (jobSummary, error) {
+	resp, err := http.Get(base + "/api/v1/jobs/" + url.PathEscape(identity))
+	if err != nil {
+		return jobSummary{}, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return jobSummary{}, fmt.Errorf("job %q returned %d", identity, resp.StatusCode)
+	}
+	var job jobSummary
+	if err := json.NewDecoder(resp.Body).Decode(&job); err != nil {
+		return jobSummary{}, fmt.Errorf("decode job: %w", err)
+	}
+	return job, nil
 }
 
 // storedJob is one row of the jobs table the running service wrote.

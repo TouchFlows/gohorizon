@@ -26,6 +26,14 @@ type stubProvider struct {
 	queue      string
 	from       time.Time
 	to         time.Time
+
+	// Job history: what the handlers returned, and what they asked for.
+	jobs     []metrics.Job
+	job      metrics.Job
+	jobsErr  error
+	jobErr   error
+	jobQuery metrics.JobQuery
+	jobID    string
 }
 
 func (s *stubProvider) Report() health.Report { return s.report }
@@ -33,6 +41,16 @@ func (s *stubProvider) Report() health.Report { return s.report }
 func (s *stubProvider) Buckets(_ context.Context, resolution metrics.Resolution, queue string, from, to time.Time) ([]metrics.Bucket, error) {
 	s.resolution, s.queue, s.from, s.to = resolution, queue, from, to
 	return s.buckets, s.err
+}
+
+func (s *stubProvider) Jobs(_ context.Context, query metrics.JobQuery) ([]metrics.Job, error) {
+	s.jobQuery = query
+	return s.jobs, s.jobsErr
+}
+
+func (s *stubProvider) Job(_ context.Context, jobID string) (metrics.Job, error) {
+	s.jobID = jobID
+	return s.job, s.jobErr
 }
 
 func get(t *testing.T, provider Provider, target string) *httptest.ResponseRecorder {

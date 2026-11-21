@@ -138,6 +138,30 @@ func TestRealWorkerRunsJobsAndReportsThemOnTheAPI(t *testing.T) {
 		}
 		return nil
 	})
+
+	// Both HTTP endpoints, not the file: the list must offer the real failure with its
+	// exception, and the detail must resolve it by the identity the list reported.
+	eventually(t, 30*time.Second, "the failed job on /api/v1/jobs", func() error {
+		listed, err := h.fetchJobs(base, "queue="+testQueue+"&outcome=failed")
+		if err != nil {
+			return err
+		}
+		for _, job := range listed {
+			if job.Class != `App\Jobs\AlwaysFails` || job.Exception == nil || job.Exception.Class != "RuntimeException" {
+				continue
+			}
+			detail, err := h.fetchJob(base, job.JobID)
+			if err != nil {
+				return err
+			}
+			if detail.ID != job.ID || detail.Class != job.Class || detail.Exception == nil {
+				return fmt.Errorf("detail %s/%s does not match the listed attempt %s/%s",
+					detail.ID, detail.Class, job.ID, job.Class)
+			}
+			return nil
+		}
+		return fmt.Errorf("%d failed jobs, none an AlwaysFails with its exception", len(listed))
+	})
 }
 
 // TestOneWorkerPerQueueRunsItsOwnJobs proves the shape people deploy: one supervisor over

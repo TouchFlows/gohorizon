@@ -35,8 +35,10 @@ Two constraints shape the storage:
    job id when Laravel assigned none, which is the fallback the recorder itself uses — so
    the attempts of one job can be read together. Indexes serve the questions job history
    asks: `(finished_at DESC, id)`, `(job_id, finished_at DESC)`, `(queue, finished_at
-   DESC)` and `(outcome, finished_at DESC)`. These rows are observations, not a ledger:
-   they are bounded by the raw window, and a missing row never affects a worker.
+   DESC, id)` and `(outcome, finished_at DESC, id)`. The event id is the tiebreak in each:
+   jobs finish in the same second, and a keyset page is then read in index order instead of
+   being sorted. These rows are observations, not a ledger: they are bounded by the raw
+   window, and a missing row never affects a worker.
 3. **Exactly-once by event id.** `recorded_events(id, recorded_at)` is inserted in the
    same transaction as the bucket update, and a duplicate insert aborts the update. This
    makes the sink idempotent across restarts, which is what allows a safe retry.
@@ -51,7 +53,10 @@ Two constraints shape the storage:
    correctness and therefore does refuse to start).
 6. **No dashboard coupling.** This package formats nothing. `GET /api/v1/metrics`
    serves one queue's `Buckets` over `[from, to)` at the requested `resolution`
-   (minute by default), read-only; the dashboard remains a later slice.
+   (minute by default), read-only. `GET /api/v1/jobs` serves one page of `Job` rows newest
+   first, filtered by queue and outcome and paged by the `(finished_at, id)` keyset, and
+   `GET /api/v1/jobs/{id}` serves the newest attempt of one identity. The dashboard remains a
+   later slice.
 7. **Bounded growth follows handoff §9.** `Rollup` folds closed minute buckets into
    hourly buckets and closed hourly buckets into daily ones; `Prune` then deletes event
    ids, job rows and each aggregate level past its window. Both run at startup and then hourly,

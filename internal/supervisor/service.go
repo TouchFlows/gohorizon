@@ -236,6 +236,25 @@ func (s *Service) Buckets(ctx context.Context, resolution metrics.Resolution, qu
 	return s.store.Buckets(ctx, resolution, queue, from, to)
 }
 
+// Jobs reads one page of job history for the read-only jobs endpoint. As with Buckets, a
+// service whose store never opened answers ErrDisabled rather than an empty page that would
+// look like "no job ran" (docs/adr/0007).
+func (s *Service) Jobs(ctx context.Context, query metrics.JobQuery) ([]metrics.Job, error) {
+	if s.store == nil {
+		return nil, metrics.ErrDisabled
+	}
+	return s.store.Jobs(ctx, query)
+}
+
+// Job reads one job's newest attempt by identity for the detail endpoint, and answers
+// ErrDisabled when history was never opened.
+func (s *Service) Job(ctx context.Context, jobID string) (metrics.Job, error) {
+	if s.store == nil {
+		return metrics.Job{}, metrics.ErrDisabled
+	}
+	return s.store.Job(ctx, jobID)
+}
+
 func (s *Service) Close() error {
 	err := s.client.Close()
 	if s.store != nil {

@@ -1,9 +1,11 @@
-// Package metrics persists consumed telemetry as durable per-queue aggregates.
+// Package metrics persists consumed telemetry as durable per-queue aggregates and one row
+// per finished job attempt.
 //
 // History lives in SQLite at storage.path (handoff §7.3/§9, docs/adr/0007): one row per
-// queue per minute, rolled up into hours and days, plus the event ids already counted so
-// a replayed stream entry can never be added twice. `GET /api/v1/metrics` serves the
-// minute level back; the dashboard itself is out of scope.
+// queue per minute, rolled up into hours and days, the event ids already counted so a
+// replayed stream entry can never be added twice, and the attempt an operator reads as job
+// history. `GET /api/v1/metrics`, `GET /api/v1/jobs` and `GET /api/v1/jobs/{id}` serve it
+// back; the dashboard itself is out of scope.
 package metrics
 
 import (
@@ -13,6 +15,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -58,8 +61,8 @@ CREATE TABLE IF NOT EXISTS jobs (
 -- Newest-first by outcome, queue or job: the three questions job history asks.
 CREATE INDEX IF NOT EXISTS jobs_finished_at ON jobs (finished_at DESC, id);
 CREATE INDEX IF NOT EXISTS jobs_job_id ON jobs (job_id, finished_at DESC);
-CREATE INDEX IF NOT EXISTS jobs_queue_finished_at ON jobs (queue, finished_at DESC);
-CREATE INDEX IF NOT EXISTS jobs_outcome_finished_at ON jobs (outcome, finished_at DESC);
+CREATE INDEX IF NOT EXISTS jobs_queue_finished_at ON jobs (queue, finished_at DESC, id);
+CREATE INDEX IF NOT EXISTS jobs_outcome_finished_at ON jobs (outcome, finished_at DESC, id);
 
 CREATE TABLE IF NOT EXISTS queue_buckets (
 	queue TEXT NOT NULL,
@@ -452,4 +455,150 @@ ORDER BY bucket_start`,
 		return nil, fmt.Errorf("read queue %q history: %w", queue, err)
 	}
 	return buckets, nil
+}
+
+// Job is one finished attempt as job history returns it. Its JSON tags are the wire shape of
+// `GET /api/v1/jobs`, so as with Bucket there is no second copy of the fields. Exception is
+// nil for an attempt that threw nothing, which a caller must not read as an empty message.
+type Job struct {
+	ID         string        `json:"id"`
+	JobID      string        `json:"job_id"`
+	UUID       string        `json:"uuid"`
+	Class      string        `json:"class"`
+	Queue      string        `json:"queue"`
+	Connection string        `json:"connection"`
+	Outcome    string        `json:"outcome"`
+	Attempts   int           `json:"attempts"`
+	DurationMS int64         `json:"duration_ms"`
+	FinishedAt time.Time     `json:"finished_at"`
+	Exception  *JobException `json:"exception"`
+}
+
+// JobException is the sanitized failure the publisher attached to an attempt.
+type JobException struct {
+	Class   string `json:"class"`
+	Message string `json:"message"`
+}
+
+// JobCursor is a position in job history: the row a page ended on, or the row a client asks
+// to continue after. It is the (finished_at, id) keyset the jobs indexes are built in.
+type JobCursor struct {
+	FinishedAt time.Time
+	ID         string
+}
+
+// JobQuery selects one page of job history. An empty Queue or Outcome means "any", Limit is
+// the page size the caller wants, and Before continues after a previous page.
+type JobQuery struct {
+	Queue   string
+	Outcome string
+	Limit   int
+	Before  *JobCursor
+}
+
+// ErrJobNotFound reports that history holds no attempt for an identity. It is distinct from
+// an empty page so a detail endpoint can answer 404 instead of an empty body.
+var ErrJobNotFound = errors.New("job not found")
+
+// jobColumns is the select list every job read shares, in scanJob's order.
+const jobColumns = `id, job_id, uuid, class, queue, connection, outcome, attempts,
+	duration_ms, finished_at, exception_class, exception_message`
+
+// Jobs returns one page of job history, newest first. Rows that finished in the same second
+// are ordered by event id ascending, which is the order jobs_finished_at stores them in, so a
+// page is read in index order: the cursor predicate and the ORDER BY are the same keyset.
+func (s *Store) Jobs(ctx context.Context, query JobQuery) ([]Job, error) {
+	if query.Limit <= 0 {
+		return nil, errors.New("job query requires a positive limit")
+	}
+	if query.Outcome != "" {
+		if _, ok := outcomeColumns[query.Outcome]; !ok {
+			return nil, fmt.Errorf("unknown job outcome %q", query.Outcome)
+		}
+	}
+
+	clauses := make([]string, 0, 3)
+	args := make([]any, 0, 6)
+	if query.Queue != "" {
+		clauses = append(clauses, "queue = ?")
+		args = append(args, query.Queue)
+	}
+	if query.Outcome != "" {
+		clauses = append(clauses, "outcome = ?")
+		args = append(args, query.Outcome)
+	}
+	if cursor := query.Before; cursor != nil {
+		// Everything after the cursor in the keyset above: an older second, or the same second
+		// with a larger id. Unlike an offset, this can neither skip nor repeat a row when
+		// several finished together.
+		finishedAt := cursor.FinishedAt.UTC().Unix()
+		clauses = append(clauses, "(finished_at < ? OR (finished_at = ? AND id > ?))")
+		args = append(args, finishedAt, finishedAt, cursor.ID)
+	}
+	args = append(args, query.Limit)
+
+	statement := "SELECT " + jobColumns + " FROM jobs"
+	if len(clauses) > 0 {
+		statement += " WHERE " + strings.Join(clauses, " AND ")
+	}
+	statement += " ORDER BY finished_at DESC, id LIMIT ?"
+
+	rows, err := s.db.QueryContext(ctx, statement, args...)
+	if err != nil {
+		return nil, fmt.Errorf("read job history: %w", err)
+	}
+	defer rows.Close()
+
+	var jobs []Job
+	for rows.Next() {
+		job, err := scanJob(rows)
+		if err != nil {
+			return nil, fmt.Errorf("scan job history: %w", err)
+		}
+		jobs = append(jobs, job)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("read job history: %w", err)
+	}
+	return jobs, nil
+}
+
+// Job returns the newest attempt of the job with that identity — its uuid when Laravel
+// published one, otherwise `id:` plus the queue job id — so a caller holding either form
+// names the job the recorder does. A retried job has one row per attempt; the latest is what
+// a detail view asks for.
+func (s *Store) Job(ctx context.Context, jobID string) (Job, error) {
+	if jobID == "" {
+		return Job{}, errors.New("job lookup requires an identity")
+	}
+	job, err := scanJob(s.db.QueryRowContext(ctx,
+		"SELECT "+jobColumns+" FROM jobs WHERE job_id = ? ORDER BY finished_at DESC, id LIMIT 1", jobID))
+	if errors.Is(err, sql.ErrNoRows) {
+		return Job{}, ErrJobNotFound
+	}
+	if err != nil {
+		return Job{}, fmt.Errorf("read job history: %w", err)
+	}
+	return job, nil
+}
+
+// rowScanner is what a *sql.Row and a *sql.Rows both satisfy, so a page and a single job
+// share one scan.
+type rowScanner interface {
+	Scan(dest ...any) error
+}
+
+func scanJob(row rowScanner) (Job, error) {
+	var job Job
+	var finishedAt int64
+	var exceptionClass, exceptionMessage string
+	if err := row.Scan(&job.ID, &job.JobID, &job.UUID, &job.Class, &job.Queue, &job.Connection,
+		&job.Outcome, &job.Attempts, &job.DurationMS, &finishedAt, &exceptionClass, &exceptionMessage); err != nil {
+		return Job{}, err
+	}
+	job.FinishedAt = time.Unix(finishedAt, 0).UTC()
+	if exceptionClass != "" || exceptionMessage != "" {
+		job.Exception = &JobException{Class: exceptionClass, Message: exceptionMessage}
+	}
+	return job, nil
 }

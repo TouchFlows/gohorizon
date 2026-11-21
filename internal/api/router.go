@@ -15,11 +15,13 @@ import (
 	"github.com/gohorizon/gohorizon/internal/metrics"
 )
 
-// Provider is everything the read-only endpoints expose: the current report and the
-// persisted per-queue history.
+// Provider is everything the read-only endpoints expose: the current report, the persisted
+// per-queue history and job history.
 type Provider interface {
 	Report() health.Report
 	Buckets(ctx context.Context, resolution metrics.Resolution, queue string, from, to time.Time) ([]metrics.Bucket, error)
+	Jobs(ctx context.Context, query metrics.JobQuery) ([]metrics.Job, error)
+	Job(ctx context.Context, jobID string) (metrics.Job, error)
 }
 
 // defaultHistoryWindows is the range the metrics endpoint answers when no `from` is
@@ -44,6 +46,8 @@ func NewRouter(provider Provider, log *slog.Logger) http.Handler {
 			writeJSON(w, status, report)
 		})
 		r.Get("/metrics", metricsHistory(provider, log))
+		r.Get("/jobs", jobHistory(provider, log))
+		r.Get("/jobs/{id}", jobDetail(provider, log))
 	})
 
 	return r

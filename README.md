@@ -40,7 +40,8 @@ Milestone 1 (proof of concept) in progress. Implemented:
   hours into daily ones before pruning event ids, job rows, minutes, hours and days past
   their windows. The windows follow handoff §9 and are configurable under
   `storage.retention` (defaults: raw 72 h, minutes 7 d, hours 30 d, days 365 d).
-  `GET /api/v1/metrics?resolution=…` reads any of the three levels back.
+  `GET /api/v1/metrics?resolution=…` reads any of the three levels back, and
+  `GET /api/v1/jobs` / `GET /api/v1/jobs/{id}` read the attempts themselves.
 - Queue depth: every 15 seconds the service runs `gohorizon:inspect` for the queues
   its supervisors launch and reports each queue's `pending`, `reserved` and `delayed`
   counts on `GET /api/v1/health`, plus `oldest_pending_at` (the unix time of the oldest
@@ -60,6 +61,17 @@ processed, released, failed, timed_out, duration_ms}]}`, oldest first.
 hour, 24 hours or 30 days respectively. A missing
 queue, an unknown resolution or a malformed range is a 400, unavailable history is a
 503, and a store failure is a 500 that keeps the database path out of the response.
+
+`GET /api/v1/jobs?[queue=…][outcome=…][limit=…][before=…]` returns one page of finished
+attempts, newest first, as `{jobs: [{id, job_id, uuid, class, queue, connection, outcome,
+attempts, duration_ms, finished_at, exception: {class, message} | null}], next_before}`.
+`limit` defaults to 50 and may not exceed 200, `outcome` must be one of `processed`,
+`released`, `failed` or `timed_out`, and `before` is the `next_before` of the previous page —
+empty on the last page, so paging never needs a count. `GET /api/v1/jobs/{id}` returns one
+job's newest attempt by identity: the uuid when Laravel published one, otherwise `id:` plus
+the queue job id (the same `id:` fallback the recorder uses). A malformed query is a 400, an
+unknown identity a 404, unavailable history a 503, and a store failure a 500 without the
+database path.
 
 Not implemented yet: the React dashboard, authentication, balancing, failed-job
 administration, Prometheus exposition.
@@ -97,9 +109,9 @@ and PHP binary before running the service.
 ## Acceptance run
 
 `tests/integration` drives a real service against a disposable Laravel application and a
-real Redis: a scheduled worker runs jobs end to end, telemetry reaches `/api/v1/health`
-and `/api/v1/metrics`, a job in flight finishes exactly once and is recorded before a
-graceful stop completes, a hard-killed worker's job is retried by Laravel, a killed
+real Redis: a scheduled worker runs jobs end to end, telemetry reaches `/api/v1/health`,
+`/api/v1/metrics` and `/api/v1/jobs`, a job in flight finishes exactly once and is
+recorded before a graceful stop completes, a hard-killed worker's job is retried by Laravel, a killed
 worker is replaced, a service restart adopts the running worker instead of launching
 a second one, an instance whose lock was taken over releases its worker instead of
 sharing the pool, jobs keep running while the control plane's Redis is cut while health

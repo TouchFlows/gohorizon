@@ -3,6 +3,7 @@ package metrics
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"slices"
@@ -573,6 +574,165 @@ func TestOpenCreatesTheParentDirectory(t *testing.T) {
 	store := openStore(t, path)
 	if err := store.RecordJob(context.Background(), job("e1", "emails", "processed", 1, at(1))); err != nil {
 		t.Fatalf("RecordJob: %v", err)
+	}
+}
+
+func TestJobsPagesNewestFirstWithoutSkippingOrRepeating(t *testing.T) {
+	store := openStore(t, filepath.Join(t.TempDir(), "metrics.db"))
+	ctx := context.Background()
+
+	// Two of these finish in the same second, so the id tiebreak is what makes the keyset
+	// unambiguous: a paged read must neither repeat nor skip one of them.
+	records := []JobRecord{
+		job("e5", "emails", "processed", 10, at(5)),
+		job("e1", "emails", "processed", 10, at(1)),
+		job("e4", "emails", "failed", 20, at(4)),
+		job("e2", "emails", "processed", 10, at(2)),
+		job("e3", "emails", "failed", 20, at(2)),
+	}
+	for _, record := range records {
+		if err := store.RecordJob(ctx, record); err != nil {
+			t.Fatalf("RecordJob(%s): %v", record.EventID, err)
+		}
+	}
+
+	var seen []string
+	var cursor *JobCursor
+	for page := 0; page < len(records); page++ {
+		jobs, err := store.Jobs(ctx, JobQuery{Queue: "emails", Limit: 2, Before: cursor})
+		if err != nil {
+			t.Fatalf("Jobs page %d: %v", page, err)
+		}
+		if len(jobs) == 0 {
+			break
+		}
+		for _, found := range jobs {
+			seen = append(seen, found.ID)
+		}
+		last := jobs[len(jobs)-1]
+		cursor = &JobCursor{FinishedAt: last.FinishedAt, ID: last.ID}
+	}
+
+	// Newest first, and the pair that finished together ordered by id: the order the index
+	// stores them in.
+	want := []string{"e5", "e4", "e2", "e3", "e1"}
+	if !slices.Equal(seen, want) {
+		t.Errorf("paged jobs = %v, want %v exactly once and in order", seen, want)
+	}
+}
+
+func TestJobsFiltersByQueueAndOutcome(t *testing.T) {
+	store := openStore(t, filepath.Join(t.TempDir(), "metrics.db"))
+	ctx := context.Background()
+	for _, record := range []JobRecord{
+		job("e1", "emails", "processed", 10, at(1)),
+		job("e2", "emails", "failed", 20, at(2)),
+		job("e3", "reports", "failed", 30, at(3)),
+	} {
+		if err := store.RecordJob(ctx, record); err != nil {
+			t.Fatalf("RecordJob(%s): %v", record.EventID, err)
+		}
+	}
+
+	tests := []struct {
+		name  string
+		query JobQuery
+		want  []string
+	}{
+		{"no filter", JobQuery{Limit: 10}, []string{"e3", "e2", "e1"}},
+		{"queue", JobQuery{Queue: "emails", Limit: 10}, []string{"e2", "e1"}},
+		{"outcome", JobQuery{Outcome: "failed", Limit: 10}, []string{"e3", "e2"}},
+		{"queue and outcome", JobQuery{Queue: "reports", Outcome: "failed", Limit: 10}, []string{"e3"}},
+		{"nothing matches", JobQuery{Queue: "reports", Outcome: "processed", Limit: 10}, nil},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			jobs, err := store.Jobs(ctx, tc.query)
+			if err != nil {
+				t.Fatalf("Jobs: %v", err)
+			}
+			var ids []string
+			for _, found := range jobs {
+				ids = append(ids, found.ID)
+			}
+			if !slices.Equal(ids, tc.want) {
+				t.Errorf("jobs = %v, want %v", ids, tc.want)
+			}
+		})
+	}
+}
+
+func TestJobsRejectsQueriesItCannotRead(t *testing.T) {
+	store := openStore(t, filepath.Join(t.TempDir(), "metrics.db"))
+	ctx := context.Background()
+
+	for _, tc := range []struct {
+		name  string
+		query JobQuery
+	}{
+		{"zero limit", JobQuery{}},
+		{"negative limit", JobQuery{Limit: -1}},
+		{"unknown outcome", JobQuery{Limit: 10, Outcome: "exploded"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, err := store.Jobs(ctx, tc.query); err == nil {
+				t.Fatal("Jobs accepted a query it cannot read")
+			}
+		})
+	}
+	if _, err := store.Job(ctx, ""); err == nil {
+		t.Fatal("Job accepted an empty identity")
+	}
+}
+
+func TestJobReturnsTheNewestAttemptWithItsException(t *testing.T) {
+	store := openStore(t, filepath.Join(t.TempDir(), "metrics.db"))
+	ctx := context.Background()
+
+	// A retried job keeps one row per attempt; the detail view shows the latest, which is
+	// the one an operator is looking for when a job keeps failing.
+	released := job("e1", "emails", "released", 10, at(1))
+	released.JobID = "u-1"
+	failed := job("e2", "emails", "failed", 750, at(2))
+	failed.JobID = "u-1"
+	failed.Attempts = 3
+	failed.ExceptionClass = "RuntimeException"
+	failed.ExceptionMessage = "the fixture always fails"
+	for _, record := range []JobRecord{released, failed} {
+		if err := store.RecordJob(ctx, record); err != nil {
+			t.Fatalf("RecordJob(%s): %v", record.EventID, err)
+		}
+	}
+
+	found, err := store.Job(ctx, "u-1")
+	if err != nil {
+		t.Fatalf("Job: %v", err)
+	}
+	if found.ID != "e2" || found.Outcome != "failed" || found.Attempts != 3 {
+		t.Errorf("job = %+v, want the newest attempt of the job", found)
+	}
+	if found.Exception == nil || found.Exception.Class != "RuntimeException" ||
+		found.Exception.Message != "the fixture always fails" {
+		t.Errorf("exception = %+v, want the stored failure", found.Exception)
+	}
+	if !found.FinishedAt.Equal(at(2)) {
+		t.Errorf("finished_at = %s, want %s", found.FinishedAt, at(2))
+	}
+
+	// An attempt that threw nothing reports no exception rather than an empty one.
+	if err := store.RecordJob(ctx, job("e3", "emails", "processed", 5, at(3))); err != nil {
+		t.Fatalf("RecordJob(e3): %v", err)
+	}
+	processed, err := store.Job(ctx, "job-e3")
+	if err != nil {
+		t.Fatalf("Job(no exception): %v", err)
+	}
+	if processed.Exception != nil {
+		t.Errorf("exception = %+v, want nil for a job that did not throw", processed.Exception)
+	}
+
+	if _, err := store.Job(ctx, "nobody"); !errors.Is(err, ErrJobNotFound) {
+		t.Errorf("Job(unknown) = %v, want ErrJobNotFound", err)
 	}
 }
 
