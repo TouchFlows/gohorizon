@@ -5,7 +5,7 @@
     "license": "MIT",
     "require": {
         "php": "^8.3",
-        "gohorizon/laravel": "^0.1.0",
+        "gohorizon/laravel": "@dev",
         "laravel/framework": "^13.0",
         "predis/predis": "^2.3 || ^3.0"
     },
@@ -14,10 +14,7 @@
             "type": "path",
             "url": "../../../packages/laravel",
             "options": {
-                "symlink": true,
-                "versions": {
-                    "gohorizon/laravel": "0.1.0"
-                }
+                "symlink": true
             }
         }
     ],

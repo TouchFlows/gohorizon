@@ -50,12 +50,15 @@ jobs:
         run: go test -race -count=1 ./...
 
       # The fixture's lock file is tracked, so this replays the exact dependency set
-      # the suite was last run against. Validate first: a malformed or drifting
-      # manifest should fail here, not as a puzzling install error.
+      # the suite was last run against. Validate first, so a manifest the install
+      # scripts cannot use fails with validate's message rather than mid-install.
+      # --no-check-all skips constraint-range style warnings, which the fixture's
+      # intentional `@dev` requirement of the local path package always triggers;
+      # schema, lock and publish checks still run.
       - name: Install the acceptance fixture
         working-directory: tests/fixtures/laravel-app
         run: |
-          composer validate --strict --no-check-publish
+          composer validate --strict --no-check-all --no-check-publish
           composer install --no-interaction --no-progress
 
       # The suite skips when the fixture, PHP or Redis is missing, which would make a
