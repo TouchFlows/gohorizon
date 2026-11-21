@@ -4,7 +4,7 @@
         "Read more about it at https://getcomposer.org/doc/01-basic-usage.md#installing-dependencies",
         "This file is @generated automatically"
     ],
-    "content-hash": "c259cef80ce731c18729f780a2df0b55",
+    "content-hash": "280063a4d0f49d6ac8bbc581478ab825",
     "packages": [
         {
             "name": "brick/math",
@@ -584,11 +584,11 @@
         },
         {
             "name": "gohorizon/laravel",
-            "version": "dev-main",
+            "version": "0.1.0",
             "dist": {
                 "type": "path",
                 "url": "../../../packages/laravel",
-                "reference": "e8b04ca1f66041b2a6df20f9f432a7db84f2e771"
+                "reference": "6b46f6b497d2a516eadd608d70b7726c73ea25a9"
             },
             "require": {
                 "illuminate/console": "^13.0",
@@ -6040,9 +6040,7 @@
     "packages-dev": [],
     "aliases": [],
     "minimum-stability": "stable",
-    "stability-flags": {
-        "gohorizon/laravel": 20
-    },
+    "stability-flags": {},
     "prefer-stable": false,
     "prefer-lowest": false,
     "platform": {

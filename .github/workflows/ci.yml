@@ -27,9 +27,9 @@ jobs:
           --health-retries 12
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
           cache: true
@@ -50,10 +50,13 @@ jobs:
         run: go test -race -count=1 ./...
 
       # The fixture's lock file is tracked, so this replays the exact dependency set
-      # the suite was last run against.
+      # the suite was last run against. Validate first: a malformed or drifting
+      # manifest should fail here, not as a puzzling install error.
       - name: Install the acceptance fixture
         working-directory: tests/fixtures/laravel-app
-        run: composer install --no-interaction --no-progress
+        run: |
+          composer validate --strict --no-check-publish
+          composer install --no-interaction --no-progress
 
       # The suite skips when the fixture, PHP or Redis is missing, which would make a
       # green run prove nothing. Fail instead.
