@@ -11,6 +11,11 @@ import (
 	"time"
 )
 
+// crashLoopThreshold is how many consecutive premature exits turn a restarting worker
+// into a crash loop. RestartCount only survives while a worker dies before its stable
+// window, so three of them mean it never got to do any work between restarts.
+const crashLoopThreshold = 3
+
 // Spec configures one supervisor's process pool.
 type Spec struct {
 	ApplicationID string
@@ -167,6 +172,7 @@ func (m *Manager) Snapshot() Stats {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
+	now := m.now()
 	stats := Stats{
 		SupervisorID: m.spec.SupervisorID,
 		Desired:      m.spec.Desired,
@@ -179,6 +185,7 @@ func (m *Manager) Snapshot() Stats {
 		}
 		rec := inst.rec
 		rec.Transitions = append([]Transition{}, inst.rec.Transitions...)
+		rec.CrashLooping = m.crashLooping(rec, now)
 		stats.Workers = append(stats.Workers, rec)
 		switch rec.State {
 		case StateRunning:
@@ -339,6 +346,14 @@ func (m *Manager) afterExitLocked(inst *instance, now time.Time) {
 	m.log.Warn("worker crashed", "uuid", rec.UUID, "queue", rec.Queue,
 		"exit_code", code, "reason", rec.LastExitReason, "restarts", rec.RestartCount,
 		"next_start_in", inst.nextStart.Sub(now).Round(time.Millisecond).String())
+	// Exactly once per streak: RestartCount resets only after an exit following a stable
+	// run, so the crossing is a single crash rather than every crash after it.
+	if rec.RestartCount == crashLoopThreshold {
+		m.log.Error("worker is crash looping: it has crashed on every attempt without a stable run",
+			"uuid", rec.UUID, "queue", rec.Queue, "crashes", rec.RestartCount,
+			"last_reason", rec.LastExitReason,
+			"next_start_in", inst.nextStart.Sub(now).Round(time.Millisecond).String())
+	}
 }
 
 func (m *Manager) startLocked(slot int, now time.Time) {
@@ -511,6 +526,16 @@ func (m *Manager) backoffFor(streak int) time.Duration {
 
 func (m *Manager) stableWindow() time.Duration {
 	return 2*m.spec.RestartBackoff + 30*time.Second
+}
+
+// crashLooping reports whether a worker's exit streak is a crash loop. A stopped or
+// crashed record keeps the streak between attempts; a running replacement stands until it
+// outlives the same stable window that would reset the streak on its next exit.
+func (m *Manager) crashLooping(rec Record, now time.Time) bool {
+	if rec.RestartCount < crashLoopThreshold {
+		return false
+	}
+	return rec.State != StateRunning || startedAgo(rec, now) <= m.stableWindow()
 }
 
 func (m *Manager) persistLocked() {

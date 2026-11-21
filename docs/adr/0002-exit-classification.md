@@ -70,6 +70,9 @@ kill unless the adapter reports it.
 - An unsafe timeout configuration fails at startup with the reason and the fix,
   instead of producing workers whose jobs are retried while still running.
 - Memory-limit and deploy restarts no longer look like crashes in the dashboard.
-- A crash loop is visible: `RestartCount`, backoff growth, and `LastExitReason`.
+- A crash loop is visible: `crash_looping` on the worker in the health body, one
+  escalation log when the streak starts, plus `RestartCount`, backoff growth and
+  `LastExitReason`. The report status stays `ok`: the manager keeps replacing the worker,
+  and a status that flapped would make a health check restart a working supervisor.
 - The supervisor never restarts the whole pool because one worker exited; each slot is
   independent (handoff §2.7 preserved).

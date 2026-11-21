@@ -30,6 +30,10 @@ type Record struct {
 	StoppedAt    *time.Time `json:"stopped_at,omitempty"`
 	RestartCount int        `json:"restart_count"`
 
+	// CrashLooping marks a worker whose recent exits were all premature. It is derived
+	// for the snapshot and never persisted: the streak it describes is RestartCount.
+	CrashLooping bool `json:"crash_looping,omitempty"`
+
 	LastExitCode   int    `json:"last_exit_code"`
 	LastExitReason string `json:"last_exit_reason"`
 

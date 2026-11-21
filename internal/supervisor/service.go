@@ -622,6 +622,7 @@ func (s *Service) Report() health.Report {
 				PID:            worker.PID,
 				State:          string(worker.State),
 				Restarts:       worker.RestartCount,
+				CrashLooping:   worker.CrashLooping,
 				LastExitCode:   worker.LastExitCode,
 				LastExitReason: worker.LastExitReason,
 				Adopted:        worker.Adopted,

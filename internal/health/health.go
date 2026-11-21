@@ -68,11 +68,14 @@ type Supervisor struct {
 }
 
 type Worker struct {
-	UUID           string `json:"uuid"`
-	Queue          string `json:"queue"`
-	PID            int    `json:"pid"`
-	State          string `json:"state"`
-	Restarts       int    `json:"restarts"`
+	UUID     string `json:"uuid"`
+	Queue    string `json:"queue"`
+	PID      int    `json:"pid"`
+	State    string `json:"state"`
+	Restarts int    `json:"restarts"`
+	// CrashLooping marks a worker that keeps dying before it can do any work. The pool
+	// keeps replacing it, so this is body-only and leaves the report status alone.
+	CrashLooping   bool   `json:"crash_looping"`
 	LastExitCode   int    `json:"last_exit_code"`
 	LastExitReason string `json:"last_exit_reason,omitempty"`
 	Adopted        bool   `json:"adopted"`

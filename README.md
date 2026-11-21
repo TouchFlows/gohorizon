@@ -21,7 +21,10 @@ Milestone 1 (proof of concept) in progress. Implemented:
   (no `pcntl`) or that is not below the queue connection's `retry_after`.
 - Process supervisor: explicit state machine, per-queue fixed allocation, crash backoff,
   graceful SIGTERM with bounded SIGKILL escalation, adoption of processes left by a
-  previous supervisor, exit-code classification (0/12 recycle vs crash).
+  previous supervisor, exit-code classification (0/12 recycle vs crash). A worker that
+  keeps crashing before it can do any work is flagged `crash_looping` in the health body,
+  with one escalation log per streak; the status stays `ok`, because the pool is already
+  replacing it and a flapping health check would only restart the supervisor.
 - Telemetry ingestion: a consumer group on the events stream that deduplicates by
   event id, acknowledges what it handles and retries Redis failures without touching
   the workers. Its counters and live failure state are on `GET /api/v1/health`.

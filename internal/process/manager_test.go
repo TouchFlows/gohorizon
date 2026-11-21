@@ -1,6 +1,7 @@
 package process
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -9,6 +10,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -240,6 +242,81 @@ func TestManagerRestartsCrashedWorkerWithBackoff(t *testing.T) {
 	}
 	if worker.UUID == "" {
 		t.Error("worker lost its uuid across restarts")
+	}
+}
+
+// syncBuffer collects the manager's logs while its goroutine is still writing them.
+type syncBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *syncBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *syncBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
+
+func TestManagerReportsACrashLoopAfterRepeatedPrematureCrashes(t *testing.T) {
+	logs := &syncBuffer{}
+	spec := helperSpec(t, "exit1", 1, 2*time.Second, 20*time.Millisecond)
+	spec.Logger = slog.New(slog.NewTextHandler(logs, &slog.HandlerOptions{Level: slog.LevelWarn}))
+	manager, _, _ := startManager(t, spec)
+
+	waitFor(t, 5*time.Second, func() bool {
+		stats := manager.Snapshot()
+		return len(stats.Workers) == 1 && stats.Workers[0].CrashLooping
+	}, "the worker to be reported as a crash loop")
+
+	if restarts := manager.Snapshot().Workers[0].RestartCount; restarts < crashLoopThreshold {
+		t.Errorf("restarts = %d, want at least %d before the loop is reported", restarts, crashLoopThreshold)
+	}
+
+	// It keeps crashing; the escalation must be one line per streak, not one per crash.
+	waitFor(t, 5*time.Second, func() bool {
+		return manager.Snapshot().Workers[0].RestartCount >= crashLoopThreshold+3
+	}, "three more crashes after the loop was reported")
+	if got := strings.Count(logs.String(), "crash looping"); got != 1 {
+		t.Errorf("crash-loop escalations = %d, want exactly one per streak; logs:\n%s", got, logs.String())
+	}
+}
+
+func TestCrashLoopFlagCoversOnlyTheStreak(t *testing.T) {
+	manager, err := New(helperSpec(t, "run", 1, 2*time.Second, 20*time.Millisecond))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	now := manager.now()
+
+	tests := []struct {
+		name string
+		rec  Record
+		want bool
+	}{
+		{"a worker with one crash", Record{State: StateCrashed, RestartCount: 1, StartedAt: now}, false},
+		{"the crash that starts the loop", Record{State: StateCrashed, RestartCount: crashLoopThreshold, StartedAt: now.Add(-time.Second)}, true},
+		{"its replacement, still on probation", Record{State: StateRunning, RestartCount: crashLoopThreshold, StartedAt: now.Add(-time.Second)}, true},
+		{"its replacement, past the stable window", Record{State: StateRunning, RestartCount: crashLoopThreshold, StartedAt: now.Add(-2 * manager.stableWindow())}, false},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			manager.slots[0] = &instance{rec: tc.rec}
+			workers := manager.Snapshot().Workers
+			if len(workers) != 1 {
+				t.Fatalf("workers = %+v, want one", workers)
+			}
+			if workers[0].CrashLooping != tc.want {
+				t.Errorf("crash_looping = %v, want %v (restarts %d, state %s)",
+					workers[0].CrashLooping, tc.want, tc.rec.RestartCount, tc.rec.State)
+			}
+		})
 	}
 }
 
