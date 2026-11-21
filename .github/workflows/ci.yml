@@ -34,6 +34,31 @@ jobs:
           go-version-file: go.mod
           cache: true
 
+      # The dashboard bundle is committed so `go build` needs no Node, and the Go tests read
+      # it through the embed. Build it here so the committed output is checked against its
+      # sources (docs/adr/0008).
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Install the dashboard
+        working-directory: web
+        run: npm ci
+
+      - name: Build the dashboard
+        working-directory: web
+        run: npm run build
+
+      - name: Check the committed bundle
+        run: |
+          if [ -n "$(git status --porcelain -- web/dist)" ]; then
+            echo "::error::web/dist does not match its sources; run npm run build in web/ and commit the result"
+            git status --porcelain -- web/dist
+            exit 1
+          fi
+
       - name: gofmt
         run: |
           unformatted="$(gofmt -l .)"

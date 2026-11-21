@@ -55,6 +55,10 @@ func NewRouter(provider Provider, log *slog.Logger) http.Handler {
 		r.Get("/jobs/{id}", jobDetail(provider, log))
 	})
 
+	// Everything the versioned API does not claim is the dashboard: a bundle asset, or the
+	// shell for a client route (docs/adr/0008).
+	r.NotFound(dashboard())
+
 	return r
 }
 

@@ -53,6 +53,9 @@ Milestone 1 (proof of concept) in progress. Implemented:
 - Read-only `GET /api/v1/health`, and `GET /metrics` for a Prometheus scrape of the same
   state: `gohorizon_up`, `gohorizon_lock_held`, telemetry counters by result, queue depth
   by state, and workers by state and crash loops per supervisor.
+- Dashboard shell served at `/`: the Vite bundle under `web/` is embedded in the binary,
+  hashed assets are cached forever, `index.html` is not cached, and a client route falls
+  back to it (docs/adr/0008).
 - `gohorizon/laravel` package: configuration, job lifecycle telemetry to a Redis Stream,
   `gohorizon:capabilities`, `gohorizon:inspect`.
 
@@ -87,7 +90,7 @@ the format requires. Both `/metrics` and `/api/v1/health` are unauthenticated
 like the rest of the API today: keep them behind the reverse proxy until Milestone 3 adds
 authentication.
 
-Not implemented yet: the React dashboard, authentication, balancing, failed-job
+Not implemented yet: the dashboard's screens, authentication, balancing, failed-job
 administration.
 
 ## Layout
@@ -101,9 +104,32 @@ internal/adapter       gohorizon:capabilities probe, queue inspection, launch pr
 internal/telemetry     events stream consumer, dedupe and counters
 internal/metrics       SQLite job rows and per-queue aggregates (historical metrics)
 internal/supervisor    lock + managers + health report
-internal/api           HTTP routes
+internal/api           HTTP routes and the embedded dashboard
+web                    Vite + React dashboard, built into web/dist
 packages/laravel       Composer package (gohorizon/laravel)
 docs/adr               architecture decision records
+```
+
+## Dashboard
+
+The dashboard lives in `web/` (React, TypeScript, Vite) and the service serves it at `/`.
+Its built bundle is committed under `web/dist` and embedded with `go:embed`, so `go build`
+needs no Node and a release serves the bytes a reviewer saw (docs/adr/0008).
+
+Change the sources, then rebuild and commit the output with them:
+
+```
+cd web
+npm ci
+npm run build
+```
+
+CI runs the same build and fails when `web/dist` does not match the sources. While working
+on the UI, the Vite dev server is quicker:
+
+```
+cd web
+npm run dev
 ```
 
 ## Running locally
