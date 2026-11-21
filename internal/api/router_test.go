@@ -143,9 +143,7 @@ func TestHealthExposesQueueDepth(t *testing.T) {
 	}
 }
 
-// A worker that keeps crashing is reported in the body, like the other body-only
-// observations: the manager is already replacing it, so flapping the status would only
-// make a health check restart a supervisor that is doing its job.
+// A crash loop is body-only, like the other observations that leave the status alone.
 func TestHealthShowsACrashLoopWithoutChangingTheStatus(t *testing.T) {
 	recorder := getHealth(t, health.Report{
 		Status: "ok",
@@ -153,10 +151,7 @@ func TestHealthShowsACrashLoopWithoutChangingTheStatus(t *testing.T) {
 			ID:      "default-supervisor",
 			Desired: 1,
 			Crashed: 1,
-			Workers: []health.Worker{{
-				UUID: "abcd1234", Queue: "default", State: "crashed",
-				Restarts: 3, CrashLooping: true,
-			}},
+			Workers: []health.Worker{{UUID: "abcd1234", State: "crashed", CrashLooping: true}},
 		}},
 	})
 
@@ -165,7 +160,6 @@ func TestHealthShowsACrashLoopWithoutChangingTheStatus(t *testing.T) {
 		Supervisors []struct {
 			Workers []struct {
 				CrashLooping bool `json:"crash_looping"`
-				Restarts     int  `json:"restarts"`
 			} `json:"workers"`
 		} `json:"supervisors"`
 	}
@@ -178,8 +172,8 @@ func TestHealthShowsACrashLoopWithoutChangingTheStatus(t *testing.T) {
 	if len(payload.Supervisors) != 1 || len(payload.Supervisors[0].Workers) != 1 {
 		t.Fatalf("body = %s, want one supervisor with one worker", recorder.Body)
 	}
-	if worker := payload.Supervisors[0].Workers[0]; !worker.CrashLooping || worker.Restarts != 3 {
-		t.Errorf("worker = %+v, want the crash loop reported", worker)
+	if !payload.Supervisors[0].Workers[0].CrashLooping {
+		t.Error("the body does not report the crash loop on its worker")
 	}
 }
 
