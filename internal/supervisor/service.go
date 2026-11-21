@@ -589,16 +589,15 @@ func unservedQueues(queues []string, workers int) []string {
 // launch a worker for. It is a warning rather than an error because a queue may
 // legitimately be served by another supervisor or by Laravel itself, but a pool that
 // silently serves half its list is a configuration mistake nobody would notice
-// (docs/adr/0005). It returns the names so a test can assert the decision.
-func warnIfShortPool(log *slog.Logger, sup *config.Supervisor) []string {
+// (docs/adr/0005).
+func warnIfShortPool(log *slog.Logger, sup *config.Supervisor) {
 	unserved := unservedQueues(sup.Queues, sup.Workers.Min)
 	if len(unserved) == 0 {
-		return nil
+		return
 	}
 	log.Warn("pool is shorter than its queue list; these queues get no worker of their own",
 		"supervisor", sup.ID, "workers", sup.Workers.Min, "queues", len(sup.Queues),
 		"unserved", strings.Join(unserved, ","))
-	return unserved
 }
 
 // Report builds the health payload.

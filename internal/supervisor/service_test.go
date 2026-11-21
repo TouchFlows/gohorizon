@@ -768,10 +768,10 @@ func TestShortPoolNamesTheQueuesItCannotServe(t *testing.T) {
 			}
 			logger := slog.New(slog.NewTextHandler(&logs, nil))
 
-			got := warnIfShortPool(logger, sup)
-			if strings.Join(got, ",") != strings.Join(tc.want, ",") {
+			if got := unservedQueues(tc.queues, tc.workers); strings.Join(got, ",") != strings.Join(tc.want, ",") {
 				t.Fatalf("unserved = %v, want %v", got, tc.want)
 			}
+			warnIfShortPool(logger, sup)
 			if tc.want == nil {
 				if logs.Len() != 0 {
 					t.Errorf("logged %q for a pool that serves every queue", logs.String())
