@@ -39,9 +39,8 @@ priority order, and per-queue scaling is impossible.
 - The default pool for a single-queue application is unchanged: N workers on that queue.
 - An application with three queues and one worker still serves one queue only; the
   configuration must set `workers.min` to at least the number of queues it wants served
-  concurrently. Nothing detects a short pool. Validation only requires `workers.max`
-  between 1 and 100 and equal to `workers.min` under `fixed`; `workers.min: 0` is
-  accepted (only a negative value is rejected), and every problem comes back as an
-  error, so there is no warning channel for a pool smaller than its queue list. The
-  `queues[slot % len(queues)]` assignment is where the queues a pool actually serves are
-  visible.
+  concurrently. Startup logs one warning naming the queues that get no worker, because
+  `queues[slot % len(queues)]` gives slots 0..min-1 only. Validation does not refuse it:
+  `workers.max` merely has to be between 1 and 100 and equal to `workers.min` under
+  `fixed`, `workers.min: 0` is accepted (only a negative value is rejected), and a queue
+  may legitimately be served by another supervisor or by Laravel itself.

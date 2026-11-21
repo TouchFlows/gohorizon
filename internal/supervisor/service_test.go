@@ -1,6 +1,7 @@
 package supervisor
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -737,6 +738,56 @@ func TestShouldFenceAtTheSilenceBoundary(t *testing.T) {
 		if got := shouldFence(confirmed, confirmed.Add(tc.elapsed), allowance); got != tc.want {
 			t.Errorf("%s (%s): shouldFence = %v, want %v", tc.name, tc.elapsed, got, tc.want)
 		}
+	}
+}
+
+// TestShortPoolNamesTheQueuesItCannotServe pins the visibility rule for a pool shorter
+// than its queue list: round-robin slots 0..min-1 leave the tail of the list unserved, so
+// startup says which queues those are instead of leaving it to be discovered. An equal or
+// larger pool is silent, because nothing is missing.
+func TestShortPoolNamesTheQueuesItCannotServe(t *testing.T) {
+	tests := []struct {
+		name    string
+		queues  []string
+		workers int
+		want    []string
+	}{
+		{"one worker, three queues", []string{"default", "emails", "notifications"}, 1, []string{"emails", "notifications"}},
+		{"one worker per queue", []string{"default", "emails", "notifications"}, 3, nil},
+		{"more workers than queues", []string{"default", "emails"}, 5, nil},
+		{"no workers at all", []string{"default", "emails"}, 0, []string{"default", "emails"}},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var logs bytes.Buffer
+			sup := &config.Supervisor{
+				ID:      "default-supervisor",
+				Queues:  tc.queues,
+				Workers: config.Workers{Min: tc.workers, Max: tc.workers},
+			}
+			logger := slog.New(slog.NewTextHandler(&logs, nil))
+
+			got := warnIfShortPool(logger, sup)
+			if strings.Join(got, ",") != strings.Join(tc.want, ",") {
+				t.Fatalf("unserved = %v, want %v", got, tc.want)
+			}
+			if tc.want == nil {
+				if logs.Len() != 0 {
+					t.Errorf("logged %q for a pool that serves every queue", logs.String())
+				}
+				return
+			}
+			line := logs.String()
+			if !strings.Contains(line, "shorter than its queue list") {
+				t.Errorf("log = %q, want one warning naming the short pool", line)
+			}
+			for _, queue := range tc.want {
+				if !strings.Contains(line, queue) {
+					t.Errorf("log = %q, want the unserved queue %q named", line, queue)
+				}
+			}
+		})
 	}
 }
 

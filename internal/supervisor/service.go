@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log/slog"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -149,6 +150,7 @@ func New(ctx context.Context, cfg *config.Config, log *slog.Logger) (*Service, e
 
 	for i := range app.Supervisors {
 		sup := &app.Supervisors[i]
+		warnIfShortPool(log, sup)
 		manager, err := process.New(process.Spec{
 			ApplicationID: app.ID,
 			Environment:   app.Environment,
@@ -568,6 +570,35 @@ func (s *Service) setLock(held bool, lastErr string) {
 	defer s.mu.Unlock()
 	s.lockHeld = held
 	s.lockErr = lastErr
+}
+
+// unservedQueues returns the queues that get no worker slot. A manager assigns
+// queues[slot % len(queues)], so slots 0..workers-1 cover the first workers queues and the
+// rest are only reached once the pool is at least as long as the list.
+func unservedQueues(queues []string, workers int) []string {
+	if workers < 0 {
+		workers = 0
+	}
+	if workers >= len(queues) {
+		return nil
+	}
+	return queues[workers:]
+}
+
+// warnIfShortPool logs one startup warning naming the queues this supervisor will never
+// launch a worker for. It is a warning rather than an error because a queue may
+// legitimately be served by another supervisor or by Laravel itself, but a pool that
+// silently serves half its list is a configuration mistake nobody would notice
+// (docs/adr/0005). It returns the names so a test can assert the decision.
+func warnIfShortPool(log *slog.Logger, sup *config.Supervisor) []string {
+	unserved := unservedQueues(sup.Queues, sup.Workers.Min)
+	if len(unserved) == 0 {
+		return nil
+	}
+	log.Warn("pool is shorter than its queue list; these queues get no worker of their own",
+		"supervisor", sup.ID, "workers", sup.Workers.Min, "queues", len(sup.Queues),
+		"unserved", strings.Join(unserved, ","))
+	return unserved
 }
 
 // Report builds the health payload.

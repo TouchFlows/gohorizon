@@ -21,7 +21,8 @@ Milestone 1 (proof of concept) in progress. Implemented:
   (no `pcntl`) or that is not below the queue connection's `retry_after`.
 - Process supervisor: explicit state machine, per-queue fixed allocation (`workers.min`
   is the pool size and validation requires `workers.max` to match it until balancing
-  arrives), crash backoff,
+  arrives; a pool shorter than its queue list logs one startup warning naming the
+  queues that get no worker), crash backoff,
   graceful SIGTERM with bounded SIGKILL escalation, adoption of processes left by a
   previous supervisor, exit-code classification (0/12 recycle vs crash). A worker that
   keeps crashing before it can do any work is flagged `crash_looping` in the health body,
