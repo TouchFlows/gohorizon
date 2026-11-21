@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { HealthReport } from './api'
-import { buildOverview, buildWorkers, count, formatAge, formatSpan, formatUptime, queueRows } from './view'
+import { buildOverview, buildWorkers, count, formatAge, formatSpan, queueError, queueRows } from './view'
 
 function report(overrides: Partial<HealthReport> = {}): HealthReport {
   return {
@@ -56,13 +56,6 @@ describe('formatAge', () => {
   })
 })
 
-describe('formatUptime', () => {
-  it('formats the service uptime', () => {
-    expect(formatUptime(0)).toBe('0s')
-    expect(formatUptime(3600)).toBe('1h 0m')
-  })
-})
-
 describe('queueRows', () => {
   it('keeps the driver error and turns unreported counts into unknown', () => {
     const rows = queueRows(
@@ -93,6 +86,17 @@ describe('queueRows', () => {
 
   it('treats a missing depth list as no queues', () => {
     expect(queueRows(null, 0)).toEqual([])
+  })
+})
+
+describe('queueError', () => {
+  it('reports why inspection failed', () => {
+    expect(queueError({ error: 'goHorizon:inspect failed', depths: null })).toBe('goHorizon:inspect failed')
+  })
+
+  it('reports nothing when the inspection answered', () => {
+    expect(queueError({ depths: [] })).toBeNull()
+    expect(queueError({ error: '', depths: [] })).toBeNull()
   })
 })
 

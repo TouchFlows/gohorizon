@@ -1,10 +1,10 @@
 import type { HealthReport } from '../api'
-import { queueRows } from '../view'
+import { queueError, queueRows } from '../view'
 import QueueTable from '../components/QueueTable'
 
 export default function Queues({ report }: { report: HealthReport }) {
   const rows = queueRows(report.queues.depths, Date.now())
-  const error = report.queues.error === undefined || report.queues.error === '' ? null : report.queues.error
+  const error = queueError(report.queues)
 
   return (
     <>

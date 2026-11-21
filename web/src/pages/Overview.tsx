@@ -1,4 +1,5 @@
 import type { HealthReport } from '../api'
+import { routeHref } from '../routes'
 import { buildOverview } from '../view'
 import QueueTable from '../components/QueueTable'
 
@@ -40,7 +41,7 @@ export default function Overview({ report, degraded }: { report: HealthReport; d
           {model.supervisors.crashLooping > 0 && `, ${model.supervisors.crashLooping} crash looping`}.
         </p>
         <p>
-          <a href="#/workers">All workers</a>
+          <a href={routeHref('workers')}>All workers</a>
         </p>
       </section>
 
@@ -51,7 +52,7 @@ export default function Overview({ report, degraded }: { report: HealthReport; d
         )}
         <QueueTable rows={model.queues} />
         <p>
-          <a href="#/queues">All queues</a>
+          <a href={routeHref('queues')}>All queues</a>
         </p>
       </section>
 

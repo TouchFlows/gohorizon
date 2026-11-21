@@ -99,6 +99,10 @@ export function isHealthReport(value: unknown): value is HealthReport {
     typeof report.lock === 'object' &&
     report.lock !== null &&
     typeof report.telemetry === 'object' &&
-    report.telemetry !== null
+    report.telemetry !== null &&
+    // The overview reads this before it renders a single queue, so a payload without it
+    // would blank the screen rather than show an empty table.
+    typeof report.queues === 'object' &&
+    report.queues !== null
   )
 }

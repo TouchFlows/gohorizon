@@ -1,7 +1,7 @@
 // Everything a screen shows is built here, away from React, so it can be tested without a
 // browser. A count the driver could not report becomes "unknown": zero is a real answer and
 // saying it for an unanswered question would be a lie.
-import type { HealthReport, QueueDepth, Supervisor, Worker } from './api'
+import type { HealthReport, QueueDepth, Queues, Supervisor, Worker } from './api'
 
 export function count(value: number | null | undefined): string {
   return typeof value === 'number' ? String(value) : 'unknown'
@@ -24,10 +24,6 @@ export function formatSpan(seconds: number): string {
   const days = Math.floor(hours / 24)
   const remaining = hours % 24
   return remaining === 0 ? `${days}d` : `${days}d ${remaining}h`
-}
-
-export function formatUptime(seconds: number): string {
-  return formatSpan(seconds)
 }
 
 // formatAge reports how long something has been waiting. It takes the browser's clock, not
@@ -79,6 +75,12 @@ export function queueRows(depths: QueueDepth[] | null, nowMilliseconds: number):
   }))
 }
 
+// queueError is why the inspection failed, or nothing when it answered. Both pages that
+// show queues need the same answer, so they ask here instead of repeating the test.
+export function queueError(queues: Queues): string | null {
+  return queues.error === undefined || queues.error === '' ? null : queues.error
+}
+
 export function crashLooping(supervisors: Supervisor[] | null): number {
   return (supervisors ?? []).reduce(
     (total, supervisor) => total + (supervisor.workers ?? []).filter((worker) => worker.crash_looping).length,
@@ -94,7 +96,7 @@ export function buildOverview(report: HealthReport, nowMilliseconds: number): Ov
     healthy: report.status === 'ok',
     application: [report.application, report.environment].filter(Boolean).join(' / '),
     version: report.version,
-    uptime: formatUptime(report.uptime_seconds),
+    uptime: formatSpan(report.uptime_seconds),
     lock: {
       ok: lock.held,
       label: lock.held ? 'held' : 'lost',
@@ -117,7 +119,7 @@ export function buildOverview(report: HealthReport, nowMilliseconds: number): Ov
       crashLooping: crashLooping(supervisors),
     },
     queues: queueRows(report.queues.depths, nowMilliseconds),
-    queueError: report.queues.error === undefined || report.queues.error === '' ? null : report.queues.error,
+    queueError: queueError(report.queues),
   }
 }
 

@@ -4,7 +4,7 @@ import type { HealthReport } from './api'
 
 // pollInterval is how often the dashboard asks again. Five seconds keeps a queue depth
 // honest without turning a browser tab into a load generator.
-export const pollInterval = 5000
+const pollInterval = 5000
 
 export interface HealthState {
   report: HealthReport | null
