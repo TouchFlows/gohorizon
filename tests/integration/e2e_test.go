@@ -149,12 +149,13 @@ func TestOneWorkerPerQueueRunsItsOwnJobs(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	// The marker proves the PHP job itself ran; the history below proves exactly how many
+	// jobs each queue accounted for, so a second run could not hide here.
 	for queue, marker := range markers {
 		eventually(t, 30*time.Second, "the job dispatched to "+queue+" to run", func() error {
 			_, err := os.Stat(marker)
 			return err
 		})
-		requireRuns(t, marker, 0, 1)
 	}
 
 	// Each queue's history holds exactly its own job: a shared bucket would let a job run

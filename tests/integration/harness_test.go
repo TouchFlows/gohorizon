@@ -94,7 +94,6 @@ func newHarness(t *testing.T) *harness {
 	t.Setenv("GOHORIZON_ENVIRONMENT", testEnvironment)
 	t.Setenv("GOHORIZON_REDIS_CONNECTION", "default")
 	t.Setenv("GOHORIZON_TELEMETRY_BATCH", "1")
-	t.Setenv("GOHORIZON_E2E_QUEUE", testQueue)
 
 	// A job whose worker dies is only recoverable through its reservation window: too
 	// long and the retry test waits a minute and a half, too short and it must stay
@@ -306,19 +305,12 @@ func (h *harness) dispatch(kind, argument string) error {
 }
 
 // dispatchTo enqueues one fixture job on a named queue, so a test can prove which worker
-// ran it. The queue travels in the environment the fixture already reads; the harness's
-// own value is replaced rather than duplicated, because a duplicate variable leaves the
-// winner up to libc.
+// ran it. The queue travels in the environment of this one command: the fixture reads it
+// nowhere else, and the harness never exports a default it would have to unset.
 func (h *harness) dispatchTo(queue, kind, argument string) error {
 	cmd := exec.Command(h.php, "dispatch.php", kind, argument)
 	cmd.Dir = h.fixture
-	for _, entry := range os.Environ() {
-		if strings.HasPrefix(entry, "GOHORIZON_E2E_QUEUE=") {
-			continue
-		}
-		cmd.Env = append(cmd.Env, entry)
-	}
-	cmd.Env = append(cmd.Env, "GOHORIZON_E2E_QUEUE="+queue)
+	cmd.Env = append(os.Environ(), "GOHORIZON_E2E_QUEUE="+queue)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("dispatch %s to %s: %w\n%s", kind, queue, err, out)
 	}
