@@ -71,6 +71,16 @@ describe('isJobPage', () => {
     expect(isJobPage({ ...jobPage, jobs: [{ ...jobPage.jobs[0], exception: { class: 'E' } }] })).toBe(false)
     expect(isJobPage(null)).toBe(false)
   })
+
+  it('rejects an attempt without the identity the detail panel prints', () => {
+    const withoutUuid: Record<string, unknown> = { ...jobPage.jobs[0] }
+    delete withoutUuid.uuid
+    const withoutJobID: Record<string, unknown> = { ...jobPage.jobs[0] }
+    delete withoutJobID.job_id
+
+    expect(isJobPage({ jobs: [withoutUuid], next_before: '' })).toBe(false)
+    expect(isJobPage({ jobs: [withoutJobID], next_before: '' })).toBe(false)
+  })
 })
 
 describe('isHealthReport', () => {

@@ -13,7 +13,7 @@ export default function JobTable({
   onSelect?: (job: Job) => void
 }) {
   if (jobs.length === 0) {
-    return <p className="muted">No attempts in this window.</p>
+    return <p className="muted">No attempts match this filter.</p>
   }
 
   return (

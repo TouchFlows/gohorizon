@@ -21,10 +21,14 @@ export default function Jobs({ report, pinnedOutcome }: { report: HealthReport; 
   const [trail, setTrail] = useState<Trail>(firstTrail)
   const [selected, setSelected] = useState<Job | null>(null)
 
+  // The queue list comes from the polled report, so a selected queue can disappear when the
+  // configuration changes; the filter falls back to "any" instead of querying a queue the
+  // select no longer offers.
+  const chosenQueue = queues.includes(queue) ? queue : ''
   const cursor = trailCursor(trail)
   const query = useMemo(
-    () => buildJobsQuery({ queue, outcome }, cursor),
-    [queue, outcome, cursor],
+    () => buildJobsQuery({ queue: chosenQueue, outcome }, cursor),
+    [chosenQueue, outcome, cursor],
   )
   const { page, unavailable, error } = useJobs(query)
 
@@ -39,7 +43,22 @@ export default function Jobs({ report, pinnedOutcome }: { report: HealthReport; 
     setTrail(firstTrail)
     setSelected(null)
   }
+
+  // The panel describes one row, so leaving the page it is on closes it: otherwise the
+  // detail sits under a table that no longer lists what it describes.
   const newer = trailNewer(trail)
+  const goNewer = () => {
+    if (newer !== null) {
+      setTrail(newer)
+      setSelected(null)
+    }
+  }
+  const goOlder = () => {
+    if (page !== null && page.next_before !== '') {
+      setTrail(trailOlder(trail, page.next_before))
+      setSelected(null)
+    }
+  }
 
   return (
     <>
@@ -48,7 +67,7 @@ export default function Jobs({ report, pinnedOutcome }: { report: HealthReport; 
       <section className="controls">
         <label className="controls__field">
           Queue
-          <select value={queue} onChange={(event) => chooseQueue(event.target.value)}>
+          <select value={chosenQueue} onChange={(event) => chooseQueue(event.target.value)}>
             <option value="">any</option>
             {queues.map((name) => (
               <option key={name} value={name}>
@@ -73,19 +92,14 @@ export default function Jobs({ report, pinnedOutcome }: { report: HealthReport; 
         )}
 
         <div className="controls__group" role="group" aria-label="Paging">
-          <button
-            type="button"
-            className="chip"
-            disabled={newer === null}
-            onClick={() => newer !== null && setTrail(newer)}
-          >
+          <button type="button" className="chip" disabled={newer === null} onClick={goNewer}>
             newer
           </button>
           <button
             type="button"
             className="chip"
             disabled={page === null || page.next_before === ''}
-            onClick={() => page !== null && page.next_before !== '' && setTrail(trailOlder(trail, page.next_before))}
+            onClick={goOlder}
           >
             older
           </button>
@@ -103,7 +117,11 @@ export default function Jobs({ report, pinnedOutcome }: { report: HealthReport; 
       {page === null && !unavailable && error === null && <p className="muted">Reading job history…</p>}
 
       {page !== null && (
-        <JobTable jobs={page.jobs} showException={pinnedOutcome !== undefined} onSelect={setSelected} />
+        <JobTable
+          jobs={page.jobs}
+          showException={pinnedOutcome !== undefined}
+          onSelect={(job) => setSelected(job)}
+        />
       )}
 
       {selected !== null && <JobDetail job={selected} onClose={() => setSelected(null)} />}

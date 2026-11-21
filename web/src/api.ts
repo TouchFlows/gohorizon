@@ -222,6 +222,10 @@ function isJob(value: unknown): value is Job {
   return (
     typeof job.id === 'string' &&
     typeof job.class === 'string' &&
+    // The detail panel prints these two, and an absent uuid is not the same as a job that
+    // published none: the panel would show a blank row instead of "none published".
+    typeof job.job_id === 'string' &&
+    typeof job.uuid === 'string' &&
     typeof job.queue === 'string' &&
     typeof job.outcome === 'string' &&
     typeof job.attempts === 'number' &&
