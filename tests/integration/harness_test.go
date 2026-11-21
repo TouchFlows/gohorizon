@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"os"
@@ -14,6 +15,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -124,6 +126,15 @@ func newHarness(t *testing.T) *harness {
 // loopback URL the command will serve.
 func (h *harness) writeConfig() (string, string) {
 	h.t.Helper()
+	return h.writeConfigAt(testRedisAddr)
+}
+
+// writeConfigAt is writeConfig with the control plane's Redis address overridden, so a
+// test can route GoHorizon through a proxy. Only GoHorizon's own client moves: the
+// fixture's Laravel connection stays on testRedisAddr through its environment, which is
+// what makes an outage here an outage of the control plane alone.
+func (h *harness) writeConfigAt(address string) (string, string) {
+	h.t.Helper()
 
 	listen := fmt.Sprintf("127.0.0.1:%d", freePort(h.t))
 	src := fmt.Sprintf(`version: 1
@@ -167,7 +178,7 @@ applications:
 `,
 		listen,
 		filepath.Join(h.dir, "metrics.db"),
-		testRedisAddr,
+		address,
 		testRedisDB,
 		testApplication,
 		h.fixture,
@@ -394,11 +405,18 @@ func requireRuns(t *testing.T, marker string, started, ran int) {
 
 // report is the part of GET /api/v1/health the acceptance tests assert on.
 type report struct {
-	Status    string `json:"status"`
+	Status string `json:"status"`
+	Lock   struct {
+		Held      bool   `json:"held"`
+		Degraded  bool   `json:"degraded"`
+		LastError string `json:"last_error"`
+	} `json:"lock"`
 	Telemetry struct {
-		Events  int `json:"events"`
-		Invalid int `json:"invalid"`
-		Errors  int `json:"errors"`
+		Events    int    `json:"events"`
+		Invalid   int    `json:"invalid"`
+		Errors    int    `json:"errors"`
+		Failing   bool   `json:"failing"`
+		LastError string `json:"last_error"`
 	} `json:"telemetry"`
 	Supervisors []reportSupervisor `json:"supervisors"`
 }
@@ -429,19 +447,27 @@ func (r report) supervisor(t *testing.T) reportSupervisor {
 }
 
 func (h *harness) fetchReport(base string) (report, error) {
+	_, payload, err := h.fetchReportCode(base)
+	return payload, err
+}
+
+// fetchReportCode is fetchReport plus the HTTP status, so a test can prove the 503 that
+// ADR 0004 ties to lock loss instead of inferring it from the body.
+func (h *harness) fetchReportCode(base string) (int, report, error) {
 	resp, err := http.Get(base + "/api/v1/health")
 	if err != nil {
-		return report{}, err
+		return 0, report{}, err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusServiceUnavailable {
-		return report{}, fmt.Errorf("health returned %d", resp.StatusCode)
+		return resp.StatusCode, report{}, fmt.Errorf("health returned %d", resp.StatusCode)
 	}
+
 	var payload report
 	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
-		return report{}, fmt.Errorf("decode health: %w", err)
+		return resp.StatusCode, report{}, fmt.Errorf("decode health: %w", err)
 	}
-	return payload, nil
+	return resp.StatusCode, payload, nil
 }
 
 type history struct {
@@ -555,6 +581,144 @@ func (h *harness) killWorkers() {
 // other Redis assertions use.
 func (h *harness) supervisorLockKey() string {
 	return "gohorizon:" + testApplication + ":" + testEnvironment + ":coord:lock:supervisor"
+}
+
+// redisProxy is a loopback TCP proxy in front of the fixture's Redis. Pausing it closes the
+// listener and every live connection, which is what an unreachable Redis looks like to
+// GoHorizon's client, without touching the Redis the Laravel workers use.
+//
+// A proxy rather than stopping Redis on purpose: the suite shares the developer's Redis with
+// whatever else runs on it, and pausing a proxy can only affect this test.
+type redisProxy struct {
+	t      *testing.T
+	target string
+	addr   string
+
+	mu       sync.Mutex
+	listener net.Listener
+	conns    map[net.Conn]struct{}
+	up       bool
+}
+
+// newRedisProxy listens on a loopback port and forwards to target until the test ends.
+func newRedisProxy(t *testing.T, target string) *redisProxy {
+	t.Helper()
+
+	p := &redisProxy{t: t, target: target, conns: make(map[net.Conn]struct{})}
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen for the redis proxy: %v", err)
+	}
+	p.addr = listener.Addr().String()
+	p.listener = listener
+	p.up = true
+	go p.serve(listener)
+
+	t.Cleanup(func() {
+		p.mu.Lock()
+		defer p.mu.Unlock()
+		p.up = false
+		p.closeLocked()
+	})
+	return p
+}
+
+// Addr is the address GoHorizon's redis.address must point at.
+func (p *redisProxy) Addr() string { return p.addr }
+
+// Pause makes the proxy unreachable: new dials are refused and open connections are
+// dropped, the way a Redis that stopped accepting clients looks.
+func (p *redisProxy) Pause() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if !p.up {
+		return
+	}
+	p.up = false
+	p.closeLocked()
+}
+
+// Resume accepts clients again on the same address, so a client that retries reconnects
+// without the test having to restart anything.
+func (p *redisProxy) Resume() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.up {
+		return
+	}
+	// Connections closed at the pause can leave the port in TIME_WAIT; a listener still
+	// rebinds normally, but retry briefly instead of flaking the test.
+	var err error
+	for attempt := 0; attempt < 100; attempt++ {
+		var listener net.Listener
+		if listener, err = net.Listen("tcp", p.addr); err == nil {
+			p.listener = listener
+			p.up = true
+			go p.serve(listener)
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	p.t.Fatalf("resume the redis proxy on %s: %v", p.addr, err)
+}
+
+func (p *redisProxy) closeLocked() {
+	if p.listener != nil {
+		_ = p.listener.Close()
+		p.listener = nil
+	}
+	for conn := range p.conns {
+		_ = conn.Close()
+	}
+	clear(p.conns)
+}
+
+func (p *redisProxy) serve(listener net.Listener) {
+	for {
+		conn, err := listener.Accept()
+		if err != nil {
+			return
+		}
+		p.track(conn)
+		go p.pipe(conn)
+	}
+}
+
+func (p *redisProxy) pipe(client net.Conn) {
+	upstream, err := net.Dial("tcp", p.target)
+	if err != nil {
+		p.drop(client)
+		return
+	}
+	p.track(upstream)
+
+	go func() {
+		_, _ = io.Copy(upstream, client)
+		p.drop(client)
+		p.drop(upstream)
+	}()
+	_, _ = io.Copy(client, upstream)
+	p.drop(client)
+	p.drop(upstream)
+}
+
+func (p *redisProxy) track(conn net.Conn) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	// A connection accepted just before a pause belongs to the paused proxy: closing it now
+	// keeps Pause's promise that nothing stays connected.
+	if !p.up {
+		_ = conn.Close()
+		return
+	}
+	p.conns[conn] = struct{}{}
+}
+
+func (p *redisProxy) drop(conn net.Conn) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	delete(p.conns, conn)
+	_ = conn.Close()
 }
 
 func freePort(t *testing.T) int {

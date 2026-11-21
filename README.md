@@ -88,15 +88,18 @@ real Redis: a scheduled worker runs jobs end to end, telemetry reaches `/api/v1/
 and `/api/v1/metrics`, a job in flight finishes exactly once and is recorded before a
 graceful stop completes, a hard-killed worker's job is retried by Laravel, a killed
 worker is replaced, a service restart adopts the running worker instead of launching
-a second one, and an instance whose lock was taken over releases its worker instead of
-sharing the pool. The tests are skipped unless `GOHORIZON_E2E=1`, so `go test ./...` stays
-fast and needs no PHP.
+a second one, an instance whose lock was taken over releases its worker instead of
+sharing the pool, and jobs keep running while the control plane's Redis is cut while
+health reports 503 and recovers without restarting the worker. The tests are skipped
+unless `GOHORIZON_E2E=1`, so `go test ./...` stays fast and needs no PHP.
 
 The fixture is `tests/fixtures/laravel-app`: a Laravel 13 app with the package installed
 by path. Its `composer.lock` is tracked so everyone runs the same dependency set, and
 `vendor/` is ignored, so install it once. The suite
 expects Redis at `127.0.0.1:6379`, works in database 15 and deletes only the keys it
-created:
+created. The outage test puts a loopback TCP proxy in front of that Redis and pauses the
+proxy, so it never stops the shared server; the fixture's Laravel workers keep their own
+direct connection, which is what makes the outage GoHorizon's alone:
 
 ```sh
 cd tests/fixtures/laravel-app && composer install && cd ../../..

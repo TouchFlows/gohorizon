@@ -389,3 +389,94 @@ func TestLockLossMakesTheLoserReleaseItsWorker(t *testing.T) {
 		t.Fatalf("lock holder = %q, want the new owner's token left untouched", holder)
 	}
 }
+
+// TestControlPlaneRedisOutageKeepsJobsRunningAndRecovers proves handoff §2.11 against the
+// real binary. GoHorizon's own Redis goes away while Laravel keeps its connection, so jobs
+// keep running and the worker is never touched; health reports the loss as 503 and returns
+// to 200 without a restart once Redis is back, with the same worker pid throughout.
+func TestControlPlaneRedisOutageKeepsJobsRunningAndRecovers(t *testing.T) {
+	h := newHarness(t)
+	proxy := newRedisProxy(t, testRedisAddr)
+	configPath, base := h.writeConfigAt(proxy.Addr())
+	instance := h.startBinary(h.buildBinary(), configPath)
+
+	before := awaitRunning(h, base)
+	pid := before.supervisor(t).Workers[0].PID
+	if pid <= 0 {
+		t.Fatalf("worker pid = %d", pid)
+	}
+
+	// Only the control plane's Redis is cut. The outage stays well under the lock's 30s TTL:
+	// losing the lock is a different property, and here this instance must keep it.
+	proxy.Pause()
+
+	// A job dispatched while the control plane is dark still runs, because the worker's
+	// connection to Redis is its own.
+	marker := filepath.Join(h.dir, "outage.txt")
+	requireJobRun(t, h, marker)
+
+	eventually(t, 30*time.Second, "health to report the control-plane outage", func() error {
+		code, current, err := h.fetchReportCode(base)
+		if err != nil {
+			return err
+		}
+		if code != 503 || current.Status != "degraded" {
+			return fmt.Errorf("health is %d %q, want 503 degraded", code, current.Status)
+		}
+		if current.Lock.Held || !current.Lock.Degraded || current.Lock.LastError == "" {
+			return fmt.Errorf("lock = %+v, want the renewal failure reported", current.Lock)
+		}
+		if !current.Telemetry.Failing || current.Telemetry.LastError == "" {
+			return fmt.Errorf("telemetry = %+v, want the ingestion failure reported", current.Telemetry)
+		}
+		sup := current.supervisor(t)
+		if sup.Running != 1 || len(sup.Workers) != 1 || sup.Workers[0].PID != pid {
+			return fmt.Errorf("running=%d workers=%+v, want pid %d still supervising", sup.Running, sup.Workers, pid)
+		}
+		return nil
+	})
+
+	proxy.Resume()
+
+	eventually(t, 45*time.Second, "health to recover without restarting the worker", func() error {
+		code, current, err := h.fetchReportCode(base)
+		if err != nil {
+			return err
+		}
+		if code != 200 || current.Status != "ok" {
+			return fmt.Errorf("health is %d %q, want 200 ok", code, current.Status)
+		}
+		if !current.Lock.Held || current.Lock.Degraded {
+			return fmt.Errorf("lock = %+v, want ownership confirmed again", current.Lock)
+		}
+		sup := current.supervisor(t)
+		if sup.Running != 1 || len(sup.Workers) != 1 || sup.Workers[0].PID != pid || sup.Workers[0].Restarts != 0 {
+			return fmt.Errorf("running=%d workers=%+v, want pid %d never restarted", sup.Running, sup.Workers, pid)
+		}
+		return nil
+	})
+
+	// Ingestion is running again: a job dispatched after recovery is recorded as before, and
+	// the job from the outage was not lost either.
+	requireJobRun(t, h, filepath.Join(h.dir, "after-outage.txt"))
+	eventually(t, 30*time.Second, "telemetry to be consumed again after recovery", func() error {
+		saved, err := h.fetchHistory(base)
+		if err != nil {
+			return err
+		}
+		if processed, _ := saved.totals(); processed < 2 {
+			return fmt.Errorf("processed=%d, want both jobs recorded", processed)
+		}
+		return nil
+	})
+
+	// A normal stop still works after the outage, and the job ran exactly once.
+	instance.terminate(t)
+	lines, err := markerLines(marker)
+	if err != nil {
+		t.Fatalf("read %s: %v", marker, err)
+	}
+	if lines["ran"] != 1 || len(lines) != 1 {
+		t.Fatalf("%s: %v, want the job to have run exactly once", marker, lines)
+	}
+}
