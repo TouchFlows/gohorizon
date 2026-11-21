@@ -10,6 +10,7 @@
 package integration_test
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -58,8 +59,8 @@ func requireJobRun(t *testing.T, h *harness, marker string) {
 
 func TestRealWorkerRunsJobsAndReportsThemOnTheAPI(t *testing.T) {
 	h := newHarness(t)
-	cfg, _ := h.writeConfig("127.0.0.1:0")
-	base, _ := h.startService(cfg)
+	configPath, base := h.writeConfig()
+	h.startBinary(h.buildBinary(), configPath)
 	awaitRunning(h, base)
 
 	marker := filepath.Join(h.dir, "marker.txt")
@@ -87,8 +88,8 @@ func TestRealWorkerRunsJobsAndReportsThemOnTheAPI(t *testing.T) {
 		if err != nil {
 			return err
 		}
-		if saved.total(true) < 1 {
-			return fmt.Errorf("processed=%d failed=%d", saved.total(true), saved.total(false))
+		if processed, failed := saved.totals(); processed < 1 {
+			return fmt.Errorf("processed=%d failed=%d", processed, failed)
 		}
 		return nil
 	})
@@ -101,8 +102,8 @@ func TestRealWorkerRunsJobsAndReportsThemOnTheAPI(t *testing.T) {
 		if err != nil {
 			return err
 		}
-		if saved.total(false) < 1 {
-			return fmt.Errorf("failed=%d", saved.total(false))
+		if _, failed := saved.totals(); failed < 1 {
+			return fmt.Errorf("failed=%d", failed)
 		}
 		return nil
 	})
@@ -110,8 +111,8 @@ func TestRealWorkerRunsJobsAndReportsThemOnTheAPI(t *testing.T) {
 
 func TestCrashedWorkerIsRestartedAndStillRunsJobs(t *testing.T) {
 	h := newHarness(t)
-	cfg, _ := h.writeConfig("127.0.0.1:0")
-	base, _ := h.startService(cfg)
+	configPath, base := h.writeConfig()
+	h.startBinary(h.buildBinary(), configPath)
 
 	before := awaitRunning(h, base)
 	crashedPID := before.supervisor(t).Workers[0].PID
@@ -151,11 +152,7 @@ func TestCrashedWorkerIsRestartedAndStillRunsJobs(t *testing.T) {
 func TestServiceRestartAdoptsTheWorkerWithoutDuplicatingIt(t *testing.T) {
 	h := newHarness(t)
 	binary := h.buildBinary()
-
-	port := freePort(t)
-	listen := fmt.Sprintf("127.0.0.1:%d", port)
-	_, configPath := h.writeConfig(listen)
-	base := fmt.Sprintf("http://%s", listen)
+	configPath, base := h.writeConfig()
 
 	first := h.startBinary(binary, configPath)
 	before := awaitRunning(h, base)
@@ -175,7 +172,7 @@ func TestServiceRestartAdoptsTheWorkerWithoutDuplicatingIt(t *testing.T) {
 
 	// The dead instance cannot renew the ownership lock; drop the key rather than wait
 	// out its 30-second TTL.
-	ctx, cancel := testContext()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	if err := h.redis.Del(ctx, "gohorizon:"+testApplication+":"+testEnvironment+":coord:lock:supervisor").Err(); err != nil {
 		t.Fatalf("release the stale lock: %v", err)
@@ -212,8 +209,8 @@ func TestServiceRestartAdoptsTheWorkerWithoutDuplicatingIt(t *testing.T) {
 		if err != nil {
 			return err
 		}
-		if saved.total(true) < 1 {
-			return fmt.Errorf("processed=%d", saved.total(true))
+		if processed, _ := saved.totals(); processed < 1 {
+			return fmt.Errorf("processed=%d", processed)
 		}
 		return nil
 	})

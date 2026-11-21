@@ -3,31 +3,24 @@
 package integration_test
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log/slog"
 	"net"
 	"net/http"
-	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
-	"sync"
 	"syscall"
 	"testing"
 	"time"
 
 	goredis "github.com/redis/go-redis/v9"
 
-	"github.com/gohorizon/gohorizon/internal/api"
-	"github.com/gohorizon/gohorizon/internal/config"
 	"github.com/gohorizon/gohorizon/internal/process"
-	"github.com/gohorizon/gohorizon/internal/supervisor"
 )
 
 const (
@@ -119,10 +112,12 @@ func newHarness(t *testing.T) *harness {
 	return h
 }
 
-// writeConfig writes a gohorizon.yaml for the fixture and returns it with its path.
-func (h *harness) writeConfig(listen string) (*config.Config, string) {
+// writeConfig writes a gohorizon.yaml for the fixture and returns its path with the
+// loopback URL the command will serve.
+func (h *harness) writeConfig() (string, string) {
 	h.t.Helper()
 
+	listen := fmt.Sprintf("127.0.0.1:%d", freePort(h.t))
 	src := fmt.Sprintf(`version: 1
 
 server:
@@ -177,61 +172,11 @@ applications:
 	if err := os.WriteFile(path, []byte(src), 0o600); err != nil {
 		h.t.Fatalf("write config: %v", err)
 	}
-	cfg, err := config.Load(path)
-	if err != nil {
-		h.t.Fatalf("load config: %v", err)
-	}
-	if err := cfg.Validate(); err != nil {
-		h.t.Fatalf("validate config: %v", err)
-	}
-	return cfg, path
+	return path, "http://" + listen
 }
 
-// startService runs a supervisor in this process behind a real HTTP server, the same
-// wiring cmd/gohorizon uses.
-func (h *harness) startService(cfg *config.Config) (string, func()) {
-	h.t.Helper()
-
-	logs := &lockedBuffer{}
-	log := slog.New(slog.NewTextHandler(logs, &slog.HandlerOptions{Level: slog.LevelInfo}))
-
-	ctx, cancel := context.WithCancel(context.Background())
-	service, err := supervisor.New(ctx, cfg, log)
-	if err != nil {
-		t := h.t
-		t.Fatalf("supervisor.New: %v", err)
-	}
-	server := httptest.NewServer(api.NewRouter(service, log))
-	runErr := make(chan error, 1)
-	go func() { runErr <- service.Run(ctx) }()
-
-	var once sync.Once
-	stop := func() {
-		once.Do(func() {
-			cancel()
-			select {
-			case err := <-runErr:
-				if err != nil {
-					h.t.Errorf("service.Run: %v", err)
-				}
-			case <-time.After(90 * time.Second):
-				h.t.Error("the service did not stop after its workers were signalled")
-			}
-			server.Close()
-			if err := service.Close(); err != nil {
-				h.t.Errorf("service.Close: %v", err)
-			}
-			if h.t.Failed() {
-				h.t.Logf("GoHorizon log:\n%s", logs.String())
-			}
-		})
-	}
-	h.t.Cleanup(stop)
-	return server.URL, stop
-}
-
-// buildBinary compiles the real command, so the restart test can kill a supervisor
-// process without killing the test process.
+// buildBinary compiles the real command, so every acceptance test runs the same wiring
+// the operator does, and a test can kill a supervisor without killing itself.
 func (h *harness) buildBinary() string {
 	h.t.Helper()
 
@@ -395,16 +340,12 @@ type history struct {
 	} `json:"buckets"`
 }
 
-func (h history) total(processed bool) int {
-	sum := 0
+func (h history) totals() (processed, failed int) {
 	for _, bucket := range h.Buckets {
-		if processed {
-			sum += bucket.Processed
-		} else {
-			sum += bucket.Failed
-		}
+		processed += bucket.Processed
+		failed += bucket.Failed
 	}
-	return sum
+	return processed, failed
 }
 
 func (h *harness) fetchHistory(base string) (history, error) {
@@ -482,10 +423,6 @@ func (h *harness) killWorkers() {
 	}
 }
 
-func testContext() (context.Context, context.CancelFunc) {
-	return context.WithTimeout(context.Background(), 10*time.Second)
-}
-
 func freePort(t *testing.T) int {
 	t.Helper()
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
@@ -504,23 +441,4 @@ func tail(data []byte, limit int) string {
 		return string(data)
 	}
 	return "…" + string(data[len(data)-limit:])
-}
-
-// lockedBuffer keeps slog output safe to read while the service and the HTTP handler
-// are still writing to it.
-type lockedBuffer struct {
-	mu  sync.Mutex
-	buf bytes.Buffer
-}
-
-func (b *lockedBuffer) Write(p []byte) (int, error) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	return b.buf.Write(p)
-}
-
-func (b *lockedBuffer) String() string {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	return b.buf.String()
 }

@@ -87,16 +87,14 @@ running worker instead of launching a second one. The tests are skipped unless
 `GOHORIZON_E2E=1`, so `go test ./...` stays fast and needs no PHP.
 
 The fixture is `tests/fixtures/laravel-app`: a Laravel 13 app with the package installed
-by path. Its `vendor/` and `composer.lock` are ignored, so install them once, and point
-the tests at a Redis database that may be flushed:
+by path. Its `vendor/` and `composer.lock` are ignored, so install them once. The suite
+expects Redis at `127.0.0.1:6379`, works in database 15 and deletes only the keys it
+created:
 
 ```sh
 cd tests/fixtures/laravel-app && composer install && cd ../../..
 GOHORIZON_E2E=1 go test -count=1 -v ./tests/integration
 ```
-
-The suite expects Redis at `127.0.0.1:6379` and works in database 15, deleting only the
-keys it created.
 
 ## Safety rules
 
