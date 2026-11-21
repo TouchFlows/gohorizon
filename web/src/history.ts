@@ -8,12 +8,18 @@ export interface ChartBucket {
   failed: number
   timedOut: number
   total: number
+  // durationMs is every attempt's duration in the bucket added up; averageMs is that over
+  // the attempts in it, which is the number a queue slowing down moves.
+  durationMs: number
+  averageMs: number
 }
 
 export interface ChartModel {
   buckets: ChartBucket[]
   // max is the tallest column, never zero: a chart needs a scale even when every column is.
   max: number
+  // maxAverageMs scales the duration chart the same way, and is never zero either.
+  maxAverageMs: number
   total: number
   // empty means the window held no buckets at all, which the page says plainly instead of
   // drawing a zero line that would read as "nothing ran" rather than "nothing recorded".
@@ -38,13 +44,18 @@ export function buildChart(history: History): ChartModel {
   const byStart = new Map<number, ChartBucket>()
   for (const bucket of history.buckets) {
     const start = Math.floor(Date.parse(bucket.start) / 1000 / step) * step
+    const total = bucket.processed + bucket.released + bucket.failed + bucket.timed_out
     byStart.set(start, {
       start,
       processed: bucket.processed,
       released: bucket.released,
       failed: bucket.failed,
       timedOut: bucket.timed_out,
-      total: bucket.processed + bucket.released + bucket.failed + bucket.timed_out,
+      total,
+      durationMs: bucket.duration_ms,
+      // Nothing ran, so there is no duration to average. Zero is the absence here, and the
+      // duration chart leaves those columns out rather than drawing instant jobs.
+      averageMs: total === 0 ? 0 : Math.round(bucket.duration_ms / total),
     })
   }
 
@@ -52,13 +63,23 @@ export function buildChart(history: History): ChartModel {
   const first = Math.max(from, to - step * maxBuckets)
   for (let start = first; start < to; start += step) {
     buckets.push(
-      byStart.get(start) ?? { start, processed: 0, released: 0, failed: 0, timedOut: 0, total: 0 },
+      byStart.get(start) ?? {
+        start,
+        processed: 0,
+        released: 0,
+        failed: 0,
+        timedOut: 0,
+        total: 0,
+        durationMs: 0,
+        averageMs: 0,
+      },
     )
   }
 
   return {
     buckets,
     max: Math.max(1, ...buckets.map((bucket) => bucket.total)),
+    maxAverageMs: Math.max(1, ...buckets.map((bucket) => bucket.averageMs)),
     total: buckets.reduce((sum, bucket) => sum + bucket.total, 0),
     empty: history.buckets.length === 0,
   }

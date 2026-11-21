@@ -2,6 +2,7 @@ import { useMemo, useState } from 'react'
 import type { HealthReport, Resolution } from '../api'
 import { buildChart, buildHistoryQuery, defaultRange, ranges } from '../history'
 import { useHistory } from '../useHistory'
+import DurationChart from '../components/DurationChart'
 import OutcomeChart from '../components/OutcomeChart'
 
 const resolutions: Resolution[] = ['minute', 'hourly', 'daily']
@@ -98,7 +99,10 @@ export default function Metrics({ report }: { report: HealthReport }) {
         model.empty ? (
           <p className="muted">No data in this window.</p>
         ) : (
-          <OutcomeChart model={model} resolution={resolution} />
+          <>
+            <OutcomeChart model={model} resolution={resolution} />
+            <DurationChart model={model} resolution={resolution} />
+          </>
         )
       )}
 
@@ -109,7 +113,8 @@ export default function Metrics({ report }: { report: HealthReport }) {
       <p className="muted">
         Outcomes per {resolution} for {chosenQueue === '' ? 'the queue' : chosenQueue}. The store
         writes a row only when something ran, so the chart fills the quiet periods with zero
-        columns rather than closing the gap.
+        columns rather than closing the gap. The lower chart is the average duration of an
+        attempt in each of those columns.
       </p>
     </>
   )

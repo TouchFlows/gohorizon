@@ -12,6 +12,7 @@
   --chart-released: #f08c00;
   --chart-failed: #e03131;
   --chart-timed-out: #7048e8;
+  --chart-duration: #1c7ed6;
 
   font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
   line-height: 1.5;
@@ -31,6 +32,7 @@
     --chart-released: #ffa94d;
     --chart-failed: #ff8787;
     --chart-timed-out: #9775fa;
+    --chart-duration: #4dabf7;
   }
 }
 
@@ -299,6 +301,10 @@ a {
 
 .chart {
   margin: 0;
+}
+
+.chart--duration {
+  margin-top: 1rem;
 }
 
 .chart svg {

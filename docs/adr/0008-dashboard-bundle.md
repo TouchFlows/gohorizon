@@ -62,8 +62,9 @@ whether a payload can be drawn at all. Behaviour that needs a server is not test
 fixture application's worker and a real store, asserting that the overview shows the service's
 status and the queue it supervises, that the jobs page shows an attempt the worker ran, that the
 failed page shows a failed attempt with the exception it threw, that the metrics page charts
-both attempts in the minutes they finished in and reports an empty daily window as empty, and
-that a deep link outside the navigation returns the shell. It runs in CI after the acceptance
+both attempts in the minutes they finished in, draws the average duration those buckets carry
+as the number the payload reported, and reports an empty daily window as empty, and that a deep
+link outside the navigation returns the shell. It runs in CI after the acceptance
 suite, because it needs the fixture and Redis that suite installs.
 
 ## Consequences

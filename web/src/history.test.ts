@@ -123,3 +123,40 @@ describe('ranges', () => {
     }
   })
 })
+
+describe('buildChart duration', () => {
+  it('averages a bucket duration over the attempts that ran in it', () => {
+    const model = buildChart(
+      history({
+        buckets: [
+          bucket('2026-11-21T12:00:00Z', { processed: 2, failed: 1, duration_ms: 90 }),
+          bucket('2026-11-21T12:01:00Z', { failed: 1, duration_ms: 10 }),
+        ],
+      }),
+    )
+
+    expect(model.buckets[0]).toMatchObject({ durationMs: 90, averageMs: 30, total: 3 })
+    expect(model.buckets[1]).toMatchObject({ durationMs: 10, averageMs: 10 })
+    expect(model.maxAverageMs).toBe(30)
+  })
+
+  it('leaves a quiet minute without an average instead of claiming instant jobs', () => {
+    const model = buildChart(
+      history({ buckets: [bucket('2026-11-21T12:00:00Z', { processed: 1, duration_ms: 5 })] }),
+    )
+
+    expect(model.buckets[1]).toMatchObject({ total: 0, durationMs: 0, averageMs: 0 })
+  })
+
+  it('rounds to the millisecond, because the chart labels whole ones', () => {
+    const model = buildChart(
+      history({ buckets: [bucket('2026-11-21T12:00:00Z', { processed: 3, duration_ms: 10 })] }),
+    )
+
+    expect(model.buckets[0].averageMs).toBe(3)
+  })
+
+  it('scales the duration chart at one millisecond when there is nothing to draw', () => {
+    expect(buildChart(history()).maxAverageMs).toBe(1)
+  })
+})

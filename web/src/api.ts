@@ -159,7 +159,8 @@ export function isHistory(value: unknown): value is History {
       typeof (bucket as Bucket).processed === 'number' &&
       typeof (bucket as Bucket).released === 'number' &&
       typeof (bucket as Bucket).failed === 'number' &&
-      typeof (bucket as Bucket).timed_out === 'number',
+      typeof (bucket as Bucket).timed_out === 'number' &&
+      typeof (bucket as Bucket).duration_ms === 'number',
   )
 }
 

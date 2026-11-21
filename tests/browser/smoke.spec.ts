@@ -191,6 +191,54 @@ test.describe('the dashboard against the real binary', () => {
     await expect(page.getByText('No data in this window.')).toBeVisible()
   })
 
+  test('the metrics screen draws the average duration the store returned', async ({ page }) => {
+    // The payload the page charts is the only honest source for the number it should draw,
+    // so the test reads the response the page itself made.
+    const [response] = await Promise.all([
+      page.waitForResponse((candidate) => candidate.url().includes('/api/v1/metrics') && candidate.ok()),
+      page.goto(`${base}/#/metrics`),
+    ])
+    const history = (await response.json()) as {
+      resolution: 'minute' | 'hourly' | 'daily'
+      buckets: {
+        start: string
+        processed: number
+        released: number
+        failed: number
+        timed_out: number
+        duration_ms: number
+      }[]
+    }
+
+    // The failure is the attempt this smoke knows the time of, so its bucket is the one that
+    // has to carry a duration column.
+    const finishedAt = Date.parse(failedAt) / 1000
+    const step = { minute: 60, hourly: 3600, daily: 86400 }[history.resolution]
+    const bucket = history.buckets.find((entry) => {
+      const start = Date.parse(entry.start) / 1000
+      return start <= finishedAt && finishedAt < start + step
+    })
+    if (bucket === undefined) {
+      throw new Error('the window the page charted does not hold the failed attempt')
+    }
+
+    const attempts = bucket.processed + bucket.released + bucket.failed + bucket.timed_out
+    const average = attempts === 0 ? 0 : Math.round(bucket.duration_ms / attempts)
+    const label = await page.evaluate(
+      (start) =>
+        new Date(start * 1000).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' }),
+      Date.parse(bucket.start) / 1000,
+    )
+
+    const durationChart = page.getByRole('img', { name: /Average duration per attempt/ })
+    await expect(durationChart).toBeVisible()
+    // Counted rather than required visible: a job that finished in under a millisecond is a
+    // zero-height column, and this assertion is about the number it labels.
+    await expect(
+      durationChart.locator('rect', { hasText: `${label} — average ${average} ms` }),
+    ).toHaveCount(1)
+  })
+
   test('a deep link outside the navigation loads the shell instead of a 404', async ({ page }) => {
     const response = await page.goto(`${base}/queues/anything`)
 

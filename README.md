@@ -58,7 +58,8 @@ Milestones 1 and 2 implemented:
   rather than an error page and a count the driver could not report reads `unknown`, not `0`;
   metrics charts the service's own minute, hourly and daily aggregates from
   `/api/v1/metrics`, drawn as inline SVG with no chart dependency and a window with no rows
-  shown as "no data in this window"; jobs reads `/api/v1/jobs` with queue and outcome filters,
+  shown as "no data in this window", with the average duration of an attempt drawn under
+  the outcome columns from the same bucket; jobs reads `/api/v1/jobs` with queue and outcome filters,
   cursor paging and a detail panel, and failed jobs is the same table pinned to `failed` with
   the exception in the row itself. Rows are read-only: retrying or deleting a job is
   administration and needs the authenticated API Milestone 5 adds. The Vite bundle under `web/` is embedded in the binary, hashed assets are
