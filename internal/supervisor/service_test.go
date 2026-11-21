@@ -700,3 +700,74 @@ func TestLockLossFencesTheService(t *testing.T) {
 		t.Errorf("lock holder = %q, want the new owner's token untouched", holder)
 	}
 }
+
+// silentLock stands in for a Redis that answers the acquisition and then stops answering:
+// the service starts normally and never gets a renewal confirmed.
+type silentLock struct{}
+
+func (silentLock) AcquireSupervisorLock(context.Context, string, time.Duration) (bool, error) {
+	return true, nil
+}
+
+func (silentLock) RenewSupervisorLock(context.Context, string, time.Duration) (bool, error) {
+	return false, errors.New("redis is unreachable")
+}
+
+func (silentLock) ReleaseSupervisorLock(context.Context, string) error { return nil }
+
+func (silentLock) SupervisorLockHolder(context.Context) (string, error) { return "", nil }
+
+// TestShouldFenceAtTheSilenceBoundary pins the fence threshold: silence is tolerated for one
+// TTL, the moment any other instance could take the key, plus slack for a renewal that was in
+// flight. Fencing earlier would stop workers whose lock is provably still theirs.
+func TestShouldFenceAtTheSilenceBoundary(t *testing.T) {
+	if lockSilenceAllowance <= lockTTL {
+		t.Fatalf("lockSilenceAllowance = %s, must outlive lockTTL = %s", lockSilenceAllowance, lockTTL)
+	}
+
+	allowance := lockSilenceAllowance
+	confirmed := time.Unix(1_700_000_000, 0)
+	cases := []struct {
+		name    string
+		elapsed time.Duration
+		want    bool
+	}{
+		{"just confirmed", 0, false},
+		{"one TTL later", lockTTL, false},
+		{"one millisecond before the allowance", allowance - time.Millisecond, false},
+		{"exactly at the allowance", allowance, true},
+		{"well past the allowance", allowance + 5*time.Second, true},
+	}
+	for _, tc := range cases {
+		if got := shouldFence(confirmed, confirmed.Add(tc.elapsed), allowance); got != tc.want {
+			t.Errorf("%s (%s): shouldFence = %v, want %v", tc.name, tc.elapsed, got, tc.want)
+		}
+	}
+}
+
+// TestLockSilenceFencesTheService proves the silent path end to end inside the process: a
+// client that never confirms a renewal is treated as a lost lock once the allowance passes,
+// so the worker is released instead of supervising a pool this instance cannot hold.
+func TestLockSilenceFencesTheService(t *testing.T) {
+	// The allowance has to outlive the first manager tick, otherwise the service fences
+	// before a worker exists and this proves nothing about releasing one.
+	running := startService(t, func(service *Service) {
+		service.lock = silentLock{}
+		service.renewInterval = 20 * time.Millisecond
+		service.fenceAfter = 3 * time.Second
+	})
+
+	runErr := running.waitRun(t, 20*time.Second)
+	if !errors.Is(runErr, ErrLockLost) {
+		t.Fatalf("Run returned %v, want ErrLockLost", runErr)
+	}
+	if !strings.Contains(runErr.Error(), "not confirmed ownership") {
+		t.Errorf("error = %q, want the unconfirmed renewals named as the reason", runErr)
+	}
+	if stats := running.manager.Snapshot(); stats.Running != 0 {
+		t.Errorf("running=%d after the lock was presumed gone, want the worker released", stats.Running)
+	}
+	if _, err := process.Probe(running.worker.PID); err == nil {
+		t.Errorf("worker pid %d is still alive after the lock was presumed gone", running.worker.PID)
+	}
+}

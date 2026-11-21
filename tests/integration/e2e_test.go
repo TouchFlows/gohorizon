@@ -480,3 +480,52 @@ func TestControlPlaneRedisOutageKeepsJobsRunningAndRecovers(t *testing.T) {
 		t.Fatalf("%s: %v, want the job to have run exactly once", marker, lines)
 	}
 }
+
+// TestSilentRedisFencesTheSupervisor proves the complement of the outage test: silence that
+// outlives the lock's TTL is a loss even though Redis never answers. The key expires while
+// the proxy is paused, so another instance could take the pool; this one must stop its
+// worker instead of supervising a lock it cannot hold.
+func TestSilentRedisFencesTheSupervisor(t *testing.T) {
+	h := newHarness(t)
+	proxy := newRedisProxy(t, testRedisAddr)
+	configPath, base := h.writeConfigAt(proxy.Addr())
+	loser := h.startBinary(h.buildBinary(), configPath)
+	awaitRunning(h, base)
+
+	proxy.Pause()
+
+	// The fence lands at one TTL plus half a TTL, and the renewal tick, the graceful stop and
+	// the bounded drain add a little; allow a generous bound instead of a tight one.
+	if err := loser.wait(90 * time.Second); err == nil {
+		t.Fatal("the instance exited successfully after its lock silently expired; it must report the loss")
+	}
+
+	data, err := os.ReadFile(loser.logPath)
+	if err != nil {
+		t.Fatalf("read the loser's log: %v", err)
+	}
+	if !strings.Contains(string(data), "not confirmed ownership") {
+		t.Errorf("the loser's log does not name the unconfirmed lock:\n%s", tail(data, 4000))
+	}
+
+	// The premise: without renewals the key expired while Redis was unreachable, so a second
+	// instance could have taken the pool during the silence.
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	exists, err := h.redis.Exists(ctx, h.supervisorLockKey()).Result()
+	if err != nil {
+		t.Fatalf("read the supervisor lock: %v", err)
+	}
+	if exists != 0 {
+		t.Fatal("the lock key still exists, so this run did not test fencing against an expired lock")
+	}
+
+	// The worker is released exactly as it is for an answered loss.
+	pids, err := h.workerPIDs()
+	if err != nil {
+		t.Fatalf("scan worker processes: %v", err)
+	}
+	if len(pids) != 0 {
+		t.Fatalf("worker pids %v are still running after the silent lock loss", pids)
+	}
+}

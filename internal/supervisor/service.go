@@ -26,6 +26,12 @@ const (
 	lockRenew   = 10 * time.Second
 	lockTimeout = 5 * time.Second
 
+	// lockSilenceAllowance is how long renewals may go unconfirmed before this instance
+	// treats the silence as a loss. One TTL is the point at which any other instance could
+	// have taken the key; the extra half TTL covers a renewal that was already in flight
+	// when Redis stopped answering (docs/adr/0004).
+	lockSilenceAllowance = lockTTL + lockTTL/2
+
 	// telemetryDrainTimeout bounds the final ingestion pass of a stop. A slow or
 	// unreachable Redis must never hold a shutdown open (handoff §2.11).
 	telemetryDrainTimeout = 5 * time.Second
@@ -44,9 +50,11 @@ const (
 // aborts: two supervisors must never manage the same pool (docs/adr/0004).
 var ErrLocked = errors.New("another GoHorizon instance holds the supervisor lock")
 
-// ErrLockLost is returned when Redis answers that this instance no longer owns the
-// lock. The service stops its workers before returning, so the pool is left to the new
-// owner instead of being supervised by two instances (docs/adr/0004).
+// ErrLockLost is returned when this instance no longer owns the lock, either because
+// Redis answered that the key is gone or taken over, or because renewals went unconfirmed
+// for longer than the lock could survive. The service stops its workers before returning,
+// so the pool is left to the new owner instead of being supervised by two instances
+// (docs/adr/0004).
 var ErrLockLost = errors.New("supervisor lock lost; this instance stopped supervising")
 
 // errLockKeyGone names the definitive loss Redis reports when the key is missing: an
@@ -59,10 +67,21 @@ type queueInspector interface {
 	Queues(ctx context.Context, connection string, queues []string) (adapter.Inspection, error)
 }
 
+// lockClient is the ownership-lock surface. It is an interface so the fencing paths can
+// be tested with a client that never answers, which a real Redis cannot be made to do on
+// demand without disturbing the machine it runs on (docs/adr/0004).
+type lockClient interface {
+	AcquireSupervisorLock(ctx context.Context, owner string, ttl time.Duration) (bool, error)
+	RenewSupervisorLock(ctx context.Context, owner string, ttl time.Duration) (bool, error)
+	ReleaseSupervisorLock(ctx context.Context, owner string) error
+	SupervisorLockHolder(ctx context.Context) (string, error)
+}
+
 type Service struct {
 	cfg      *config.Config
 	log      *slog.Logger
 	client   *redis.Client
+	lock     lockClient
 	consumer *telemetry.Consumer
 	store    *metrics.Store
 	managers []*process.Manager
@@ -74,8 +93,11 @@ type Service struct {
 	// renewInterval is lockRenew in production. It is a field so a test can watch a
 	// lock loss without waiting 10s for the next renewal.
 	renewInterval time.Duration
-	started       time.Time
-	owner         string
+	// fenceAfter is lockSilenceAllowance in production: how long renewals may go
+	// unconfirmed before the lock is presumed gone.
+	fenceAfter time.Duration
+	started    time.Time
+	owner      string
 
 	mu         sync.Mutex
 	lockHeld   bool
@@ -121,6 +143,7 @@ func New(ctx context.Context, cfg *config.Config, log *slog.Logger) (*Service, e
 		cfg:           cfg,
 		log:           log,
 		client:        client,
+		lock:          client,
 		started:       time.Now(),
 		owner:         fmt.Sprintf("%s-%d", version.Version, time.Now().UnixNano()),
 		inspector:     probe,
@@ -128,6 +151,7 @@ func New(ctx context.Context, cfg *config.Config, log *slog.Logger) (*Service, e
 		queueInterval: defaultQueueInterval,
 		pruneInterval: defaultPruneInterval,
 		renewInterval: lockRenew,
+		fenceAfter:    lockSilenceAllowance,
 	}
 
 	for i := range app.Supervisors {
@@ -362,19 +386,20 @@ func (s *Service) noteStopReason(worker, reason string) {
 // final pass, so the event for a job that finishes during the stop is accounted for by
 // the process that ran it.
 func (s *Service) Run(ctx context.Context) error {
-	acquired, err := s.client.AcquireSupervisorLock(ctx, s.owner, lockTTL)
+	acquired, err := s.lock.AcquireSupervisorLock(ctx, s.owner, lockTTL)
 	if err != nil {
 		return err
 	}
 	if !acquired {
-		holder, _ := s.client.SupervisorLockHolder(ctx)
+		holder, _ := s.lock.SupervisorLockHolder(ctx)
 		return fmt.Errorf("%w (owner %q)", ErrLocked, holder)
 	}
+	acquiredAt := time.Now()
 	s.setLock(true, "")
 	defer func() {
 		releaseCtx, cancel := context.WithTimeout(context.Background(), lockTimeout)
 		defer cancel()
-		if err := s.client.ReleaseSupervisorLock(releaseCtx, s.owner); err != nil {
+		if err := s.lock.ReleaseSupervisorLock(releaseCtx, s.owner); err != nil {
 			s.log.Warn("could not release supervisor lock", "error", err)
 		}
 	}()
@@ -421,7 +446,7 @@ func (s *Service) Run(ctx context.Context) error {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		s.renewLoop(runCtx, lost)
+		s.renewLoop(runCtx, lost, acquiredAt)
 	}()
 
 	wg.Add(1)
@@ -470,12 +495,12 @@ func (s *Service) Run(ctx context.Context) error {
 	return nil
 }
 
-// renewLoop keeps the ownership observable and fences on a definitive answer. A
-// renewal error only degrades health: Redis may be unreachable, which is an outage, not
-// proof that this instance lost the pool, and it must never stop jobs (handoff §2.11).
-// Redis answering that the key is someone else's is proof, so it reports the loss to
-// Run, which stops the workers (docs/adr/0004).
-func (s *Service) renewLoop(ctx context.Context, lost chan<- error) {
+// renewLoop keeps the ownership observable and fences when ownership is lost, either
+// because Redis answered that the key is no longer ours or because it has not confirmed a
+// renewal for longer than the lock could possibly survive. A shorter silence only degrades
+// health: Redis may be unreachable, and stopping healthy workers over a telemetry outage
+// would break handoff §2.11. Confirmed ownership restarts the clock.
+func (s *Service) renewLoop(ctx context.Context, lost chan<- error, confirmedAt time.Time) {
 	ticker := time.NewTicker(s.renewInterval)
 	defer ticker.Stop()
 	for {
@@ -484,37 +509,59 @@ func (s *Service) renewLoop(ctx context.Context, lost chan<- error) {
 			return
 		case <-ticker.C:
 			renewCtx, cancel := context.WithTimeout(context.Background(), lockTimeout)
-			held, err := s.client.RenewSupervisorLock(renewCtx, s.owner, lockTTL)
+			held, err := s.lock.RenewSupervisorLock(renewCtx, s.owner, lockTTL)
 			var holder string
 			if err == nil && !held {
 				// Only used to say who owns the pool now; the failure to read it is not
 				// itself a reason to change the decision.
-				holder, _ = s.client.SupervisorLockHolder(renewCtx)
+				holder, _ = s.lock.SupervisorLockHolder(renewCtx)
 			}
 			cancel()
+
+			now := time.Now()
 			switch {
 			case err != nil:
+				// No answer is not proof by itself, but the key expires without a renewal,
+				// so past the allowance the lock is gone whether or not Redis speaks.
+				if shouldFence(confirmedAt, now, s.fenceAfter) {
+					s.fence(lost, fmt.Errorf("renewal has not confirmed ownership for %s",
+						now.Sub(confirmedAt).Round(time.Second)))
+					return
+				}
 				s.log.Warn("supervisor lock renewal failed; supervision continues, telemetry is degraded", "error", err)
 				s.setLock(false, err.Error())
 			case !held:
-				lostErr := errLockKeyGone
+				reason := errLockKeyGone
 				if holder != "" {
-					lostErr = fmt.Errorf("the lock is now held by %q", holder)
+					reason = fmt.Errorf("the lock is now held by %q", holder)
 				}
-				s.setLock(false, ErrLockLost.Error()+": "+lostErr.Error())
-				// Never blocks the loop's exit: Run may already be stopped by a signal.
-				select {
-				case lost <- fmt.Errorf("%w (%v)", ErrLockLost, lostErr):
-				default:
-				}
-				// The release script compares the owner token, so a fenced instance never
-				// deletes the new owner's lock on its way out.
+				s.fence(lost, reason)
 				return
 			default:
+				confirmedAt = now
 				s.setLock(true, "")
 			}
 		}
 	}
+}
+
+// fence tells Run that this instance no longer owns the pool, so its workers are stopped
+// gracefully instead of sharing it with whoever owns the lock now.
+func (s *Service) fence(lost chan<- error, reason error) {
+	fenced := fmt.Errorf("%w (%v)", ErrLockLost, reason)
+	s.setLock(false, fenced.Error())
+	// Never blocks the loop's exit: Run may already be stopping for a signal.
+	select {
+	case lost <- fenced:
+	default:
+	}
+}
+
+// shouldFence reports whether renewals have gone unconfirmed long enough that the lock
+// cannot still be ours. The allowance is one TTL plus slack for a renewal that was in
+// flight when Redis stopped answering.
+func shouldFence(confirmedAt, now time.Time, allowance time.Duration) bool {
+	return !now.Before(confirmedAt.Add(allowance))
 }
 
 func (s *Service) setLock(held bool, lastErr string) {
