@@ -167,12 +167,9 @@ func (c *Consumer) consume(ctx context.Context, backoff *time.Duration) bool {
 // the workers have stopped and before ingestion ends: a worker publishes the event for a
 // job that finished during a graceful stop as it exits, so this pass is what accounts
 // for that job here instead of leaving it for the next start. It is bounded by ctx and
-// stops at the first empty read.
+// stops at the first empty read. The group exists by now: Run created it before any
+// worker could finish a job.
 func (c *Consumer) Drain(ctx context.Context) {
-	if err := c.streams.EnsureEventsGroup(ctx, DefaultGroup); err != nil {
-		c.failed(err)
-		return
-	}
 	c.drain(ctx)
 
 	for ctx.Err() == nil {

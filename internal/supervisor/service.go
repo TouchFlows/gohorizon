@@ -392,7 +392,6 @@ func (s *Service) Run(ctx context.Context) error {
 	// It also does not share runCtx: a worker publishes its last job's event while it
 	// exits, so ingestion has to outlive the workers to account for that job here.
 	consumerCtx, stopConsumer := context.WithCancel(context.Background())
-	defer stopConsumer()
 	consumerDone := make(chan struct{})
 	go func() {
 		defer close(consumerDone)
