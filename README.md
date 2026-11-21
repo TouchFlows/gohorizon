@@ -12,7 +12,10 @@ that adjusts it is in [`docs/laravel-13-recon.md`](docs/laravel-13-recon.md).
 Milestone 1 (proof of concept) in progress. Implemented:
 
 - Configuration loading, environment expansion and full validation (`gohorizon validate`).
-- Redis namespace split with a typed client; the ownership lock with renewal.
+- Redis namespace split with a typed client; the ownership lock with renewal and
+  fencing: an instance whose lock is definitively gone or taken over stops its workers
+  gracefully (an in-flight job still finishes) and exits non-zero, so the pool is never
+  supervised by two services.
 - Capabilities preflight: startup refuses a `worker.timeout` that PHP cannot enforce
   (no `pcntl`) or that is not below the queue connection's `retry_after`.
 - Process supervisor: explicit state machine, per-queue fixed allocation, crash backoff,
@@ -84,8 +87,9 @@ and PHP binary before running the service.
 real Redis: a scheduled worker runs jobs end to end, telemetry reaches `/api/v1/health`
 and `/api/v1/metrics`, a job in flight finishes exactly once and is recorded before a
 graceful stop completes, a hard-killed worker's job is retried by Laravel, a killed
-worker is replaced, and a service restart adopts the running worker instead of launching
-a second one. The tests are skipped unless `GOHORIZON_E2E=1`, so `go test ./...` stays
+worker is replaced, a service restart adopts the running worker instead of launching
+a second one, and an instance whose lock was taken over releases its worker instead of
+sharing the pool. The tests are skipped unless `GOHORIZON_E2E=1`, so `go test ./...` stays
 fast and needs no PHP.
 
 The fixture is `tests/fixtures/laravel-app`: a Laravel 13 app with the package installed

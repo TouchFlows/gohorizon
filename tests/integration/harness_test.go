@@ -518,22 +518,43 @@ func (h *harness) cleanRedis() {
 	}
 }
 
+// workerPIDs lists the live workers this application's supervisors own. The worker name
+// prefix is GoHorizon's own namespace, so nothing else can match it.
+func (h *harness) workerPIDs() ([]int, error) {
+	prefix := "gohorizon:" + testApplication + ":" + testEnvironment + ":"
+	infos, err := process.Scan()
+	if err != nil {
+		return nil, err
+	}
+	var pids []int
+	for _, info := range infos {
+		if strings.HasPrefix(info.Flag("name"), prefix) {
+			pids = append(pids, info.PID)
+		}
+	}
+	return pids, nil
+}
+
 // killWorkers removes any worker a failed test left behind, matching only this
 // application's worker names.
 func (h *harness) killWorkers() {
-	prefix := "gohorizon:" + testApplication + ":" + testEnvironment + ":"
-	infos, err := process.Scan()
+	pids, err := h.workerPIDs()
 	if err != nil {
 		h.t.Logf("scan processes: %v", err)
 		return
 	}
-	for _, info := range infos {
-		if strings.HasPrefix(info.Flag("name"), prefix) {
-			if err := syscall.Kill(info.PID, syscall.SIGKILL); err != nil && !errors.Is(err, syscall.ESRCH) {
-				h.t.Logf("kill leftover worker %d: %v", info.PID, err)
-			}
+	for _, pid := range pids {
+		if err := syscall.Kill(pid, syscall.SIGKILL); err != nil && !errors.Is(err, syscall.ESRCH) {
+			h.t.Logf("kill leftover worker %d: %v", pid, err)
 		}
 	}
+}
+
+// supervisorLockKey is the ownership key the service takes at startup. A lock-loss test
+// writes it as the instance that takes over would, through the same raw client the
+// other Redis assertions use.
+func (h *harness) supervisorLockKey() string {
+	return "gohorizon:" + testApplication + ":" + testEnvironment + ":coord:lock:supervisor"
 }
 
 func freePort(t *testing.T) int {

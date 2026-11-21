@@ -35,7 +35,7 @@ type Telemetry struct {
 // Queues is the last queue-depth sample taken through the package's inspection
 // command. It is body-only: a missing or failing package leaves the report status
 // alone, because a failed health check must not restart a supervisor whose workers are
-// healthy (docs/adr/0001, docs/adr/0004 item 6).
+// healthy (docs/adr/0001, docs/adr/0004 item 7).
 //
 // A count the driver cannot report is null rather than zero.
 type Queues struct {

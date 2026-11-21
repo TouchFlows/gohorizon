@@ -20,18 +20,26 @@ the ownership lock needs Redis, and worker execution does not.
 2. **Lock ownership is observable.** TTL is 30s; the service renews every 10s with a
    compare-and-pexpire Lua script, so a stalled instance cannot renew someone else's
    lock. The owner token is a random UUID per process.
-3. **Losing Redis after startup degrades, it does not stop.** Supervision is local; a
-   Redis outage means no telemetry ingestion and a stale lock, not stopped workers.
-   Renewal failures are logged and reported through `/api/v1/health` as `degraded`
-   with `lock.degraded` and `lock.last_error`. Workers keep running, restarts keep
-   happening, and no job is touched.
-4. **A lost lock is not a reason to kill workers.** If the key disappears or changes
-   owner, the running instance keeps supervising (killing a healthy pool is worse) but
-   reports `lock.held=false` as a critical condition. Recovery is deliberate: the
-   operator restarts the service, and the startup rule in (1) applies again.
-5. All lock timings are constants in one place; there is no configuration knob for
+3. **A renewal error degrades, it does not stop.** An unreachable Redis may mean a
+   stale lock, or it may only mean telemetry cannot be written. It is not proof that
+   this instance lost the pool, and stopping healthy workers would turn a telemetry
+   outage into a job outage. Renewal errors are logged and reported through
+   `/api/v1/health` as `degraded` with `lock.degraded` and `lock.last_error`; workers
+   keep running and no job is touched until Redis answers again.
+4. **A definitively lost lock fences the supervisor.** Redis answering that the key is
+   gone or held by another token means another instance may supervise the same pool
+   now. The service stops every worker through the normal graceful path (an in-flight
+   job still finishes and is accounted for), stops ingestion after its final pass, and
+   exits non-zero with `ErrLockLost`. It does not wait for an operator: the pool is
+   released within one renewal interval, and the startup rule in (1) applies again on
+   the next start. The release script compares the owner token, so a fenced instance
+   never deletes the lock the new owner holds.
+5. **Fencing is not failover.** A fenced instance exits instead of becoming a standby;
+   the pool is free, not moved. Restarting it is what makes it supervise again, and a
+   supervisor that can reach Redis at startup takes the lock as usual.
+6. All lock timings are constants in one place; there is no configuration knob for
    them in v1 (a knob invites two instances with mismatched TTLs).
-6. **The health status follows the lock and nothing else.** `/api/v1/health` answers
+7. **The health status follows the lock and nothing else.** `/api/v1/health` answers
    `ok`/200 while the lock is held and `degraded`/503 once it is lost; no other
    condition participates. Telemetry ingestion failures never change `status` or the
    HTTP code: they are body-only, as the `telemetry.events`, `telemetry.duplicates`,
@@ -49,7 +57,11 @@ the ownership lock needs Redis, and worker execution does not.
   execution, which is what "the Laravel application must remain usable if GoHorizon is
   unavailable" (handoff §15) requires.
 - Failover between two GoHorizon instances is explicitly not implemented; the lock only
-  refuses the second one.
-- `503` means lock loss only, so a process manager may restart on it. Telemetry health
+  refuses the second one, and a loser releases the pool by exiting.
+- A fenced process exits non-zero within one renewal interval (10s), so its `degraded`
+  `/api/v1/health` answers exist only during that short window; `503` still means lock
+  loss only, so a process manager may restart on it. Telemetry health
   (`telemetry.failing`, `last_error`, counters) belongs in dashboards and alerts, not in
   restart decisions.
+- A stop caused by fencing takes as long as a normal graceful stop: the shutdown grace of
+  each supervisor, plus the bounded telemetry drain.

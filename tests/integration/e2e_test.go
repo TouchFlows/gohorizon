@@ -15,6 +15,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"testing"
 	"time"
@@ -269,7 +270,7 @@ func TestServiceRestartAdoptsTheWorkerWithoutDuplicatingIt(t *testing.T) {
 	// out its 30-second TTL.
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	if err := h.redis.Del(ctx, "gohorizon:"+testApplication+":"+testEnvironment+":coord:lock:supervisor").Err(); err != nil {
+	if err := h.redis.Del(ctx, h.supervisorLockKey()).Err(); err != nil {
 		t.Fatalf("release the stale lock: %v", err)
 	}
 
@@ -317,4 +318,74 @@ func TestServiceRestartAdoptsTheWorkerWithoutDuplicatingIt(t *testing.T) {
 		}
 		return nil
 	})
+}
+
+// TestLockLossMakesTheLoserReleaseItsWorker proves the single-owner invariant from the
+// losing side. Another instance takes the ownership lock while this one supervises; the
+// loser notices at its next renewal and stops its worker instead of leaving two services
+// owning the same pool. The stop is graceful, so the job in flight still finishes and is
+// accounted for, and it never deletes the new owner's lock on the way out.
+func TestLockLossMakesTheLoserReleaseItsWorker(t *testing.T) {
+	h := newHarness(t)
+	configPath, base := h.writeConfig()
+	loser := h.startBinary(h.buildBinary(), configPath)
+	awaitRunning(h, base)
+
+	marker := filepath.Join(h.dir, "fenced.txt")
+	if err := h.dispatch("slow", marker); err != nil {
+		t.Fatal(err)
+	}
+	awaitStarted(t, marker)
+
+	// What a second instance does when the first one stalled: take the key with its own
+	// token. The impostor's TTL outlives the whole test, so the loser can only leave it
+	// alone by comparing the owner.
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	lockKey := h.supervisorLockKey()
+	if err := h.redis.Set(ctx, lockKey, "another-instance", 30*time.Second).Err(); err != nil {
+		t.Fatalf("take over the supervisor lock: %v", err)
+	}
+
+	if err := loser.wait(45 * time.Second); err == nil {
+		t.Fatal("the instance that lost the lock exited successfully; the loss must be reported")
+	}
+
+	data, err := os.ReadFile(loser.logPath)
+	if err != nil {
+		t.Fatalf("read the loser's log: %v", err)
+	}
+	if !strings.Contains(string(data), "lock lost") {
+		t.Errorf("the loser's log does not report the lock loss:\n%s", tail(data, 4000))
+	}
+
+	// The pool is released: no worker of this application is left behind.
+	pids, err := h.workerPIDs()
+	if err != nil {
+		t.Fatalf("scan worker processes: %v", err)
+	}
+	if len(pids) != 0 {
+		t.Fatalf("worker pids %v are still running after the loser exited", pids)
+	}
+
+	// Fencing stops through the graceful path, so the job in flight ran and finished once.
+	requireRuns(t, marker, 1, 1)
+	awaitQueueDepth(t, h, 0, 0, "the finished job to leave nothing behind")
+	processed, failed, err := h.persistedHistory(testQueue)
+	if err != nil {
+		t.Fatalf("read the persisted history: %v", err)
+	}
+	if processed != 1 || failed != 0 {
+		t.Fatalf("processed=%d failed=%d, want the fenced worker's job recorded once", processed, failed)
+	}
+
+	// The release compares the owner token, so the loser must not have deleted a lock it
+	// no longer owned. The loser outlives the takeover deadline, so read with a fresh one.
+	holder, err := h.redis.Get(context.Background(), lockKey).Result()
+	if err != nil {
+		t.Fatalf("read the lock after the loser exited: %v", err)
+	}
+	if holder != "another-instance" {
+		t.Fatalf("lock holder = %q, want the new owner's token left untouched", holder)
+	}
 }

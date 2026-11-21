@@ -342,8 +342,18 @@ func TestBucketsReadsPersistedHistory(t *testing.T) {
 	if err != nil {
 		t.Fatalf("hourly Buckets: %v", err)
 	}
-	if len(hours) != 1 || hours[0].Failed != 1 || hours[0].DurationMS != 80 {
-		t.Errorf("hours = %+v, want the closed-hour job", hours)
+	// Exactly which hours exist depends on the wall clock: a run in the first two minutes
+	// of an hour puts the processed job in the previous, now-closed hour as well. The
+	// property is that the failed job is readable in its own closed hour.
+	closedHour := closed.Truncate(time.Hour)
+	var folded *metrics.Bucket
+	for i := range hours {
+		if hours[i].Start.Equal(closedHour) {
+			folded = &hours[i]
+		}
+	}
+	if folded == nil || folded.Failed != 1 || folded.DurationMS != 80 {
+		t.Errorf("hours = %+v, want the closed-hour job in %s", hours, closedHour)
 	}
 
 	// A service whose store never opened says so instead of answering "no jobs".
@@ -400,6 +410,22 @@ type runningService struct {
 	exit        string
 	manager     *process.Manager
 	worker      process.Record
+
+	// runDone closes when Run returns; runErr is only read after it closes.
+	runDone chan struct{}
+	runErr  error
+}
+
+// waitRun waits for Run to return and reports what it returned.
+func (r *runningService) waitRun(t *testing.T, timeout time.Duration) error {
+	t.Helper()
+	select {
+	case <-r.runDone:
+		return r.runErr
+	case <-time.After(timeout):
+		t.Fatalf("the service was still running %s after the lock was taken", timeout)
+		return nil
+	}
 }
 
 // startService starts the service against Redis with its worker held up until the exit
@@ -442,13 +468,26 @@ func startService(t *testing.T, prepare func(*Service)) *runningService {
 		prepare(service)
 	}
 
+	running := &runningService{
+		ctx:         ctx,
+		service:     service,
+		raw:         raw,
+		stream:      service.client.Keys().Events(),
+		application: cfg.Applications[0].ID,
+		exit:        exit,
+		manager:     service.managers[0],
+		runDone:     make(chan struct{}),
+	}
+
 	runCtx, stop := context.WithCancel(ctx)
-	runDone := make(chan error, 1)
-	go func() { runDone <- service.Run(runCtx) }()
+	go func() {
+		running.runErr = service.Run(runCtx)
+		close(running.runDone)
+	}()
 	t.Cleanup(func() {
 		stop()
 		select {
-		case <-runDone:
+		case <-running.runDone:
 		case <-time.After(15 * time.Second):
 			t.Error("the service did not stop within 15s")
 		}
@@ -461,21 +500,12 @@ func startService(t *testing.T, prepare func(*Service)) *runningService {
 		_ = raw.Close()
 	})
 
-	manager := service.managers[0]
 	waitUntil(t, 10*time.Second, func() bool {
-		return manager.Snapshot().Running == 1
+		return running.manager.Snapshot().Running == 1
 	}, "the worker to start")
+	running.worker = running.manager.Snapshot().Workers[0]
 
-	return &runningService{
-		ctx:         ctx,
-		service:     service,
-		raw:         raw,
-		stream:      service.client.Keys().Events(),
-		application: cfg.Applications[0].ID,
-		exit:        exit,
-		manager:     manager,
-		worker:      manager.Snapshot().Workers[0],
-	}
+	return running
 }
 
 // TestServiceConsumesTelemetryEndToEnd runs the real service: a worker is spawned, a
@@ -631,5 +661,42 @@ func TestNewDegradesWhenCapabilitiesAreUnavailable(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "connect to redis") {
 		t.Fatalf("a missing adapter blocked startup: %v", err)
+	}
+}
+
+// TestLockLossFencesTheService proves the in-process half of the single-owner rule: Redis
+// answers that the key belongs to someone else, so the service stops its worker and
+// returns ErrLockLost instead of continuing to supervise a pool it no longer owns.
+func TestLockLossFencesTheService(t *testing.T) {
+	running := startService(t, func(service *Service) {
+		service.renewInterval = 50 * time.Millisecond
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	lock := running.service.client.Keys().SupervisorLock()
+	if err := running.raw.Set(ctx, lock, "another-instance", 30*time.Second).Err(); err != nil {
+		t.Fatalf("take over the lock: %v", err)
+	}
+
+	runErr := running.waitRun(t, 20*time.Second)
+	if !errors.Is(runErr, ErrLockLost) {
+		t.Fatalf("Run returned %v, want ErrLockLost", runErr)
+	}
+	if stats := running.manager.Snapshot(); stats.Running != 0 {
+		t.Errorf("running=%d after the lock loss, want the worker released", stats.Running)
+	}
+	if _, err := process.Probe(running.worker.PID); err == nil {
+		t.Errorf("worker pid %d is still alive after the lock loss", running.worker.PID)
+	}
+
+	holder, err := running.raw.Get(ctx, lock).Result()
+	if err != nil {
+		t.Fatalf("read the lock after the loser stopped: %v", err)
+	}
+	// Releasing compares the owner token; a blind DEL would delete the new owner's lock.
+	if holder != "another-instance" {
+		t.Errorf("lock holder = %q, want the new owner's token untouched", holder)
 	}
 }
