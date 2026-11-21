@@ -701,22 +701,6 @@ func TestLockLossFencesTheService(t *testing.T) {
 	}
 }
 
-// silentLock stands in for a Redis that answers the acquisition and then stops answering:
-// the service starts normally and never gets a renewal confirmed.
-type silentLock struct{}
-
-func (silentLock) AcquireSupervisorLock(context.Context, string, time.Duration) (bool, error) {
-	return true, nil
-}
-
-func (silentLock) RenewSupervisorLock(context.Context, string, time.Duration) (bool, error) {
-	return false, errors.New("redis is unreachable")
-}
-
-func (silentLock) ReleaseSupervisorLock(context.Context, string) error { return nil }
-
-func (silentLock) SupervisorLockHolder(context.Context) (string, error) { return "", nil }
-
 // TestShouldFenceAtTheSilenceBoundary pins the fence threshold: silence is tolerated for one
 // TTL, the moment any other instance could take the key, plus slack for a renewal that was in
 // flight. Fencing earlier would stop workers whose lock is provably still theirs.
@@ -752,7 +736,9 @@ func TestLockSilenceFencesTheService(t *testing.T) {
 	// The allowance has to outlive the first manager tick, otherwise the service fences
 	// before a worker exists and this proves nothing about releasing one.
 	running := startService(t, func(service *Service) {
-		service.lock = silentLock{}
+		service.renewLock = func(context.Context, string, time.Duration) (bool, error) {
+			return false, errors.New("redis is unreachable")
+		}
 		service.renewInterval = 20 * time.Millisecond
 		service.fenceAfter = 3 * time.Second
 	})

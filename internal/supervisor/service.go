@@ -67,21 +67,10 @@ type queueInspector interface {
 	Queues(ctx context.Context, connection string, queues []string) (adapter.Inspection, error)
 }
 
-// lockClient is the ownership-lock surface. It is an interface so the fencing paths can
-// be tested with a client that never answers, which a real Redis cannot be made to do on
-// demand without disturbing the machine it runs on (docs/adr/0004).
-type lockClient interface {
-	AcquireSupervisorLock(ctx context.Context, owner string, ttl time.Duration) (bool, error)
-	RenewSupervisorLock(ctx context.Context, owner string, ttl time.Duration) (bool, error)
-	ReleaseSupervisorLock(ctx context.Context, owner string) error
-	SupervisorLockHolder(ctx context.Context) (string, error)
-}
-
 type Service struct {
 	cfg      *config.Config
 	log      *slog.Logger
 	client   *redis.Client
-	lock     lockClient
 	consumer *telemetry.Consumer
 	store    *metrics.Store
 	managers []*process.Manager
@@ -93,6 +82,10 @@ type Service struct {
 	// renewInterval is lockRenew in production. It is a field so a test can watch a
 	// lock loss without waiting 10s for the next renewal.
 	renewInterval time.Duration
+	// renewLock is client.RenewSupervisorLock in production. It is a field so the silent
+	// path can be tested with a renewal that never answers, which a real Redis cannot be
+	// made to do on demand without disturbing the machine it runs on.
+	renewLock func(ctx context.Context, owner string, ttl time.Duration) (bool, error)
 	// fenceAfter is lockSilenceAllowance in production: how long renewals may go
 	// unconfirmed before the lock is presumed gone.
 	fenceAfter time.Duration
@@ -143,7 +136,7 @@ func New(ctx context.Context, cfg *config.Config, log *slog.Logger) (*Service, e
 		cfg:           cfg,
 		log:           log,
 		client:        client,
-		lock:          client,
+		renewLock:     client.RenewSupervisorLock,
 		started:       time.Now(),
 		owner:         fmt.Sprintf("%s-%d", version.Version, time.Now().UnixNano()),
 		inspector:     probe,
@@ -386,12 +379,12 @@ func (s *Service) noteStopReason(worker, reason string) {
 // final pass, so the event for a job that finishes during the stop is accounted for by
 // the process that ran it.
 func (s *Service) Run(ctx context.Context) error {
-	acquired, err := s.lock.AcquireSupervisorLock(ctx, s.owner, lockTTL)
+	acquired, err := s.client.AcquireSupervisorLock(ctx, s.owner, lockTTL)
 	if err != nil {
 		return err
 	}
 	if !acquired {
-		holder, _ := s.lock.SupervisorLockHolder(ctx)
+		holder, _ := s.client.SupervisorLockHolder(ctx)
 		return fmt.Errorf("%w (owner %q)", ErrLocked, holder)
 	}
 	acquiredAt := time.Now()
@@ -399,7 +392,7 @@ func (s *Service) Run(ctx context.Context) error {
 	defer func() {
 		releaseCtx, cancel := context.WithTimeout(context.Background(), lockTimeout)
 		defer cancel()
-		if err := s.lock.ReleaseSupervisorLock(releaseCtx, s.owner); err != nil {
+		if err := s.client.ReleaseSupervisorLock(releaseCtx, s.owner); err != nil {
 			s.log.Warn("could not release supervisor lock", "error", err)
 		}
 	}()
@@ -509,12 +502,12 @@ func (s *Service) renewLoop(ctx context.Context, lost chan<- error, confirmedAt 
 			return
 		case <-ticker.C:
 			renewCtx, cancel := context.WithTimeout(context.Background(), lockTimeout)
-			held, err := s.lock.RenewSupervisorLock(renewCtx, s.owner, lockTTL)
+			held, err := s.renewLock(renewCtx, s.owner, lockTTL)
 			var holder string
 			if err == nil && !held {
 				// Only used to say who owns the pool now; the failure to read it is not
 				// itself a reason to change the decision.
-				holder, _ = s.lock.SupervisorLockHolder(renewCtx)
+				holder, _ = s.client.SupervisorLockHolder(renewCtx)
 			}
 			cancel()
 
