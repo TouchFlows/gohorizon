@@ -100,13 +100,13 @@ export function defaultRange(resolution: Resolution): HistoryRange {
 export function buildHistoryQuery(
   queue: string,
   resolution: Resolution,
-  range: HistoryRange,
+  hours: number,
   nowMilliseconds: number,
 ): string {
   const parameters = new URLSearchParams({
     queue,
     resolution,
-    from: new Date(nowMilliseconds - range.hours * 3600 * 1000).toISOString(),
+    from: new Date(nowMilliseconds - hours * 3600 * 1000).toISOString(),
     to: new Date(nowMilliseconds).toISOString(),
   })
   return parameters.toString()

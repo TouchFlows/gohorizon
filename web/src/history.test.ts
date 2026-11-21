@@ -92,7 +92,7 @@ describe('buildChart', () => {
 describe('buildHistoryQuery', () => {
   it('mirrors the endpoint parameters and states the window explicitly', () => {
     const now = Date.parse('2026-11-21T12:00:00Z')
-    const query = buildHistoryQuery('emails', 'hourly', { label: '24h', hours: 24 }, now)
+    const query = buildHistoryQuery('emails', 'hourly', 24, now)
     const parameters = new URLSearchParams(query)
 
     expect(parameters.get('queue')).toBe('emails')
@@ -102,9 +102,7 @@ describe('buildHistoryQuery', () => {
   })
 
   it('encodes a queue name rather than splitting the query', () => {
-    const parameters = new URLSearchParams(
-      buildHistoryQuery('a&b=c', 'minute', { label: '30m', hours: 0.5 }, 0),
-    )
+    const parameters = new URLSearchParams(buildHistoryQuery('a&b=c', 'minute', 0.5, 0))
     expect(parameters.get('queue')).toBe('a&b=c')
     expect(parameters.get('resolution')).toBe('minute')
   })

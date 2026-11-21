@@ -15,11 +15,13 @@ export default function Metrics({ report }: { report: HealthReport }) {
   // render would refetch forever.
   const [now, setNow] = useState(() => Date.now())
 
-  const range = ranges[resolution].find((option) => option.hours === hours) ?? defaultRange(resolution)
-  const chosenQueue = queue === '' ? (queues[0] ?? '') : queue
+  // The queues come from the polled report, so a selected one can disappear when the
+  // configuration changes: fall back to the first listed queue rather than query a queue
+  // nobody is watching.
+  const chosenQueue = queues.includes(queue) ? queue : (queues[0] ?? '')
   const query = useMemo(
-    () => (chosenQueue === '' ? null : buildHistoryQuery(chosenQueue, resolution, range, now)),
-    [chosenQueue, resolution, range, now],
+    () => (chosenQueue === '' ? null : buildHistoryQuery(chosenQueue, resolution, hours, now)),
+    [chosenQueue, resolution, hours, now],
   )
   const { history, unavailable, error } = useHistory(query)
   const model = history === null ? null : buildChart(history)
@@ -64,7 +66,7 @@ export default function Metrics({ report }: { report: HealthReport }) {
         <label className="controls__field">
           Window
           <select
-            value={range.hours}
+            value={hours}
             onChange={(event) => {
               setHours(Number(event.target.value))
               setNow(Date.now())
@@ -105,9 +107,9 @@ export default function Metrics({ report }: { report: HealthReport }) {
       )}
 
       <p className="muted">
-        Outcomes per {resolution} for {chosenQueue === '' ? 'the queue' : chosenQueue}. A period with no
-        jobs has a row only when something ran, so the chart fills the quiet periods with zero columns
-        rather than closing the gap.
+        Outcomes per {resolution} for {chosenQueue === '' ? 'the queue' : chosenQueue}. The store
+        writes a row only when something ran, so the chart fills the quiet periods with zero
+        columns rather than closing the gap.
       </p>
     </>
   )
