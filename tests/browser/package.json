@@ -1,0 +1,12 @@
+{
+  "name": "gohorizon-browser-smoke",
+  "private": true,
+  "type": "module",
+  "description": "The one browser test: the real binary and a real store, driven by Playwright.",
+  "scripts": {
+    "test": "playwright test"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.65.1"
+  }
+}

@@ -1,0 +1,4 @@
+node_modules
+smoke.log
+test-results
+playwright-report

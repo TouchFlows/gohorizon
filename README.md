@@ -9,7 +9,7 @@ that adjusts it is in [`docs/laravel-13-recon.md`](docs/laravel-13-recon.md).
 
 ## Status
 
-Milestone 1 (proof of concept) in progress. Implemented:
+Milestones 1 and 2 implemented:
 
 - Configuration loading, environment expansion and full validation (`gohorizon validate`).
 - Redis namespace split with a typed client; the ownership lock with renewal and
@@ -176,6 +176,19 @@ lock, a supervisor over two queues runs one worker per queue with each queue's j
 recorded in its own history, and the `released` and `timed_out` outcomes of a real job
 reach the persisted history. The tests are skipped unless `GOHORIZON_E2E=1`, so
 `go test ./...` stays fast and needs no PHP.
+
+One browser test follows them: `tests/browser` (Playwright) starts the compiled binary
+against the same fixture and a real store, dispatches a job, and asserts through Chromium
+that the overview shows the service's status and the queue it supervises, that the jobs page
+shows the attempt the worker ran, and that a deep link outside the navigation returns the
+shell instead of a 404. It is skipped unless `GOHORIZON_E2E=1` too, and CI fails when it is:
+
+```sh
+cd tests/browser
+npm ci
+npx playwright install chromium
+GOHORIZON_E2E=1 npm test
+```
 
 The fixture is `tests/fixtures/laravel-app`: a Laravel 13 app with the package installed
 by path. Its `composer.lock` is tracked so everyone runs the same dependency set, and

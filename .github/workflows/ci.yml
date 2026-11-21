@@ -41,7 +41,9 @@ jobs:
         with:
           node-version: "24"
           cache: npm
-          cache-dependency-path: web/package-lock.json
+          cache-dependency-path: |
+            web/package-lock.json
+            tests/browser/package-lock.json
 
       - name: Install the dashboard
         working-directory: web
@@ -100,5 +102,28 @@ jobs:
           go test -count=1 -v ./tests/integration 2>&1 | tee acceptance.log
           if grep -q -- '--- SKIP' acceptance.log; then
             echo "::error::the acceptance suite skipped: the fixture, PHP or Redis was unavailable"
+            exit 1
+          fi
+
+      # The one browser test: the compiled binary, the fixture's worker and a real store,
+      # read through Chromium. It follows the acceptance suite because it needs the fixture
+      # and the Redis the suite has already installed and exercised.
+      - name: Install the browser smoke
+        working-directory: tests/browser
+        run: npm ci
+
+      - name: Install Chromium
+        working-directory: tests/browser
+        run: npx playwright install --with-deps chromium
+
+      - name: Browser smoke
+        working-directory: tests/browser
+        env:
+          GOHORIZON_E2E: "1"
+        run: |
+          set -o pipefail
+          npx playwright test 2>&1 | tee smoke.log
+          if grep -qE '[0-9]+ skipped' smoke.log; then
+            echo "::error::the browser smoke skipped: the fixture, PHP or Redis was unavailable"
             exit 1
           fi

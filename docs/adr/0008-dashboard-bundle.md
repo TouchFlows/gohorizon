@@ -29,6 +29,41 @@ it and fails when `git status --porcelain -- web/dist` is not empty: sources and
 output that disagree is the failure this decision could introduce. `.gitattributes` marks
 the directory generated, so review tools collapse it instead of pretending it is read.
 
+### The rules a path follows
+
+The router owns the boundary between the API and the bundle, and the three kinds of path
+answer differently:
+
+- under `/api/`: a JSON 404, so a mistyped endpoint never returns a page a client would try to
+  parse;
+- under `/assets/`: a 404 when no such file exists, because `index.html` cannot stand in for a
+  stylesheet or a module;
+- anything else: the file if the bundle has one and `index.html` otherwise, which is what makes
+  a bookmark into the app load it.
+
+Methods other than `GET` and `HEAD` are answered 405. Nothing on this server changes state
+through the dashboard, so a POST has nowhere to go and must not look as if it does.
+
+### What the dashboard deliberately does not do
+
+Every screen is read-only, and every request it makes is unauthenticated — the same posture as
+`/api/v1/health` and `/metrics`: keep it behind the reverse proxy until Milestone 3 adds
+authentication. No screen offers to retry, delete or release a job, even where it names those
+outcomes: that is job administration, it needs an authenticated mutating API, and it is
+Milestone 5. The dashboard renders the absence of the feature rather than a disabled button
+that would imply the endpoint exists.
+
+### Tests
+
+`web/` tests its pure functions (`npm test`): the report-to-screen mapping, the bucket-to-column
+transform, the history query, the jobs query and cursor trail, and the decoders that decide
+whether a payload can be drawn at all. Behaviour that needs a server is not tested there.
+`tests/browser` is the one browser test: a Playwright smoke against the compiled binary, the
+fixture application's worker and a real store, asserting that the overview shows the service's
+status and the queue it supervises, that the jobs page shows an attempt the worker ran, and
+that a deep link outside the navigation returns the shell. It runs in CI after the acceptance
+suite, because it needs the fixture and Redis that suite installs.
+
 ## Consequences
 
 - A release is still one `go build`; the dashboard has no separate deployment or asset host.

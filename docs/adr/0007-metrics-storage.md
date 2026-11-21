@@ -88,3 +88,15 @@ Two constraints shape the storage:
 - A single connection (`SetMaxOpenConns(1)`) serialises writes and the read API's
   queries; that is enough for one consumer and a bounded range per request, and is
   revisited if read latency starts delaying ingestion.
+
+## Amendment (Milestone 2)
+
+The job rows are also what the dashboard reads, through `GET /api/v1/jobs`. A page is the
+`limit + 1` rows newest first from the cursor: the extra row decides whether another page
+exists, and `next_before` carries the last returned row's `(finished_at, id)` pair as an
+opaque cursor. Keyset paging is what keeps a page cheap at any depth and what stops an attempt
+recorded in the same second as the cursor from being repeated or skipped. The indexes named in
+point 2 are exactly the four reads that page serves — all rows, one queue, one outcome and one
+queue's outcome — each ending in `(finished_at DESC, id)`. Reads change nothing, are bounded
+by the raw window, and are exercised through a page only by the browser smoke in
+`tests/browser`; the rest is covered against the store directly.
