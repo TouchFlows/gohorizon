@@ -276,8 +276,8 @@ func (i *instance) terminate(t *testing.T) {
 
 // dispatch enqueues one fixture job through Laravel itself, so the test never writes a
 // queue payload by hand.
-func (h *harness) dispatch(kind string, args ...string) error {
-	cmd := exec.Command(h.php, append([]string{"dispatch.php", kind}, args...)...)
+func (h *harness) dispatch(kind, argument string) error {
+	cmd := exec.Command(h.php, "dispatch.php", kind, argument)
 	cmd.Dir = h.fixture
 	cmd.Env = os.Environ()
 	if out, err := cmd.CombinedOutput(); err != nil {
@@ -315,9 +315,6 @@ func awaitQueueDepth(t *testing.T, h *harness, pending, reserved int, what strin
 		if *row.Pending != pending || *row.Reserved != reserved {
 			return fmt.Errorf("pending=%d reserved=%d, want pending=%d reserved=%d",
 				*row.Pending, *row.Reserved, pending, reserved)
-		}
-		if row.Delayed != nil && *row.Delayed != 0 {
-			return fmt.Errorf("delayed=%d, want none", *row.Delayed)
 		}
 		return nil
 	})

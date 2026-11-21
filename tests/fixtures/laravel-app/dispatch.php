@@ -22,12 +22,12 @@ switch ($kind) {
         RecordMarker::dispatch($argument)->onQueue($queue);
         break;
     case 'slow':
-        SlowMarker::dispatch($argument, (int) ($argv[3] ?? 3))->onQueue($queue);
+        SlowMarker::dispatch($argument)->onQueue($queue);
         break;
     case 'fail':
         AlwaysFails::dispatch()->onQueue($queue);
         break;
     default:
-        fwrite(STDERR, "usage: dispatch.php marker <path>|slow <path> [seconds]|fail\n");
+        fwrite(STDERR, "usage: dispatch.php marker <path>|slow <path>|fail\n");
         exit(2);
 }
