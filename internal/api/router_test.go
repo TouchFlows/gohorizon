@@ -144,7 +144,11 @@ func TestHealthExposesQueueDepth(t *testing.T) {
 }
 
 // A crash loop is body-only, like the other observations that leave the status alone.
-func TestHealthShowsACrashLoopWithoutChangingTheStatus(t *testing.T) {
+// TestHealthBodyCarriesACrashLoopOnItsWorker covers the encoding only: whatever status
+// the report arrives with, a crash-looping worker must survive into the JSON body. That a
+// crash loop does not change the status is decided in supervisor.Report, where the lock
+// is read, and asserted by TestCrashLoopingWorkersLeaveTheHealthStatusOK.
+func TestHealthBodyCarriesACrashLoopOnItsWorker(t *testing.T) {
 	recorder := getHealth(t, health.Report{
 		Status: "ok",
 		Supervisors: []health.Supervisor{{
@@ -156,7 +160,6 @@ func TestHealthShowsACrashLoopWithoutChangingTheStatus(t *testing.T) {
 	})
 
 	var payload struct {
-		Status      string `json:"status"`
 		Supervisors []struct {
 			Workers []struct {
 				CrashLooping bool `json:"crash_looping"`
@@ -165,9 +168,6 @@ func TestHealthShowsACrashLoopWithoutChangingTheStatus(t *testing.T) {
 	}
 	if err := json.Unmarshal(recorder.Body.Bytes(), &payload); err != nil {
 		t.Fatalf("decode body: %v", err)
-	}
-	if payload.Status != "ok" {
-		t.Errorf("status = %q, want a crash loop to leave the status alone", payload.Status)
 	}
 	if len(payload.Supervisors) != 1 || len(payload.Supervisors[0].Workers) != 1 {
 		t.Fatalf("body = %s, want one supervisor with one worker", recorder.Body)
