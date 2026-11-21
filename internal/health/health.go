@@ -49,6 +49,11 @@ type QueueDepth struct {
 	Pending  *int   `json:"pending"`
 	Reserved *int   `json:"reserved"`
 	Delayed  *int   `json:"delayed"`
+	// OldestPendingAt is the unix time the oldest waiting job was enqueued, so a stalled
+	// queue is visible even when its depth looks small. nil means the driver could not
+	// report it, which is not the same as zero.
+	OldestPendingAt    *int64 `json:"oldest_pending_at"`
+	OldestPendingError string `json:"oldest_pending_error,omitempty"`
 }
 
 type Supervisor struct {

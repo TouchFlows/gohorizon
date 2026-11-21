@@ -17,12 +17,17 @@ const inspectTimeout = 10 * time.Second
 
 // QueueDepth is one queue as `gohorizon:inspect --json` reports it. A driver that cannot
 // answer a count omits it, so each count is a pointer: nil is "not reported", which is
-// not the same as zero.
+// not the same as zero. The backlog's age is reported the same way, with the exception
+// class in OldestPendingError when the answer itself failed.
 type QueueDepth struct {
 	Queue    string `json:"queue"`
 	Pending  *int   `json:"pending"`
 	Reserved *int   `json:"reserved"`
 	Delayed  *int   `json:"delayed"`
+	// OldestPendingAt is when the oldest waiting job was enqueued, in unix seconds: the
+	// age of the backlog rather than its size.
+	OldestPendingAt    *int64  `json:"oldest_pending_at"`
+	OldestPendingError *string `json:"oldest_pending_error"`
 }
 
 // Inspection is the part of the inspection payload GoHorizon acts on.

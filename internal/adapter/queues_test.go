@@ -10,7 +10,8 @@ import (
 const inspectionJSON = `{"schema":1,"application":"production","environment":"production",` +
 	`"connection":"redis","queues":[` +
 	`{"queue":"default","driver":"RedisQueue","pending":12,"delayed":3,"reserved":1,"oldest_pending_at":1763600000},` +
-	`{"queue":"emails","driver":"RedisQueue","pending":0,"delayed":0,"reserved":0}],` +
+	`{"queue":"emails","driver":"RedisQueue","pending":0,"delayed":0,"reserved":0,` +
+	`"oldest_pending_error":"RedisException"}],` +
 	`"generated_at":"2026-11-20T10:11:12Z"}`
 
 func TestProbeDecodesInspection(t *testing.T) {
@@ -40,6 +41,15 @@ func TestProbeDecodesInspection(t *testing.T) {
 				defaultQueue.Delayed == nil || *defaultQueue.Delayed != 3 {
 				t.Errorf("default = %+v, want the reported counts", defaultQueue)
 			}
+			if defaultQueue.OldestPendingAt == nil || *defaultQueue.OldestPendingAt != 1763600000 {
+				t.Errorf("oldest_pending_at = %v, want the reported timestamp", defaultQueue.OldestPendingAt)
+			}
+			// The backlog's age can fail on its own: the error survives without a timestamp.
+			emails := inspection.Queues[1]
+			if emails.OldestPendingAt != nil || emails.OldestPendingError == nil ||
+				*emails.OldestPendingError != "RedisException" {
+				t.Errorf("emails = %+v, want the failed age with no timestamp", emails)
+			}
 		})
 	}
 }
@@ -54,7 +64,8 @@ func TestProbeKeepsUnreportedCountsDistinctFromZero(t *testing.T) {
 		t.Fatalf("Queues: %v", err)
 	}
 	depth := inspection.Queues[0]
-	if depth.Pending != nil || depth.Reserved != nil || depth.Delayed != nil {
+	if depth.Pending != nil || depth.Reserved != nil || depth.Delayed != nil ||
+		depth.OldestPendingAt != nil || depth.OldestPendingError != nil {
 		t.Errorf("depth = %+v, want nil counts for a driver that cannot report them", depth)
 	}
 }

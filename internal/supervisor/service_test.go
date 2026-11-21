@@ -229,10 +229,13 @@ func queueTestService(t *testing.T, inspector queueInspector) *Service {
 
 func TestHealthReportsQueueDepthFromTheAdapter(t *testing.T) {
 	pending, reserved, delayed := 12, 1, 3
+	oldest := int64(1763600000)
+	oldestErr := "RedisException"
 	service := queueTestService(t, &stubInspector{inspection: adapter.Inspection{
 		Connection: "redis",
 		Queues: []adapter.QueueDepth{
-			{Queue: "default", Pending: &pending, Reserved: &reserved, Delayed: &delayed},
+			{Queue: "default", Pending: &pending, Reserved: &reserved, Delayed: &delayed, OldestPendingAt: &oldest},
+			{Queue: "stalled", OldestPendingError: &oldestErr},
 		},
 	}})
 
@@ -245,14 +248,22 @@ func TestHealthReportsQueueDepthFromTheAdapter(t *testing.T) {
 	if report.Queues.Connection != "redis" || report.Queues.Error != "" {
 		t.Errorf("queues = %+v, want the adapter's connection and no error", report.Queues)
 	}
-	if len(report.Queues.Depths) != 1 {
-		t.Fatalf("depths = %+v, want one queue", report.Queues.Depths)
+	if len(report.Queues.Depths) != 2 {
+		t.Fatalf("depths = %+v, want both queues", report.Queues.Depths)
 	}
 	depth := report.Queues.Depths[0]
 	if depth.Queue != "default" || depth.Pending == nil || *depth.Pending != 12 ||
 		depth.Reserved == nil || *depth.Reserved != 1 ||
 		depth.Delayed == nil || *depth.Delayed != 3 {
 		t.Errorf("depth = %+v, want the counts the adapter reported", depth)
+	}
+	if depth.OldestPendingAt == nil || *depth.OldestPendingAt != oldest || depth.OldestPendingError != "" {
+		t.Errorf("depth = %+v, want the backlog age the adapter reported", depth)
+	}
+	// An age that could not be read reaches health as an error, not as a timestamp.
+	stalled := report.Queues.Depths[1]
+	if stalled.OldestPendingAt != nil || stalled.OldestPendingError != oldestErr {
+		t.Errorf("stalled = %+v, want the failed age without a timestamp", stalled)
 	}
 }
 

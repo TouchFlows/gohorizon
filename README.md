@@ -34,9 +34,12 @@ Milestone 1 (proof of concept) in progress. Implemented:
   `GET /api/v1/metrics?resolution=…` reads any of the three levels back.
 - Queue depth: every 15 seconds the service runs `gohorizon:inspect` for the queues
   its supervisors launch and reports each queue's `pending`, `reserved` and `delayed`
-  counts on `GET /api/v1/health`. Counts a driver cannot report are `null`, and a
-  missing package or failing command only fills in `queues.error` — the status stays
-  `ok`, so a health check cannot restart healthy workers over a failed inspection.
+  counts on `GET /api/v1/health`, plus `oldest_pending_at` (the unix time of the oldest
+  waiting job, so a stalled queue is visible even when its depth looks small) and
+  `oldest_pending_error` when the driver could not answer that. Counts a driver cannot
+  report are `null`, and a missing package or failing command only fills in
+  `queues.error` — the status stays `ok`, so a health check cannot restart healthy
+  workers over a failed inspection.
 - Read-only `GET /api/v1/health`.
 - `gohorizon/laravel` package: configuration, job lifecycle telemetry to a Redis Stream,
   `gohorizon:capabilities`, `gohorizon:inspect`.

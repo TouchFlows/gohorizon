@@ -331,11 +331,17 @@ func (s *Service) sampleQueues(ctx context.Context) {
 
 	depths := make([]health.QueueDepth, 0, len(inspection.Queues))
 	for _, queue := range inspection.Queues {
+		oldestPendingError := ""
+		if queue.OldestPendingError != nil {
+			oldestPendingError = *queue.OldestPendingError
+		}
 		depths = append(depths, health.QueueDepth{
-			Queue:    queue.Queue,
-			Pending:  queue.Pending,
-			Reserved: queue.Reserved,
-			Delayed:  queue.Delayed,
+			Queue:              queue.Queue,
+			Pending:            queue.Pending,
+			Reserved:           queue.Reserved,
+			Delayed:            queue.Delayed,
+			OldestPendingAt:    queue.OldestPendingAt,
+			OldestPendingError: oldestPendingError,
 		})
 	}
 	s.mu.Lock()

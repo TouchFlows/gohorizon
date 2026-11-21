@@ -86,13 +86,14 @@ func TestHealthExposesTelemetryCounters(t *testing.T) {
 
 func TestHealthExposesQueueDepth(t *testing.T) {
 	pending, reserved, delayed := 5, 1, 2
+	oldest := int64(1763600000)
 	recorder := getHealth(t, health.Report{
 		Status: "ok",
 		Queues: health.Queues{
 			Connection: "redis",
 			Depths: []health.QueueDepth{
-				{Queue: "default", Pending: &pending, Reserved: &reserved, Delayed: &delayed},
-				{Queue: "sync-only"},
+				{Queue: "default", Pending: &pending, Reserved: &reserved, Delayed: &delayed, OldestPendingAt: &oldest},
+				{Queue: "sync-only", OldestPendingError: "RedisException"},
 			},
 		},
 	})
@@ -106,10 +107,12 @@ func TestHealthExposesQueueDepth(t *testing.T) {
 			Connection string `json:"connection"`
 			Error      string `json:"error"`
 			Depths     []struct {
-				Queue    string `json:"queue"`
-				Pending  *int   `json:"pending"`
-				Reserved *int   `json:"reserved"`
-				Delayed  *int   `json:"delayed"`
+				Queue              string `json:"queue"`
+				Pending            *int   `json:"pending"`
+				Reserved           *int   `json:"reserved"`
+				Delayed            *int   `json:"delayed"`
+				OldestPendingAt    *int64 `json:"oldest_pending_at"`
+				OldestPendingError string `json:"oldest_pending_error"`
 			} `json:"depths"`
 		} `json:"queues"`
 	}
@@ -127,10 +130,16 @@ func TestHealthExposesQueueDepth(t *testing.T) {
 		depth.Delayed == nil || *depth.Delayed != 2 {
 		t.Errorf("depth = %+v, want the reported counts", depth)
 	}
+	if depth.OldestPendingAt == nil || *depth.OldestPendingAt != oldest {
+		t.Errorf("oldest_pending_at = %v, want the backlog age on the wire", depth.OldestPendingAt)
+	}
 	// A driver without counts reports nothing, and the body must say null rather than
-	// invent a zero.
+	// invent a zero; an age it could not read is reported as an error instead.
 	if payload.Queues.Depths[1].Pending != nil {
 		t.Errorf("pending = %v, want null for a driver that cannot report it", *payload.Queues.Depths[1].Pending)
+	}
+	if stalled := payload.Queues.Depths[1]; stalled.OldestPendingAt != nil || stalled.OldestPendingError != "RedisException" {
+		t.Errorf("stalled = %+v, want the failed age without a timestamp", stalled)
 	}
 }
 
