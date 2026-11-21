@@ -116,7 +116,7 @@ test.describe('the dashboard against the real binary', () => {
         job.class === 'App\\Jobs\\AlwaysFails' &&
         job.exception?.message === 'the acceptance fixture always fails',
     )
-    if (failed.finished_at === undefined) {
+    if (failed.finished_at === undefined || failed.finished_at === '') {
       throw new Error('the failed attempt is recorded without a finished_at')
     }
     failedAt = failed.finished_at
@@ -165,8 +165,8 @@ test.describe('the dashboard against the real binary', () => {
     await expect(page.getByRole('button', { name: 'minute' })).toHaveAttribute('aria-pressed', 'true')
 
     // One processed attempt and one failed one, and nothing else in the window: the store is
-    // fresh for every run, so any third column would mean a job ran twice.
-    await expect(page.getByRole('img', { name: /2 jobs$/ })).toBeVisible()
+    // fresh for every run, so any third attempt would mean a job ran twice.
+    await expect(page.getByRole('img', { name: /, 2 jobs$/ })).toBeVisible()
 
     // The column is named by the minute the failure landed in, formatted by the page itself,
     // so this still asserts the right bucket when a run straddles a minute boundary.
@@ -316,16 +316,16 @@ async function waitForJob(
   query: string,
   matches: (job: RecordedJob) => boolean,
 ): Promise<RecordedJob> {
-  await waitFor(what, async () => (await jobsPage(query)).some(matches))
+  await waitFor(what, async () => (await recordedJobs(query)).some(matches))
 
-  const match = (await jobsPage(query)).find(matches)
+  const match = (await recordedJobs(query)).find(matches)
   if (match === undefined) {
     throw new Error(`the service did ${what}, but its page no longer lists it`)
   }
   return match
 }
 
-async function jobsPage(query: string): Promise<RecordedJob[]> {
+async function recordedJobs(query: string): Promise<RecordedJob[]> {
   const page = (await getJSON(`${base}/api/v1/jobs?${query}&limit=10`)) as { jobs?: RecordedJob[] }
   return page.jobs ?? []
 }
