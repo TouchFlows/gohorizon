@@ -29,8 +29,9 @@ Milestone 1 (proof of concept) in progress. Implemented:
   with one escalation log per streak; the status stays `ok`, because the pool is already
   replacing it and a flapping health check would only restart the supervisor.
 - Telemetry ingestion: a consumer group on the events stream that deduplicates by
-  event id, acknowledges what it handles and retries Redis failures without touching
-  the workers. Its counters and live failure state are on `GET /api/v1/health`.
+  event id, validates the job identity each record carries (uuid, class, attempts, and
+  an exception's class when there is one), acknowledges what it handles and retries
+  Redis failures without touching the workers. Its counters and live failure state are on `GET /api/v1/health`.
 - Historical metrics: every consumed `job.finished` event is aggregated into per-queue
   minute buckets in SQLite at `storage.path`, deduplicated by event id, so history
   survives a restart. Each pass (startup and hourly) folds closed minutes into hourly

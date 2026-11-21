@@ -45,9 +45,23 @@ type Event struct {
 }
 
 type jobPayload struct {
-	Queue      string `json:"queue"`
-	Outcome    string `json:"outcome"`
-	DurationMS int64  `json:"duration_ms"`
+	UUID       string     `json:"uuid"`
+	ID         string     `json:"id"`
+	Class      string     `json:"class"`
+	Connection string     `json:"connection"`
+	Queue      string     `json:"queue"`
+	Attempts   int        `json:"attempts"`
+	Outcome    string     `json:"outcome"`
+	DurationMS int64      `json:"duration_ms"`
+	Exception  *Exception `json:"exception"`
+}
+
+// Exception is the failure a throwing attempt carries. The publisher sanitizes and
+// truncates the message before publishing it (docs/adr/0006); the consumer only
+// transports it, and `Message` is the sanitized text to show an operator.
+type Exception struct {
+	Class   string `json:"class"`
+	Message string `json:"message"`
 }
 
 type workerPayload struct {
@@ -91,6 +105,23 @@ func (e Event) validate() error {
 			add("job.outcome %q is not one of %s", e.Job.Outcome, strings.Join(Outcomes, ", "))
 		} else if strings.TrimSpace(e.Job.Queue) == "" {
 			add("%s requires job.queue: metrics are aggregated per queue", TypeJobFinished)
+		}
+		// A record without an identity cannot be attributed to a job, so it is refused
+		// rather than stored as an anonymous row. Every real payload carries both: the
+		// fixture's success and failure entries were captured and checked.
+		if e.Job != nil {
+			if strings.TrimSpace(e.Job.UUID) == "" {
+				add("%s requires job.uuid: job history is keyed by it", TypeJobFinished)
+			}
+			if strings.TrimSpace(e.Job.Class) == "" {
+				add("%s requires job.class: it is what an operator reads in history", TypeJobFinished)
+			}
+			if e.Job.Attempts < 0 {
+				add("job.attempts must be zero or positive, got %d", e.Job.Attempts)
+			}
+			if e.Job.Exception != nil && strings.TrimSpace(e.Job.Exception.Class) == "" {
+				add("job.exception requires a class: it is the only part an operator can act on")
+			}
 		}
 	case TypeWorkerStopped:
 		if e.WorkerEvent == nil {

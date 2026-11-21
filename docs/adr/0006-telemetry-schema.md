@@ -71,4 +71,9 @@ name. Laravel 13 makes that insufficient:
 - The schema is versioned (`schema: 1`); Go rejects unknown schemas instead of guessing.
 - The outcome set is closed at four values. An event carrying anything else is rejected
   and counted as invalid, so a typo in the publisher cannot quietly invent a new column.
+- The consumer validates the identity the payload already carries: a `job.finished`
+  without `job.uuid` or `job.class`, a negative `attempts`, or an `exception` without a
+  class is rejected rather than stored unattributably. Both fields were verified present
+  in the success and failure entries a real fixture worker published, so the check cannot
+  reject a payload the package emits.
 - Losing the buffer on SIGKILL is accepted: telemetry is observation, never a job ledger.

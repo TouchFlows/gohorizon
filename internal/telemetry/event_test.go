@@ -33,8 +33,56 @@ func TestDecodeReadsTheDocumentedJobEvent(t *testing.T) {
 	if event.Job == nil || event.Job.Outcome != "released" {
 		t.Errorf("job = %+v, want outcome released", event.Job)
 	}
+	job := event.Job
+	if job.UUID != "u-1" || job.Class != `App\Jobs\SendMail` {
+		t.Errorf("identity = uuid %q class %q, want both preserved", job.UUID, job.Class)
+	}
+	if job.Connection != "redis" || job.Attempts != 2 {
+		t.Errorf("connection = %q attempts = %d, want redis and 2", job.Connection, job.Attempts)
+	}
+	if job.Exception != nil {
+		t.Errorf("exception = %+v, want nil for an event that carries none", job.Exception)
+	}
 	if event.At.IsZero() {
 		t.Error("at was not parsed")
+	}
+}
+
+// These two payloads are entries a real fixture worker published, copied verbatim from
+// `redis-cli XREVRANGE` on the events stream: the success shape and the failure shape.
+// They are the evidence that uuid and class are always present, so requiring them cannot
+// reject an event the package actually emits.
+func TestDecodeReadsWhatARealWorkerPublished(t *testing.T) {
+	const published = `{"schema": 1, "id": "cbf772e7-4246-47bc-8e77-c3d2af92ce9f", "type": "job.finished", "application": "gohorizon-e2e", "environment": "e2e", "worker": "unknown", "at": "2026-11-21T14:08:28.891Z", "job": {"uuid": "5a035154-b74d-4d1c-9e68-8c31f557f9e0", "id": "v1S0DWpiaTchaLeeZMnsy6Rd9NNASu2E", "class": "App\\Jobs\\RecordMarker", "connection": "redis", "queue": "default", "attempts": 1, "outcome": "processed", "duration_ms": 9}, "tags": []}`
+
+	event, err := Decode(published)
+	if err != nil {
+		t.Fatalf("Decode: %v", err)
+	}
+	job := event.Job
+	if job.UUID != "5a035154-b74d-4d1c-9e68-8c31f557f9e0" || job.Class != `App\Jobs\RecordMarker` {
+		t.Errorf("identity = %+v, want the published uuid and class", job)
+	}
+	if job.ID != "v1S0DWpiaTchaLeeZMnsy6Rd9NNASu2E" || job.Connection != "redis" || job.Attempts != 1 {
+		t.Errorf("job = %+v, want the published id, connection and attempts", job)
+	}
+	if job.Exception != nil {
+		t.Errorf("exception = %+v, want none: array_filter omits it on success", job.Exception)
+	}
+}
+
+func TestDecodeReadsThePublishedFailureWithItsException(t *testing.T) {
+	const published = `{"schema": 1, "id": "62586ab0-3d98-45a4-a253-1e7396702497", "type": "job.finished", "application": "gohorizon-e2e", "environment": "e2e", "worker": "unknown", "at": "2026-11-21T14:08:49.458Z", "job": {"uuid": "7b128a5c-3571-4f25-bc26-527920230969", "id": "K3BF2fnLUHK69xBoeMSA4PCi1zfMkYxS", "class": "App\\Jobs\\AlwaysFails", "connection": "redis", "queue": "default", "attempts": 1, "outcome": "failed", "duration_ms": 9, "exception": {"class": "RuntimeException", "message": "the acceptance fixture always fails"}}, "tags": []}`
+
+	event, err := Decode(published)
+	if err != nil {
+		t.Fatalf("Decode: %v", err)
+	}
+	if event.Job.Exception == nil {
+		t.Fatalf("job = %+v, want the exception decoded", event.Job)
+	}
+	if event.Job.Exception.Class != "RuntimeException" || event.Job.Exception.Message == "" {
+		t.Errorf("exception = %+v, want the class and sanitized message", event.Job.Exception)
 	}
 }
 
@@ -98,6 +146,10 @@ func TestDecodeRejectsEventsTheConsumerCannotTrust(t *testing.T) {
 		{"job event without a job", `{"schema":1,"id":"e","type":"job.finished","application":"production","environment":"production","at":"2026-11-20T10:11:12.345Z"}`, "requires a job object"},
 		{"worker event without a body", `{"schema":1,"id":"e","type":"worker.stopped","application":"production","environment":"production","at":"2026-11-20T10:11:12.345Z"}`, "requires a worker_event"},
 		{"missing timestamp", strings.Replace(jobEvent("evt-1", "processed"), `"at":"2026-11-20T10:11:12.345Z",`, "", 1), "at is required"},
+		{"missing job uuid", strings.Replace(jobEvent("evt-1", "processed"), `"uuid":"u-1",`, "", 1), "job.uuid"},
+		{"missing job class", strings.Replace(jobEvent("evt-1", "processed"), `"class":"App\\Jobs\\SendMail",`, "", 1), "job.class"},
+		{"negative attempts", strings.Replace(jobEvent("evt-1", "processed"), `"attempts":2`, `"attempts":-1`, 1), "job.attempts"},
+		{"exception without a class", strings.Replace(jobEvent("evt-1", "failed"), `"exception":null`, `"exception":{"message":"boom"}`, 1), "job.exception"},
 		{"not json", `{`, "decode telemetry event"},
 	}
 

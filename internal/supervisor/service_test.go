@@ -574,11 +574,12 @@ func TestServiceConsumesTelemetryEndToEnd(t *testing.T) {
 
 	// The same consumer persists job metrics through the store New opened, so the
 	// history exists without the dashboard (docs/adr/0007).
+	jobID := "e2e-job-" + strconv.FormatInt(time.Now().UnixNano(), 36)
 	jobPayload := fmt.Sprintf(
 		`{"schema":1,"id":"%s","type":"job.finished","application":%q,"environment":"production",`+
-			`"worker":%q,"at":%q,"job":{"queue":"emails","outcome":"processed","duration_ms":1500}}`,
-		"e2e-job-"+strconv.FormatInt(time.Now().UnixNano(), 36),
-		running.application, running.worker.Name, time.Now().UTC().Format(time.RFC3339Nano),
+			`"worker":%q,"at":%q,"job":{"uuid":%q,"id":"1","class":"App\\Jobs\\Synthetic",`+
+			`"connection":"redis","queue":"emails","attempts":1,"outcome":"processed","duration_ms":1500}}`,
+		jobID, running.application, running.worker.Name, time.Now().UTC().Format(time.RFC3339Nano), jobID,
 	)
 	if _, err := running.raw.XAdd(running.ctx, &goredis.XAddArgs{Stream: running.stream, Values: map[string]any{"payload": jobPayload}}).Result(); err != nil {
 		t.Fatalf("publish job.finished: %v", err)
