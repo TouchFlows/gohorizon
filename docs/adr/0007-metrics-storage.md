@@ -23,7 +23,7 @@ Two constraints shape the storage:
    the pure-Go build chosen in handoff §5). The directory is created if missing.
 2. **Aggregates, not an event log.** `job.finished` events are folded into
    `queue_buckets(queue, bucket_start, processed, released, failed, timed_out,
-   discarded, duration_ms)`, one row per queue per minute (UTC). The job count is the
+   duration_ms)`, one row per queue per minute (UTC). The job count is the
    sum of the outcome counters, so it is not stored twice. Minutes keep recent history useful at a
    row cost of one per queue per busy minute; the coarser hourly and daily rollups from
    handoff §9 are not implemented yet.

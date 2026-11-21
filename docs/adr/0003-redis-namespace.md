@@ -3,6 +3,11 @@
 **Status:** accepted (Milestone 1)
 **Implements:** handoff §3.2 (separate namespaces), §6.3 (stream name).
 
+> The telemetry stream is published with a raw `XADD` so it lands on the literal key
+> below. Laravel applies a per-connection key prefix by default (derived from
+> `APP_NAME`), and the Go consumer has no notion of that prefix, so a normal command
+> would write to an unreachable key and telemetry would silently disappear.
+
 ## Context
 
 GoHorizon shares one Redis instance with the Laravel application. Three kinds of keys

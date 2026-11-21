@@ -32,6 +32,19 @@ final class JobEventSubscriberTest extends TestCase
         self::assertSame('processed', $publisher->events[0]['job']['outcome']);
     }
 
+    public function test_a_deleted_job_is_a_success_because_laravel_deletes_every_finished_job(): void
+    {
+        [$events, $publisher] = $this->subscriber();
+        $job = $this->job();
+        // The real worker calls delete() on each job it finishes, so this flag is true
+        // for ordinary successes too.
+        $job->method('isDeleted')->willReturn(true);
+
+        $events->dispatch(new JobProcessed('redis', $job));
+
+        self::assertSame('processed', $publisher->events[0]['job']['outcome']);
+    }
+
     public function test_job_processed_after_exceeding_attempts_is_a_failure_not_a_success(): void
     {
         [$events, $publisher] = $this->subscriber();

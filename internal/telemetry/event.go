@@ -27,7 +27,7 @@ const (
 // package documents them. tests/fixtures/telemetry-outcomes.json is the same
 // vocabulary; both test suites read it, so an outcome cannot be added on one side
 // alone (docs/adr/0006).
-var Outcomes = []string{"processed", "released", "failed", "timed_out", "discarded"}
+var Outcomes = []string{"processed", "released", "failed", "timed_out"}
 
 // Event is a telemetry record. Only the fields the consumer acts on are decoded; the
 // rest of the payload is ignored so the schema can grow without breaking ingestion.

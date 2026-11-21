@@ -21,8 +21,6 @@ final class Outcome
 
     public const TIMED_OUT = 'timed_out';
 
-    public const DISCARDED = 'discarded';
-
     /**
      * @return list<string>
      */
@@ -33,7 +31,6 @@ final class Outcome
             self::RELEASED,
             self::FAILED,
             self::TIMED_OUT,
-            self::DISCARDED,
         ];
     }
 }

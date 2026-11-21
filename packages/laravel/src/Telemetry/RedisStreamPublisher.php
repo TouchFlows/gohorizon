@@ -6,6 +6,7 @@ namespace GoHorizon\Laravel\Telemetry;
 
 use GoHorizon\Laravel\Redis\Keys;
 use Illuminate\Contracts\Redis\Factory;
+use Illuminate\Redis\Connections\PredisConnection;
 use Throwable;
 
 /**
@@ -33,17 +34,33 @@ final class RedisStreamPublisher implements TelemetryPublisher
         $redis = $this->redis->connection($this->connection);
         $stream = $this->keys->events();
 
-        if (count($events) === 1) {
-            $redis->xadd($stream, '*', ['payload' => $this->encode($events[0])], $this->retention, true);
+        foreach ($events as $event) {
+            $this->xadd($redis, $stream, $this->encode($event));
+        }
+    }
+
+    /**
+     * XADD is issued as a raw command for two reasons.
+     *
+     * Laravel gives a Redis connection a key prefix by default (derived from APP_NAME),
+     * while the Go consumer reads the literal `gohorizon:{application}:{environment}:`
+     * stream key (docs/adr/0003). A normal command would land under a prefix GoHorizon
+     * cannot know, so telemetry would silently never be consumed.
+     *
+     * Raw execution also avoids the client difference: PhpRedis takes
+     * (key, id, fields, maxlen, approximate), Predis takes (key, fields, id, options).
+     */
+    private function xadd(object $connection, string $stream, string $payload): void
+    {
+        $command = ['XADD', $stream, 'MAXLEN', '~', (string) $this->retention, '*', 'payload', $payload];
+
+        if ($connection instanceof PredisConnection) {
+            $connection->client()->executeRaw($command);
 
             return;
         }
 
-        $redis->pipeline(function ($pipe) use ($events, $stream): void {
-            foreach ($events as $event) {
-                $pipe->xadd($stream, '*', ['payload' => $this->encode($event)], $this->retention, true);
-            }
-        });
+        $connection->executeRaw($command);
     }
 
     private function encode(array $event): string

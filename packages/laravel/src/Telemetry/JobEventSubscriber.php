@@ -33,12 +33,13 @@ final class JobEventSubscriber
         ));
 
         $events->listen(JobProcessed::class, fn (JobProcessed $event) => $this->guard(function () use ($event): void {
-            // JobProcessed fires for deleted/over-limit jobs too. Status comes from the
-            // job flags, not from the event class.
+            // JobProcessed fires for released and failed jobs too, so the outcome comes
+            // from the job flags, not from the event class. isDeleted() is not one of
+            // them: Laravel deletes every job as part of finishing it, so it is true on
+            // each success and cannot distinguish anything.
             $outcome = match (true) {
                 $event->job->hasFailed() => Outcome::FAILED,
                 $event->job->isReleased() => Outcome::RELEASED,
-                $event->job->isDeleted() => Outcome::DISCARDED,
                 default => Outcome::PROCESSED,
             };
 

@@ -34,7 +34,7 @@ func at(minute int) time.Time {
 }
 
 func totalJobs(bucket Bucket) int64 {
-	return bucket.Processed + bucket.Released + bucket.Failed + bucket.TimedOut + bucket.Discarded
+	return bucket.Processed + bucket.Released + bucket.Failed + bucket.TimedOut
 }
 
 // readJobOutcomes reads the vocabulary the Laravel package and the consumer share, so
@@ -301,9 +301,6 @@ func TestRollupFoldsClosedMinutesIntoHoursAndDays(t *testing.T) {
 		{"b", "emails", "failed", 200, time.Date(2026, 11, 20, 10, 35, 0, 0, time.UTC)},
 		{"c", "emails", "processed", 300, time.Date(2026, 11, 20, 11, 20, 0, 0, time.UTC)},
 		{"d", "reports", "released", 50, time.Date(2026, 11, 20, 10, 10, 0, 0, time.UTC)},
-		// Every counter, including the one the package only recently started emitting,
-		// has to survive the rollup.
-		{"f", "emails", "discarded", 150, time.Date(2026, 11, 20, 10, 15, 0, 0, time.UTC)},
 		// The hour in progress is not folded yet.
 		{"e", "emails", "processed", 400, time.Date(2026, 11, 20, 12, 10, 0, 0, time.UTC)},
 	}
@@ -325,8 +322,8 @@ func TestRollupFoldsClosedMinutesIntoHoursAndDays(t *testing.T) {
 	}
 	ten := hours[0]
 	if !ten.Start.Equal(time.Date(2026, 11, 20, 10, 0, 0, 0, time.UTC)) ||
-		ten.Processed != 1 || ten.Failed != 1 || ten.Discarded != 1 || ten.DurationMS != 450 {
-		t.Errorf("10:00 hour = %+v, want the 10:xx minutes summed with the discarded counter", ten)
+		ten.Processed != 1 || ten.Failed != 1 || ten.DurationMS != 300 {
+		t.Errorf("10:00 hour = %+v, want the 10:xx minutes summed", ten)
 	}
 	if eleven := hours[1]; eleven.Start.Hour() != 11 || eleven.Processed != 1 || eleven.DurationMS != 300 {
 		t.Errorf("11:00 hour = %+v, want the single 11:20 job", eleven)
@@ -341,7 +338,7 @@ func TestRollupFoldsClosedMinutesIntoHoursAndDays(t *testing.T) {
 	}
 	day := days[0]
 	if !day.Start.Equal(time.Date(2026, 11, 20, 0, 0, 0, 0, time.UTC)) ||
-		totalJobs(day) != 4 || day.Discarded != 1 || day.DurationMS != 750 {
+		totalJobs(day) != 3 || day.DurationMS != 600 {
 		t.Errorf("day = %+v, want only the four closed-hour jobs", day)
 	}
 

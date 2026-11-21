@@ -1,4 +1,4 @@
 {
   "schema": 1,
-  "job_outcomes": ["processed", "released", "failed", "timed_out", "discarded"]
+  "job_outcomes": ["processed", "released", "failed", "timed_out"]
 }

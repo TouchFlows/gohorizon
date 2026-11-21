@@ -39,7 +39,7 @@ Milestone 1 (proof of concept) in progress. Implemented:
 
 `GET /api/v1/metrics?queue=default[&resolution=minute|hourly|daily][&from=…&to=…]`
 returns one queue's persisted buckets as `{queue, resolution, from, to, buckets: [{start,
-processed, released, failed, timed_out, discarded, duration_ms}]}`, oldest first.
+processed, released, failed, timed_out, duration_ms}]}`, oldest first.
 `resolution` defaults to `minute`; the range is `[from, to)` in RFC 3339 and defaults to the last
 hour, 24 hours or 30 days respectively. A missing
 queue, an unknown resolution or a malformed range is a 400, unavailable history is a
@@ -77,6 +77,26 @@ curl -s localhost:8090/api/v1/health | jq
 
 `examples/gohorizon.yaml` points at `/var/www/application`; adjust the application path
 and PHP binary before running the service.
+
+## Acceptance run
+
+`tests/integration` drives a real service against a disposable Laravel application and a
+real Redis: a scheduled worker runs jobs end to end, telemetry reaches `/api/v1/health`
+and `/api/v1/metrics`, a killed worker is restarted, and a service restart adopts the
+running worker instead of launching a second one. The tests are skipped unless
+`GOHORIZON_E2E=1`, so `go test ./...` stays fast and needs no PHP.
+
+The fixture is `tests/fixtures/laravel-app`: a Laravel 13 app with the package installed
+by path. Its `vendor/` and `composer.lock` are ignored, so install them once, and point
+the tests at a Redis database that may be flushed:
+
+```sh
+cd tests/fixtures/laravel-app && composer install && cd ../../..
+GOHORIZON_E2E=1 go test -count=1 -v ./tests/integration
+```
+
+The suite expects Redis at `127.0.0.1:6379` and works in database 15, deleting only the
+keys it created.
 
 ## Safety rules
 
