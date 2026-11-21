@@ -46,32 +46,31 @@ const fixtureEnv: NodeJS.ProcessEnv = {
 
 const php = commandOnPath('php')
 
-// Why the smoke cannot run here, or false when it can. Everything is known when the file
+// Why the smoke cannot run here, or null when it can. Everything is known when the file
 // loads, so a machine without the flag, the fixture or PHP reports a skip instead of a
 // failure — and CI fails on that skip rather than treating it as a pass.
-const missing =
+const skipReason =
   process.env.GOHORIZON_E2E !== '1'
     ? 'set GOHORIZON_E2E=1 to run the browser smoke (see README)'
     : !fs.existsSync(path.join(fixture, 'vendor', 'autoload.php'))
       ? `fixture dependencies are not installed; run: cd ${fixture} && composer install`
       : php === null
         ? 'php is not on PATH'
-        : false
+        : null
 
 let dir = ''
 let base = ''
 let service: ChildProcess | undefined
 
 test.describe('the dashboard against the real binary', () => {
-  test.skip(missing !== false, missing || '')
+  test.skip(skipReason !== null, skipReason ?? '')
 
   test.beforeAll(async () => {
-    if (missing !== false || php === null) {
+    if (skipReason !== null || php === null) {
       return
     }
     // Building, the worker's first poll and a cold Chromium all happen outside a test body.
     test.setTimeout(120_000)
-    const phpCommand = php
 
     dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gohorizon-smoke-'))
     const binary = path.join(dir, 'gohorizon')
@@ -80,12 +79,12 @@ test.describe('the dashboard against the real binary', () => {
     const port = await freePort()
     base = `http://127.0.0.1:${port}`
     const configPath = path.join(dir, 'gohorizon.yaml')
-    fs.writeFileSync(configPath, configYAML(port, dir, phpCommand))
+    fs.writeFileSync(configPath, configYAML(port, dir, php))
 
     const log = fs.openSync(path.join(dir, 'gohorizon.log'), 'a')
     service = spawn(binary, ['run', '-config', configPath], {
       cwd: root,
-      // Its own group, so teardown can end the worker the supervisor started as well.
+      // Its own group, so afterAll can end the worker the supervisor started as well.
       detached: true,
       stdio: ['ignore', log, log],
       env: { ...process.env, ...fixtureEnv },
@@ -97,33 +96,27 @@ test.describe('the dashboard against the real binary', () => {
       return Array.isArray(report.queues?.depths) && report.queues.depths.length > 0
     })
 
-    dispatch(phpCommand, 'marker', path.join(dir, 'smoke-marker'))
+    dispatch(php, 'marker', path.join(dir, 'smoke-marker'))
     // A second job throws on purpose, so the failed screen has an attempt of its own to show.
-    dispatch(phpCommand, 'fail')
+    dispatch(php, 'fail')
 
     // The worker has to pick the jobs up and the recorder has to store them before a browser
     // can be asked to show them.
-    await waitFor('record the job the worker ran', async () => {
-      const page = (await getJSON(`${base}/api/v1/jobs?queue=${queue}&limit=10`)) as {
-        jobs?: { class?: string }[]
-      }
-      return (page.jobs ?? []).some((job) => job.class === 'App\\Jobs\\RecordMarker')
-    })
+    await waitForJob('record the job the worker ran', `queue=${queue}`, (job) =>
+      job.class === 'App\\Jobs\\RecordMarker',
+    )
 
-    await waitFor('record the exception the failed job threw', async () => {
-      const page = (await getJSON(`${base}/api/v1/jobs?queue=${queue}&outcome=failed&limit=10`)) as {
-        jobs?: { class?: string; exception?: { message?: string } | null }[]
-      }
-      return (page.jobs ?? []).some(
-        (job) =>
-          job.class === 'App\\Jobs\\AlwaysFails' &&
-          job.exception?.message === 'the acceptance fixture always fails',
-      )
-    })
+    await waitForJob(
+      'record the exception the failed job threw',
+      `queue=${queue}&outcome=failed`,
+      (job) =>
+        job.class === 'App\\Jobs\\AlwaysFails' &&
+        job.exception?.message === 'the acceptance fixture always fails',
+    )
   })
 
   test.afterAll(() => {
-    if (missing !== false) {
+    if (skipReason !== null) {
       return
     }
     stopService()
@@ -170,8 +163,8 @@ test.describe('the dashboard against the real binary', () => {
 
 // dispatch queues one fixture job on the smoke's own queue, in the environment the service
 // and its worker read.
-function dispatch(php: string, ...args: string[]): void {
-  execFileSync(php, ['dispatch.php', ...args], {
+function dispatch(phpPath: string, ...args: string[]): void {
+  execFileSync(phpPath, ['dispatch.php', ...args], {
     cwd: fixture,
     env: { ...process.env, ...fixtureEnv, GOHORIZON_E2E_QUEUE: queue },
     stdio: 'inherit',
@@ -265,6 +258,26 @@ async function waitFor(what: string, condition: () => Promise<boolean>): Promise
     await new Promise((resolve) => setTimeout(resolve, 250))
   }
   throw new Error(`the service did not ${what} within ${pollMs} ms (${last})\n${readLog()}`)
+}
+
+// RecordedJob is the part of a stored attempt these waits read: that the worker ran this
+// class at all, and, for a failed one, what it threw.
+interface RecordedJob {
+  class?: string
+  exception?: { message?: string } | null
+}
+
+// waitForJob polls the job endpoint until one recorded attempt matches, because a browser
+// cannot be asked to show a row the recorder has not written yet.
+async function waitForJob(
+  what: string,
+  query: string,
+  matches: (job: RecordedJob) => boolean,
+): Promise<void> {
+  await waitFor(what, async () => {
+    const page = (await getJSON(`${base}/api/v1/jobs?${query}&limit=10`)) as { jobs?: RecordedJob[] }
+    return (page.jobs ?? []).some(matches)
+  })
 }
 
 function readLog(): string {
