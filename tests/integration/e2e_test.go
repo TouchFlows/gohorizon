@@ -529,3 +529,59 @@ func TestSilentRedisFencesTheSupervisor(t *testing.T) {
 		t.Fatalf("worker pids %v are still running after the silent lock loss", pids)
 	}
 }
+
+// TestReleasedAndTimedOutJobsReachTheHistory proves the two outcomes no other test produces.
+// Both are pinned in tests/fixtures/telemetry-outcomes.json, but only `processed` and
+// `failed` have ever come from a real worker, so a mapping slip on either of these would
+// have gone unnoticed until the dashboard.
+func TestReleasedAndTimedOutJobsReachTheHistory(t *testing.T) {
+	h := newHarness(t)
+	configPath, base := h.writeConfig()
+	h.startBinary(h.buildBinary(), configPath)
+	awaitRunning(h, base)
+
+	// The job declares two tries: the first attempt is released for retry, the second
+	// exceeds the limit and fails, so one job accounts for both outcomes.
+	if err := h.dispatch("release", ""); err != nil {
+		t.Fatal(err)
+	}
+	eventually(t, 45*time.Second, "the released attempt and its final failure", func() error {
+		saved, err := h.fetchHistory(base)
+		if err != nil {
+			return err
+		}
+		outcomes := saved.outcomes()
+		if outcomes.released != 1 || outcomes.failed != 1 {
+			return fmt.Errorf("released=%d failed=%d, want one of each", outcomes.released, outcomes.failed)
+		}
+		return nil
+	})
+
+	// The worker's timeout fires while the job is still running, and Laravel reports it
+	// before killing the worker for it.
+	if err := h.dispatch("hang", ""); err != nil {
+		t.Fatal(err)
+	}
+	eventually(t, 60*time.Second, "the timed-out job", func() error {
+		saved, err := h.fetchHistory(base)
+		if err != nil {
+			return err
+		}
+		if outcomes := saved.outcomes(); outcomes.timedOut != 1 {
+			return fmt.Errorf("timed_out=%d (processed=%d released=%d failed=%d)",
+				outcomes.timedOut, outcomes.processed, outcomes.released, outcomes.failed)
+		}
+		return nil
+	})
+
+	// Nothing was rejected along the way: a discarded event must not look like a missing
+	// outcome.
+	current, err := h.fetchReport(base)
+	if err != nil {
+		t.Fatalf("read health: %v", err)
+	}
+	if current.Telemetry.Invalid != 0 || current.Telemetry.Errors != 0 {
+		t.Fatalf("telemetry invalid=%d errors=%d, want no rejected events",
+			current.Telemetry.Invalid, current.Telemetry.Errors)
+	}
+}

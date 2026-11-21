@@ -26,7 +26,9 @@ name. Laravel 13 makes that insufficient:
    timed_out}`. Several Laravel events may collapse into one
    terminal record; the record carries `attempt` and `duration_ms`. The vocabulary is
    one contract for both halves of the product: `tests/fixtures/telemetry-outcomes.json`
-   is read by the Go and PHP test suites, so neither can add an outcome alone.
+   is read by the Go and PHP test suites, so neither can add an outcome alone. Real workers
+   now produce all four: `ReleaseOnce` releases its first attempt and fails the retry, and
+   `Hang` is reported as `timed_out` before the worker is killed for it.
 2. Status is derived from job flags (`hasFailed()`, `isReleased()`), not from the event
    class. `JobProcessed` alone is never "success". `isDeleted()` is deliberately not
    consulted: Laravel deletes every job as part of finishing it, so the flag is true on

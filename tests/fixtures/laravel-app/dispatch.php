@@ -3,7 +3,9 @@
 declare(strict_types=1);
 
 use App\Jobs\AlwaysFails;
+use App\Jobs\Hang;
 use App\Jobs\RecordMarker;
+use App\Jobs\ReleaseOnce;
 use App\Jobs\SlowMarker;
 use Illuminate\Contracts\Console\Kernel;
 
@@ -27,7 +29,13 @@ switch ($kind) {
     case 'fail':
         AlwaysFails::dispatch()->onQueue($queue);
         break;
+    case 'release':
+        ReleaseOnce::dispatch()->onQueue($queue);
+        break;
+    case 'hang':
+        Hang::dispatch()->onQueue($queue);
+        break;
     default:
-        fwrite(STDERR, "usage: dispatch.php marker <path>|slow <path>|fail\n");
+        fwrite(STDERR, "usage: dispatch.php marker <path>|slow <path>|fail|release|hang\n");
         exit(2);
 }

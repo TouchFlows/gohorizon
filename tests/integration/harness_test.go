@@ -479,12 +479,28 @@ type history struct {
 	} `json:"buckets"`
 }
 
-func (h history) totals() (processed, failed int) {
+// outcomeTotals is every outcome the history holds, summed over the buckets.
+type outcomeTotals struct {
+	processed int
+	released  int
+	failed    int
+	timedOut  int
+}
+
+func (h history) outcomes() outcomeTotals {
+	var totals outcomeTotals
 	for _, bucket := range h.Buckets {
-		processed += bucket.Processed
-		failed += bucket.Failed
+		totals.processed += bucket.Processed
+		totals.released += bucket.Released
+		totals.failed += bucket.Failed
+		totals.timedOut += bucket.TimedOut
 	}
-	return processed, failed
+	return totals
+}
+
+func (h history) totals() (processed, failed int) {
+	totals := h.outcomes()
+	return totals.processed, totals.failed
 }
 
 func (h *harness) fetchHistory(base string) (history, error) {

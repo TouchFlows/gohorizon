@@ -91,8 +91,9 @@ graceful stop completes, a hard-killed worker's job is retried by Laravel, a kil
 worker is replaced, a service restart adopts the running worker instead of launching
 a second one, an instance whose lock was taken over releases its worker instead of
 sharing the pool, jobs keep running while the control plane's Redis is cut while health
-reports 503 and recovers without restarting the worker, and an instance whose Redis stays
-silent past the lock's TTL stops supervising instead of holding an expired lock. The tests are skipped
+reports 503 and recovers without restarting the worker, an instance whose Redis stays
+silent past the lock's TTL stops supervising instead of holding an expired lock, and the
+`released` and `timed_out` outcomes of a real job reach the persisted history. The tests are skipped
 unless `GOHORIZON_E2E=1`, so `go test ./...` stays fast and needs no PHP.
 
 The fixture is `tests/fixtures/laravel-app`: a Laravel 13 app with the package installed
