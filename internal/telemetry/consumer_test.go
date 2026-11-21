@@ -205,6 +205,22 @@ func TestDrainReplaysPendingEntriesAndDeduplicatesThem(t *testing.T) {
 	}
 }
 
+func TestDrainIngestsWhatWasPublishedAfterTheLoopStopped(t *testing.T) {
+	stream := &fakeStream{reads: []readResult{
+		{messages: []redis.StreamMessage{payloadEntry("9-0", "late")}},
+	}}
+	consumer := testConsumer(t, stream)
+
+	consumer.Drain(context.Background())
+
+	if stats := consumer.Stats(); stats.Events != 1 {
+		t.Errorf("events = %d, want the entry published after the loop stopped", stats.Events)
+	}
+	if got := stream.ackedIDs(); len(got) != 1 || got[0] != "9-0" {
+		t.Errorf("acked = %v, want the late entry acknowledged", got)
+	}
+}
+
 func TestHandleDoesNotAcknowledgeWhenRedisRejectsIt(t *testing.T) {
 	stream := &fakeStream{ackErr: errors.New("redis is down")}
 	consumer := testConsumer(t, stream)

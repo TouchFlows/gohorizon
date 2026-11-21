@@ -111,16 +111,13 @@ func TestRealWorkerRunsJobsAndReportsThemOnTheAPI(t *testing.T) {
 }
 
 // TestGracefulStopFinishesTheInFlightJobExactlyOnce proves the promise a graceful stop
-// makes: a job that is already running is not abandoned, and it is not run again. The
-// supervisor's consumer stops together with its workers, so the event the worker
-// publishes as its last job finishes is still unread when the service exits; the next
-// start must account for it exactly once.
+// makes: a job that is already running is not abandoned, it is not run again, and it is
+// accounted for by the process that ran it. History is read from the database the
+// service wrote, because the service is gone by the time the job's event is due.
 func TestGracefulStopFinishesTheInFlightJobExactlyOnce(t *testing.T) {
 	h := newHarness(t)
-	binary := h.buildBinary()
 	configPath, base := h.writeConfig()
-
-	first := h.startBinary(binary, configPath)
+	instance := h.startBinary(h.buildBinary(), configPath)
 	awaitRunning(h, base)
 
 	marker := filepath.Join(h.dir, "slow-stop.txt")
@@ -130,7 +127,7 @@ func TestGracefulStopFinishesTheInFlightJobExactlyOnce(t *testing.T) {
 	awaitStarted(t, marker)
 
 	sent := time.Now()
-	first.terminate(t)
+	instance.terminate(t)
 
 	info, err := os.Stat(marker)
 	if err != nil {
@@ -142,33 +139,15 @@ func TestGracefulStopFinishesTheInFlightJobExactlyOnce(t *testing.T) {
 	requireRuns(t, marker, 1, 1)
 	awaitQueueDepth(t, h, 0, 0, "the finished job to leave nothing behind")
 
-	// Reading the event through a new process is what proves it was not lost with the
-	// supervisor that stopped before it could consume it.
-	second := h.startBinary(binary, configPath)
-	awaitRunning(h, base)
-	eventually(t, 30*time.Second, "the finished job accounted for once", func() error {
-		saved, err := h.fetchHistory(base)
-		if err != nil {
-			return err
-		}
-		if processed, failed := saved.totals(); processed != 1 || failed != 0 {
-			return fmt.Errorf("processed=%d failed=%d, want exactly one processed job", processed, failed)
-		}
-		return nil
-	})
-
-	// A duplicate event arrives through the stream, not the queue, so give ingestion a
-	// moment to show that it does not add a second one.
-	time.Sleep(2 * time.Second)
-	saved, err := h.fetchHistory(base)
+	// An event left unread until the next start would make the record of a completed job
+	// depend on restarting the service.
+	processed, failed, err := h.persistedHistory(testQueue)
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("read the persisted history: %v", err)
 	}
-	if processed, failed := saved.totals(); processed != 1 || failed != 0 {
-		t.Fatalf("processed=%d failed=%d after settling, want exactly one processed job", processed, failed)
+	if processed != 1 || failed != 0 {
+		t.Fatalf("processed=%d failed=%d, want the finished job recorded exactly once", processed, failed)
 	}
-
-	second.terminate(t)
 }
 
 // TestKilledWorkerLeavesTheJobForLaravelToRetry proves a hard kill cannot lose a job.

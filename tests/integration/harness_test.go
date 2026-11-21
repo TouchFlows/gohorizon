@@ -21,6 +21,7 @@ import (
 	goredis "github.com/redis/go-redis/v9"
 
 	"github.com/gohorizon/gohorizon/internal/adapter"
+	"github.com/gohorizon/gohorizon/internal/metrics"
 	"github.com/gohorizon/gohorizon/internal/process"
 )
 
@@ -318,6 +319,29 @@ func awaitQueueDepth(t *testing.T, h *harness, pending, reserved int, what strin
 		}
 		return nil
 	})
+}
+
+// persistedHistory reads the metrics the service wrote to disk. A stopped service has no
+// API to ask, and its history is the record of what it accounted for, so reopening the
+// database is how a test proves an event was handled before the process exited.
+func (h *harness) persistedHistory(queue string) (processed, failed int, err error) {
+	store, err := metrics.Open(filepath.Join(h.dir, "metrics.db"), metrics.DefaultRetention())
+	if err != nil {
+		return 0, 0, err
+	}
+	defer func() { _ = store.Close() }()
+
+	now := time.Now()
+	buckets, err := store.Buckets(context.Background(), metrics.ResolutionMinute, queue,
+		now.Add(-time.Hour), now.Add(time.Hour))
+	if err != nil {
+		return 0, 0, err
+	}
+	for _, bucket := range buckets {
+		processed += int(bucket.Processed)
+		failed += int(bucket.Failed)
+	}
+	return processed, failed, nil
 }
 
 // awaitStarted waits until the slow fixture job wrote its start line, so a test only

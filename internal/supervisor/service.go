@@ -26,6 +26,10 @@ const (
 	lockRenew   = 10 * time.Second
 	lockTimeout = 5 * time.Second
 
+	// telemetryDrainTimeout bounds the final ingestion pass of a stop. A slow or
+	// unreachable Redis must never hold a shutdown open (handoff §2.11).
+	telemetryDrainTimeout = 5 * time.Second
+
 	// defaultPruneInterval bounds how far the metrics database can outgrow its
 	// retention windows between two prune passes. It is a field on the service so a
 	// test can watch the scheduled pass without waiting an hour.
@@ -341,7 +345,9 @@ func (s *Service) noteStopReason(worker, reason string) {
 
 // Run acquires the ownership lock, starts every supervisor and blocks until the
 // context is cancelled. Worker shutdown happens inside the managers, so cancelling
-// the context is a graceful stop, not a kill.
+// the context is a graceful stop, not a kill. Ingestion outlives those workers by one
+// final pass, so the event for a job that finishes during the stop is accounted for by
+// the process that ran it.
 func (s *Service) Run(ctx context.Context) error {
 	acquired, err := s.client.AcquireSupervisorLock(ctx, s.owner, lockTTL)
 	if err != nil {
@@ -383,10 +389,14 @@ func (s *Service) Run(ctx context.Context) error {
 
 	// Telemetry is observation: Run never returns an error and never touches the
 	// workers, so a Redis outage degrades telemetry and nothing else (handoff §2.11).
-	wg.Add(1)
+	// It also does not share runCtx: a worker publishes its last job's event while it
+	// exits, so ingestion has to outlive the workers to account for that job here.
+	consumerCtx, stopConsumer := context.WithCancel(context.Background())
+	defer stopConsumer()
+	consumerDone := make(chan struct{})
 	go func() {
-		defer wg.Done()
-		s.consumer.Run(runCtx)
+		defer close(consumerDone)
+		s.consumer.Run(consumerCtx)
 		stats := s.consumer.Stats()
 		s.log.Info("telemetry consumer stopped", "events", stats.Events,
 			"duplicates", stats.Duplicates, "invalid", stats.Invalid, "errors", stats.Errors)
@@ -412,6 +422,16 @@ func (s *Service) Run(ctx context.Context) error {
 
 	wg.Wait()
 	close(errs)
+
+	// The workers are gone, so everything they published is already in the stream. One
+	// last pass records the job a graceful stop let finish before this process ends;
+	// without it the next start would be the first to read that job's event.
+	stopConsumer()
+	<-consumerDone
+	drainCtx, cancelDrain := context.WithTimeout(context.Background(), telemetryDrainTimeout)
+	s.consumer.Drain(drainCtx)
+	cancelDrain()
+
 	for err := range errs {
 		return err
 	}

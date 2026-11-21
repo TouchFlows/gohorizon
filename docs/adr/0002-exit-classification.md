@@ -41,7 +41,10 @@ kill unless the adapter reports it.
    SIGKILLs the process group. Escalation is logged and recorded on the record.
    Laravel may need up to one job duration or one `--sleep` to honour SIGTERM, so the
    grace period must exceed `timeout + sleep`; configuration validation enforces
-   `shutdown_grace > timeout + sleep`.
+   `shutdown_grace > timeout + sleep`. Telemetry ingestion is not cancelled with the
+   workers: the consumer reads until every manager has stopped, then makes one bounded
+   final pass, so the event for the job that finished during the stop is recorded by
+   this process instead of by the next start.
 5. **Enforced (WorkerStopping reasons).** When the package reports a `worker.stopped`
    event, its `worker_event.reason` overrides exit-code inference for that worker:
    `max_jobs`, `max_time`, `empty`, `empty_for`, `restart_signal` and `memory` are

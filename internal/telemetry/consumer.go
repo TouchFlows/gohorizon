@@ -25,6 +25,10 @@ const (
 	DefaultMaxBackoff       = 30 * time.Second
 )
 
+// drainBlock is how long the final pass of a stop waits for an event that is still in
+// flight: a worker publishes its last job's event while it is exiting.
+const drainBlock = 250 * time.Millisecond
+
 // Stream is the Redis surface the consumer needs. *redis.Client implements it.
 type Stream interface {
 	EnsureEventsGroup(ctx context.Context, group string) error
@@ -157,6 +161,33 @@ func (c *Consumer) consume(ctx context.Context, backoff *time.Duration) bool {
 		}
 	}
 	return false
+}
+
+// Drain ingests everything already published, then returns. The service calls it once
+// the workers have stopped and before ingestion ends: a worker publishes the event for a
+// job that finished during a graceful stop as it exits, so this pass is what accounts
+// for that job here instead of leaving it for the next start. It is bounded by ctx and
+// stops at the first empty read.
+func (c *Consumer) Drain(ctx context.Context) {
+	if err := c.streams.EnsureEventsGroup(ctx, DefaultGroup); err != nil {
+		c.failed(err)
+		return
+	}
+	c.drain(ctx)
+
+	for ctx.Err() == nil {
+		messages, err := c.streams.ReadEventsGroup(ctx, DefaultGroup, DefaultConsumer, ">", DefaultBatch, drainBlock)
+		if err != nil {
+			c.failed(err)
+			return
+		}
+		if len(messages) == 0 {
+			return
+		}
+		if err := c.handle(ctx, messages); err != nil {
+			return
+		}
+	}
 }
 
 // drain replays the entries this consumer read but never acknowledged. Their ids are
