@@ -488,7 +488,8 @@ type JobCursor struct {
 }
 
 // JobQuery selects one page of job history. An empty Queue or Outcome means "any", Limit is
-// the page size the caller wants, and Before continues after a previous page.
+// the most rows to read — a caller that needs to know whether another page exists asks for one
+// more than it renders — and Before continues after a previous page.
 type JobQuery struct {
 	Queue   string
 	Outcome string

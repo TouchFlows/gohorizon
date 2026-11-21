@@ -40,7 +40,7 @@ func jobHistory(provider Provider, log *slog.Logger) http.HandlerFunc {
 		if raw := strings.TrimSpace(query.Get("limit")); raw != "" {
 			parsed, err := strconv.Atoi(raw)
 			if err != nil || parsed < 1 || parsed > maxJobLimit {
-				writeError(w, http.StatusBadRequest, "limit must be between 1 and 200")
+				writeError(w, http.StatusBadRequest, "limit must be between 1 and "+strconv.Itoa(maxJobLimit))
 				return
 			}
 			limit = parsed
