@@ -537,7 +537,7 @@ server:
 
 storage:
   driver: sqlite
-  path: ./data/gohorizon.db
+  path: /var/lib/gohorizon/gohorizon.db
 
 redis:
   address: "127.0.0.1:6379"
@@ -568,11 +568,11 @@ applications:
           - notifications
 
         balance:
-          strategy: simple
+          strategy: fixed
 
         workers:
-          min: 1
-          max: 5
+          min: 3
+          max: 3
 
         worker:
           sleep: 3
