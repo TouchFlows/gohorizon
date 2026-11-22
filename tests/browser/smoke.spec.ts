@@ -351,7 +351,7 @@ test.describe('the dashboard against the real binary', () => {
     // Nothing in the fixture kills its worker, so this case is the crash: a SIGKILL is a
     // crash to the supervisor, which replaces the worker with a growing backoff. Three of
     // those in a row cross its crash-loop threshold. The counts are polled rather than slept
-    // through, and the last crash leaves a twenty-second window for the page to fetch in.
+    // through, and the last crash leaves a four-second window for the page to fetch in.
     test.setTimeout(180_000)
     for (let crashes = 0; crashes < 3; ) {
       const victim = await waitForCrashyWorker(
@@ -379,18 +379,41 @@ test.describe('the dashboard against the real binary', () => {
     // in `crash looping`. Both are on the page together for the length of the backoff.
     expect(looping.state).toBe('crashed')
 
-    await page.goto(`${base}/`)
+    // One fetch feeds both screens: the hash navigation re-renders the report this smoke
+    // captured, so the sentence, the header and the row are all read out of that payload
+    // rather than out of a state the test hoped was still there.
+    const looped = await readHealth(page, `${base}/`)
+    const loopedSupervisors = looped.supervisors ?? []
+    const loopedCrashy = loopedSupervisors.find((supervisor) => supervisor.id === crashy)
+    const loopedWorker = loopedCrashy?.workers?.[0]
+    if (loopedCrashy === undefined || loopedWorker === undefined) {
+      throw new Error(`the report does not list the ${crashy} supervisor's worker`)
+    }
+    expect(loopedCrashy.crashed).toBe(1)
+    expect(loopedWorker.crash_looping).toBe(true)
+
+    const running = loopedSupervisors.reduce((sum, supervisor) => sum + supervisor.running, 0)
+    const desired = loopedSupervisors.reduce((sum, supervisor) => sum + supervisor.desired, 0)
     const sentence = page
       .locator('.panel', { has: page.getByRole('heading', { name: 'Workers' }) })
       .locator('p.muted')
-    await expect(sentence).toContainText(', 1 crashed, 1 crash looping', { timeout: 30_000 })
-
-    // The crashing supervisor's own header repeats both suffixes.
-    await page.goto(`${base}/#/workers`)
-    await expect(page.getByRole('heading').filter({ hasText: crashy })).toContainText(
-      ', 1 crashed',
-      { timeout: 30_000 },
+    await expect(sentence).toHaveText(
+      `${supervisorCount(loopedSupervisors.length)}, ${running} of ${workerCount(desired)} running, 1 crashed, 1 crash looping.`,
     )
+
+    // The crashing supervisor's own header repeats the suffix, and its worker's row carries
+    // the badge of its own: the header is the tally, the state cell is that worker's flag.
+    await page.goto(`${base}/#/workers`)
+    await expect(page.getByRole('heading').filter({ hasText: crashy })).toHaveText(
+      `${crashy} ${loopedCrashy.running} of ${workerCount(loopedCrashy.desired)} running, 1 crashed`,
+    )
+    const crashySection = page.locator('.panel', {
+      has: page.getByRole('heading').filter({ hasText: crashy }),
+    })
+    const badge = crashySection.getByText('crash looping', { exact: true })
+    await expect(badge).toHaveCount(1)
+    // Exactly one row wears it, and it is the row whose state and badge the report gave.
+    await expect(crashySection.locator('tbody tr td').nth(3)).toHaveText(stateCell(loopedWorker))
 
     // The flag belongs to the streak, and the streak ends only once a replacement outlives
     // the supervisor's stable window. Nothing sleeps for it: this waits until the report
@@ -414,10 +437,10 @@ test.describe('the dashboard against the real binary', () => {
     expect(steadyCrashy.workers?.[0]?.crash_looping).toBe(false)
 
     // A healthy worker carries neither suffix, and the sentence is exactly the ratio again.
-    const running = steady.reduce((sum, supervisor) => sum + supervisor.running, 0)
-    const desired = steady.reduce((sum, supervisor) => sum + supervisor.desired, 0)
+    const steadyRunning = steady.reduce((sum, supervisor) => sum + supervisor.running, 0)
+    const steadyDesired = steady.reduce((sum, supervisor) => sum + supervisor.desired, 0)
     await expect(sentence).toHaveText(
-      `3 supervisors, ${running} of ${workerCount(desired)} running.`,
+      `3 supervisors, ${steadyRunning} of ${workerCount(steadyDesired)} running.`,
     )
     await page.goto(`${base}/#/workers`)
     await expect(page.getByRole('heading').filter({ hasText: crashy })).toHaveText(
@@ -522,8 +545,9 @@ applications:
           timeout: 6
           memory: 128
         shutdown_grace: 30
-        # Long enough that the crash the test makes leaves a window the page can fetch in.
-        restart_backoff: 5
+        # The backoff is both the window a crash leaves the page to fetch in and, doubled plus
+        # thirty seconds, the stable run that clears the loop: the lowest keeps both shortest.
+        restart_backoff: 1
 `
 }
 
@@ -673,6 +697,12 @@ function jobCount(count: number): string {
 // workers" — so the smoke reads the ratio back through the same rule it words it with.
 function workerCount(count: number): string {
   return `${count} ${count === 1 ? 'worker' : 'workers'}`
+}
+
+// supervisorCount is the same rule for the Overview sentence's leading noun, mirrored here
+// rather than imported so the smoke can disagree with the page instead of sharing its answer.
+function supervisorCount(count: number): string {
+  return `${count} ${count === 1 ? 'supervisor' : 'supervisors'}`
 }
 
 // killWorker sends the crash and reports whether the process was still there. A worker that
