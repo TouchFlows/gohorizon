@@ -23,6 +23,10 @@ const queue = 'gohorizon-smoke'
 // A second queue, served by a two-worker supervisor: one page then carries a lone worker and
 // a pool, which is the only way both ratio spellings reach a browser.
 const extraQueue = 'gohorizon-smoke-extra'
+// A third supervisor, one idle worker, whose worker this smoke kills: a SIGKILL is a crash
+// to the supervisor, which replaces it with a growing backoff until the streak is a loop.
+const crashy = 'crashy'
+const crashyQueue = 'gohorizon-smoke-crashy'
 const pollMs = 30_000
 
 // The service and the fixture read the same environment: the worker it launches is the
@@ -108,7 +112,7 @@ test.describe('the dashboard against the real binary', () => {
       const report = (await getJSON(`${base}/api/v1/health`)) as HealthReport
       const supervisors = report.supervisors ?? []
       return (
-        supervisors.length === 2 &&
+        supervisors.length === 3 &&
         supervisors.every((supervisor) => supervisor.running === supervisor.desired)
       )
     })
@@ -159,8 +163,8 @@ test.describe('the dashboard against the real binary', () => {
     // the ratios apart and words each one for its own size.
     const report = await readHealth(page, `${base}/`)
     const supervisors = report.supervisors ?? []
-    expect(supervisors).toHaveLength(2)
-    expect(supervisors.map((supervisor) => supervisor.desired).sort()).toEqual([1, 2])
+    expect(supervisors).toHaveLength(3)
+    expect(supervisors.map((supervisor) => supervisor.desired).sort()).toEqual([1, 1, 2])
     const running = supervisors.reduce((sum, supervisor) => sum + supervisor.running, 0)
     const desired = supervisors.reduce((sum, supervisor) => sum + supervisor.desired, 0)
 
@@ -171,7 +175,7 @@ test.describe('the dashboard against the real binary', () => {
       .locator('.panel', { has: page.getByRole('heading', { name: 'Workers' }) })
       .locator('p.muted')
     await expect(sentence).toContainText(
-      `2 supervisors, ${running} of ${workerCount(desired)} running`,
+      `3 supervisors, ${running} of ${workerCount(desired)} running`,
     )
 
     // Each supervisor's own header on the workers screen repeats its ratio, with its own
@@ -190,10 +194,10 @@ test.describe('the dashboard against the real binary', () => {
   test('the workers screen lists every worker the supervisors started', async ({ page }) => {
     const report = await readHealth(page, `${base}/#/workers`)
     const supervisors = report.supervisors ?? []
-    expect(supervisors).toHaveLength(2)
+    expect(supervisors).toHaveLength(3)
     const workers = supervisors.flatMap((supervisor) => supervisor.workers ?? [])
-    // Two on the idle queue and one on the queue the jobs run through.
-    expect(workers).toHaveLength(3)
+    // Two on the idle queue, one on the queue the jobs run through, one on the crashy one.
+    expect(workers).toHaveLength(4)
 
     // One row per process, across both supervisors' tables.
     await expect(page.locator('tbody tr')).toHaveCount(workers.length)
@@ -206,7 +210,7 @@ test.describe('the dashboard against the real binary', () => {
         worker.uuid,
         worker.queue,
         String(worker.pid),
-        worker.state,
+        stateCell(worker),
         String(worker.restarts),
         String(worker.last_exit_code) + (worker.last_exit_reason ? ` ${worker.last_exit_reason}` : ''),
       ])
@@ -217,7 +221,7 @@ test.describe('the dashboard against the real binary', () => {
     const report = await readHealth(page, `${base}/#/queues`)
     const depths = report.queues.depths ?? []
     // Both configured queues are sampled, not only the one that carried the jobs.
-    expect(depths.map((depth) => depth.queue).sort()).toEqual([extraQueue, queue].sort())
+    expect(depths.map((depth) => depth.queue).sort()).toEqual([crashyQueue, extraQueue, queue].sort())
 
     await expect(page.getByRole('heading', { name: 'Queues' })).toBeVisible()
     await expect(page.locator('tbody tr')).toHaveCount(depths.length)
@@ -343,6 +347,43 @@ test.describe('the dashboard against the real binary', () => {
     ).toHaveCount(1)
   })
 
+  test('a crash-looping worker is named on both supervisor lines', async ({ page }) => {
+    // Nothing in the fixture kills its worker, so this case is the crash: a SIGKILL is a
+    // crash to the supervisor, which replaces the worker with a growing backoff. Three of
+    // those in a row cross its crash-loop threshold. The counts are polled rather than slept
+    // through, and the last crash leaves a twenty-second window for the page to fetch in.
+    test.setTimeout(90_000)
+    for (let crashes = 0; crashes < 3; crashes++) {
+      const victim = await waitForCrashyWorker(
+        'report a worker that can be killed',
+        (worker) => worker.pid > 0 && worker.state === 'running',
+      )
+      process.kill(victim.pid, 'SIGKILL')
+      await waitForCrashyWorker(
+        'record the crash',
+        (worker) => worker.state === 'crashed' || worker.pid !== victim.pid,
+      )
+    }
+
+    const looping = await waitForCrashyWorker('be flagged crash looping', (worker) => worker.crash_looping)
+    // A crashed slot is what the sentence counts in `crashed`; the streak is what it counts
+    // in `crash looping`. Both are on the page together for the length of the backoff.
+    expect(looping.state).toBe('crashed')
+
+    await page.goto(`${base}/`)
+    const sentence = page
+      .locator('.panel', { has: page.getByRole('heading', { name: 'Workers' }) })
+      .locator('p.muted')
+    await expect(sentence).toContainText(', 1 crashed, 1 crash looping', { timeout: 30_000 })
+
+    // The crashing supervisor's own header repeats both suffixes.
+    await page.goto(`${base}/#/workers`)
+    await expect(page.getByRole('heading').filter({ hasText: crashy })).toContainText(
+      ', 1 crashed',
+      { timeout: 30_000 },
+    )
+  })
+
   test('a deep link outside the navigation loads the shell instead of a 404', async ({ page }) => {
     const response = await page.goto(`${base}/queues/anything`)
 
@@ -426,6 +467,22 @@ applications:
           memory: 128
         shutdown_grace: 30
         restart_backoff: 1
+      - id: ${crashy}
+        queues:
+          - ${crashyQueue}
+        balance:
+          strategy: fixed
+        workers:
+          min: 1
+          max: 1
+        worker:
+          sleep: 1
+          tries: 1
+          timeout: 6
+          memory: 128
+        shutdown_grace: 30
+        # Long enough that the crash the test makes leaves a window the page can fetch in.
+        restart_backoff: 5
 `
 }
 
@@ -571,6 +628,36 @@ function jobCount(count: number): string {
 // workers" — so the smoke reads the ratio back through the same rule it words it with.
 function workerCount(count: number): string {
   return `${count} ${count === 1 ? 'worker' : 'workers'}`
+}
+
+// crashyWorker reads the third supervisor's worker, which is the one this smoke kills.
+async function crashyWorker(): Promise<WorkerReport | undefined> {
+  const report = (await getJSON(`${base}/api/v1/health`)) as HealthReport
+  return (report.supervisors ?? []).find((supervisor) => supervisor.id === crashy)?.workers?.[0]
+}
+
+// waitForCrashyWorker polls that worker until it matches, so a crash, a restart and a state
+// the manager has not written yet are all a longer wait rather than a flake.
+async function waitForCrashyWorker(
+  what: string,
+  matches: (worker: WorkerReport) => boolean,
+): Promise<WorkerReport> {
+  await waitFor(what, async () => {
+    const worker = await crashyWorker()
+    return worker !== undefined && matches(worker)
+  })
+
+  const worker = await crashyWorker()
+  if (worker === undefined) {
+    throw new Error(`the ${crashy} supervisor did not ${what}`)
+  }
+  return worker
+}
+
+// stateCell is the workers table's state column: the state, then the badges the report asked
+// for, which the page renders against it with no separator between them.
+function stateCell(worker: WorkerReport): string {
+  return worker.state + (worker.crash_looping ? 'crash looping' : '') + (worker.adopted ? 'adopted' : '')
 }
 
 // numberCell is the page's wording for a sampled depth: a count the driver could not report
