@@ -434,9 +434,13 @@ test.describe('the dashboard against the real binary', () => {
       throw new Error(`the report does not list the ${crashy} supervisor`)
     }
     expect(steadyCrashy.crashed).toBe(0)
-    expect(steadyCrashy.workers?.[0]?.crash_looping).toBe(false)
+    const steadyWorker = steadyCrashy.workers?.[0]
+    if (steadyWorker === undefined) {
+      throw new Error(`the report does not list the ${crashy} supervisor's worker`)
+    }
+    expect(steadyWorker.crash_looping).toBe(false)
 
-    // A healthy worker carries neither suffix, and the sentence is exactly the ratio again.
+    // A healthy supervisor carries neither suffix, and the sentence is exactly the ratio again.
     const steadyRunning = steady.reduce((sum, supervisor) => sum + supervisor.running, 0)
     const steadyDesired = steady.reduce((sum, supervisor) => sum + supervisor.desired, 0)
     await expect(sentence).toHaveText(
@@ -446,6 +450,13 @@ test.describe('the dashboard against the real binary', () => {
     await expect(page.getByRole('heading').filter({ hasText: crashy })).toHaveText(
       `${crashy} ${steadyCrashy.running} of ${workerCount(steadyCrashy.desired)} running`,
     )
+
+    // The badge was the streak's, so it leaves with it: on the row it was asserted on there is
+    // no badge left, and the state cell is the bare state the report now gives, with nothing
+    // appended to it.
+    const steadyRow = page.getByRole('row', { name: new RegExp(steadyWorker.uuid) })
+    await expect(steadyRow.getByText('crash looping', { exact: true })).toHaveCount(0)
+    await expect(steadyRow.getByRole('cell').nth(3)).toHaveText(steadyWorker.state)
   })
 
   test('a deep link outside the navigation loads the shell instead of a 404', async ({ page }) => {
