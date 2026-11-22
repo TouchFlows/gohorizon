@@ -169,8 +169,9 @@ test.describe('the dashboard against the real binary', () => {
     const total = history.buckets.reduce((sum, bucket) => sum + attemptCount(bucket), 0)
     expect(total).toBe(2)
 
-    // The chart names that total in its accessible name and in its caption, which sits in the
-    // figure beside the plot rather than inside it, so it is read from the page.
+    // The chart names that total twice: in the figure's accessible name, and in its caption,
+    // which sits in the figcaption beside the plot rather than in the svg, so it is read from
+    // the page instead of from the image.
     const outcomes = page.getByRole('img', { name: new RegExp(`, ${jobCount(total)}$`) })
     await expect(outcomes).toBeVisible()
     await expect(page.locator('.chart__total')).toHaveText(jobCount(total))
@@ -382,8 +383,8 @@ function attemptCount(bucket: HistoryBucket): number {
   return bucket.processed + bucket.released + bucket.failed + bucket.timed_out
 }
 
-// jobCount is the wording the outcomes chart uses for a total and for its scale label, and one
-// job is not "1 jobs": the smoke asserts the page in the words the page chose.
+// jobCount is the outcomes chart's wording for a total and for its scale label — one job is
+// not "1 jobs" — so the smoke reads the page back through the same rule it words it with.
 function jobCount(count: number): string {
   return `${count} ${count === 1 ? 'job' : 'jobs'}`
 }
