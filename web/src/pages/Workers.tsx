@@ -1,5 +1,5 @@
 import type { HealthReport } from '../api'
-import { buildWorkers } from '../view'
+import { buildWorkers, countNoun } from '../view'
 
 export default function Workers({ report }: { report: HealthReport }) {
   const supervisors = buildWorkers(report)
@@ -14,7 +14,7 @@ export default function Workers({ report }: { report: HealthReport }) {
           <h2>
             {supervisor.id}{' '}
             <span className="muted">
-              {supervisor.running} of {supervisor.desired} running
+              {supervisor.running} of {countNoun(supervisor.desired, 'worker')} running
               {supervisor.crashed > 0 && `, ${supervisor.crashed} crashed`}
               {supervisor.escalations > 0 && `, ${supervisor.escalations} escalated`}
             </span>

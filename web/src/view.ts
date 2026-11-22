@@ -7,6 +7,12 @@ export function count(value: number | null | undefined): string {
   return typeof value === 'number' ? String(value) : 'unknown'
 }
 
+// countNoun words a tally with its noun: one is singular, everything else — zero included —
+// takes the plural, so a lone worker reads "1 worker" and not "1 workers".
+export function countNoun(value: number, noun: string): string {
+  return `${value} ${noun}${value === 1 ? '' : 's'}`
+}
+
 // formatSpan renders a duration in whole seconds the way an operator reads it: seconds,
 // then minutes, then hours and minutes, then days and hours.
 export function formatSpan(seconds: number): string {

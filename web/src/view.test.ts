@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { HealthReport } from './api'
-import { buildOverview, buildWorkers, count, formatAge, formatSpan, queueError, queueRows } from './view'
+import { buildOverview, buildWorkers, count, countNoun, formatAge, formatSpan, queueError, queueRows } from './view'
 
 function report(overrides: Partial<HealthReport> = {}): HealthReport {
   return {
@@ -26,6 +26,18 @@ describe('count', () => {
   it('renders a count nobody reported as unknown', () => {
     expect(count(null)).toBe('unknown')
     expect(count(undefined)).toBe('unknown')
+  })
+})
+
+describe('countNoun', () => {
+  it('words one of something in the singular', () => {
+    expect(countNoun(1, 'worker')).toBe('1 worker')
+    expect(countNoun(1, 'supervisor')).toBe('1 supervisor')
+  })
+
+  it('words every other tally in the plural', () => {
+    expect(countNoun(0, 'worker')).toBe('0 workers')
+    expect(countNoun(2, 'supervisor')).toBe('2 supervisors')
   })
 })
 
