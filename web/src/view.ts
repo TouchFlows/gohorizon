@@ -7,8 +7,9 @@ export function count(value: number | null | undefined): string {
   return typeof value === 'number' ? String(value) : 'unknown'
 }
 
-// countNoun words a tally with its noun: one is singular, everything else — zero included —
-// takes the plural, so a lone worker reads "1 worker" and not "1 workers".
+// countNoun words a tally of a noun that pluralizes with -s: one is singular, everything
+// else — zero included — takes the plural, so a lone worker reads "1 worker" and not
+// "1 workers".
 export function countNoun(value: number, noun: string): string {
   return `${value} ${noun}${value === 1 ? '' : 's'}`
 }
