@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { Bucket, History } from './api'
-import { buildChart, buildHistoryQuery, defaultRange, ranges } from './history'
+import { buildChart, buildHistoryQuery, defaultRange, jobCount, ranges } from './history'
 
 function history(overrides: Partial<History> = {}): History {
   return {
@@ -121,6 +121,18 @@ describe('ranges', () => {
       const stepHours = resolution === 'minute' ? 1 / 60 : resolution === 'hourly' ? 1 : 24
       expect(largest.hours / stepHours).toBeLessThanOrEqual(720)
     }
+  })
+})
+
+describe('jobCount', () => {
+  // The browser smoke always sees two attempts, so the singular caption has no other cover.
+  it('words a one-job total in the singular, which is what the caption prints', () => {
+    expect(jobCount(1)).toBe('1 job')
+  })
+
+  it('keeps the plural for no jobs and for a column worth more than one', () => {
+    expect(jobCount(0)).toBe('0 jobs')
+    expect(jobCount(2)).toBe('2 jobs')
   })
 })
 

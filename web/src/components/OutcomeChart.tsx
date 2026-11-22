@@ -1,5 +1,5 @@
 import type { ChartModel } from '../history'
-import { formatClock } from '../history'
+import { formatClock, jobCount } from '../history'
 import type { Resolution } from '../api'
 
 // One colour per outcome, in the order a column stacks. The same order is the legend.
@@ -13,11 +13,6 @@ const series = [
 const width = 720
 const height = 240
 const padding = 28
-
-// The scale and the caption count jobs in words, and one job is not "1 jobs".
-function jobCount(count: number): string {
-  return `${count} ${count === 1 ? 'job' : 'jobs'}`
-}
 
 export default function OutcomeChart({ model, resolution }: { model: ChartModel; resolution: Resolution }) {
   const plotWidth = width - padding * 2

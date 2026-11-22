@@ -133,6 +133,12 @@ export function buildHistoryQuery(
   return parameters.toString()
 }
 
+// jobCount words a tally the way the outcomes chart does: the scale label at the top of the
+// plot and the caption's total both count jobs, and one job is not "1 jobs".
+export function jobCount(count: number): string {
+  return `${count} ${count === 1 ? 'job' : 'jobs'}`
+}
+
 // formatClock labels a bucket: a time for minutes and hours, a date for days.
 export function formatClock(startSeconds: number, resolution: Resolution): string {
   const at = new Date(startSeconds * 1000)
