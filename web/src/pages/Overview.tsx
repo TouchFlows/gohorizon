@@ -1,6 +1,6 @@
 import type { HealthReport } from '../api'
 import { routeHref } from '../routes'
-import { buildOverview, countNoun } from '../view'
+import { buildOverview, supervisorSummary } from '../view'
 import QueueTable from '../components/QueueTable'
 
 export default function Overview({ report, degraded }: { report: HealthReport; degraded: boolean }) {
@@ -34,12 +34,7 @@ export default function Overview({ report, degraded }: { report: HealthReport; d
 
       <section className="panel">
         <h2>Workers</h2>
-        <p className="muted">
-          {countNoun(model.supervisors.count, 'supervisor')},{' '}
-          {model.supervisors.running} of {countNoun(model.supervisors.desired, 'worker')} running
-          {model.supervisors.crashed > 0 && `, ${model.supervisors.crashed} crashed`}
-          {model.supervisors.crashLooping > 0 && `, ${model.supervisors.crashLooping} crash looping`}.
-        </p>
+        <p className="muted">{supervisorSummary(model.supervisors)}</p>
         <p>
           <a href={routeHref('workers')}>All workers</a>
         </p>

@@ -66,7 +66,7 @@ export interface OverviewModel {
   lock: { ok: boolean; label: string; detail: string }
   telemetry: TelemetryRow[]
   telemetryFailure: string | null
-  supervisors: { count: number; running: number; desired: number; crashed: number; crashLooping: number }
+  supervisors: SupervisorTally
   queues: QueueRow[]
   queueError: string | null
 }
@@ -86,6 +86,29 @@ export function queueRows(depths: QueueDepth[] | null, nowMilliseconds: number):
 // show queues need the same answer, so they ask here instead of repeating the test.
 export function queueError(queues: Queues): string | null {
   return queues.error === undefined || queues.error === '' ? null : queues.error
+}
+
+// SupervisorTally is the pool as the Overview words it: the supervisors seen, the workers
+// they report, and the trouble behind them.
+export interface SupervisorTally {
+  count: number
+  running: number
+  desired: number
+  crashed: number
+  crashLooping: number
+}
+
+// supervisorSummary is the Overview's sentence about that pool. It lives out here so the
+// crashed and crash-looping suffixes can be read without a browser to render them.
+export function supervisorSummary(tally: SupervisorTally): string {
+  let sentence = `${countNoun(tally.count, 'supervisor')}, ${tally.running} of ${countNoun(tally.desired, 'worker')} running`
+  if (tally.crashed > 0) {
+    sentence += `, ${tally.crashed} crashed`
+  }
+  if (tally.crashLooping > 0) {
+    sentence += `, ${tally.crashLooping} crash looping`
+  }
+  return `${sentence}.`
 }
 
 export function crashLooping(supervisors: Supervisor[] | null): number {

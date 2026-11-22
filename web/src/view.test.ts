@@ -1,6 +1,16 @@
 import { describe, expect, it } from 'vitest'
 import type { HealthReport } from './api'
-import { buildOverview, buildWorkers, count, countNoun, formatAge, formatSpan, queueError, queueRows } from './view'
+import {
+  buildOverview,
+  buildWorkers,
+  count,
+  countNoun,
+  formatAge,
+  formatSpan,
+  queueError,
+  queueRows,
+  supervisorSummary,
+} from './view'
 
 function report(overrides: Partial<HealthReport> = {}): HealthReport {
   return {
@@ -109,6 +119,32 @@ describe('queueError', () => {
   it('reports nothing when the inspection answered', () => {
     expect(queueError({ depths: [] })).toBeNull()
     expect(queueError({ error: '', depths: [] })).toBeNull()
+  })
+})
+
+describe('supervisorSummary', () => {
+  const oneWorker = { count: 1, running: 1, desired: 1, crashed: 0, crashLooping: 0 }
+
+  it('words a lone supervisor and its worker in the singular', () => {
+    expect(supervisorSummary(oneWorker)).toBe('1 supervisor, 1 of 1 worker running.')
+  })
+
+  it('names a crashed worker', () => {
+    expect(supervisorSummary({ ...oneWorker, crashed: 1 })).toBe(
+      '1 supervisor, 1 of 1 worker running, 1 crashed.',
+    )
+  })
+
+  it('names workers stuck in a crash loop', () => {
+    expect(supervisorSummary({ ...oneWorker, crashLooping: 2 })).toBe(
+      '1 supervisor, 1 of 1 worker running, 2 crash looping.',
+    )
+  })
+
+  it('counts a pool first and its trouble after', () => {
+    expect(supervisorSummary({ count: 2, running: 3, desired: 4, crashed: 1, crashLooping: 2 })).toBe(
+      '2 supervisors, 3 of 4 workers running, 1 crashed, 2 crash looping.',
+    )
   })
 })
 
