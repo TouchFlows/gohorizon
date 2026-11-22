@@ -21,7 +21,7 @@ export default function DurationChart({ model, resolution }: { model: ChartModel
   const peakAverageMs = Math.max(0, ...model.buckets.map((bucket) => bucket.averageMs))
 
   return (
-    <figure className="chart chart--duration">
+    <figure className="chart chart--duration duration-chart">
       <svg
         viewBox={`0 0 ${width} ${height}`}
         role="img"
@@ -36,7 +36,7 @@ export default function DurationChart({ model, resolution }: { model: ChartModel
         />
         {/* The label carries the number the caption used to, in the one place it reads as a
             scale: the top of the plot, which is what a full-height column means. */}
-        <text className="chart__scale" x={padding} y={padding - 10}>
+        <text className="chart__scale duration-chart__scale" x={padding} y={padding - 10}>
           {peakAverageMs} ms
         </text>
         {model.buckets.map((bucket, index) => {

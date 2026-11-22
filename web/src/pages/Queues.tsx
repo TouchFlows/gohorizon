@@ -13,7 +13,7 @@ export default function Queues({ report }: { report: HealthReport }) {
         <p className="muted">Inspected through the {report.queues.connection} connection.</p>
       )}
       {error !== null && <p className="banner">Queue inspection failed: {error}</p>}
-      <section className="panel">
+      <section className="panel queues__depths">
         <QueueTable rows={rows} />
       </section>
       <p className="muted">

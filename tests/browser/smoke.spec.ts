@@ -152,7 +152,8 @@ test.describe('the dashboard against the real binary', () => {
     await page.goto(`${base}/`)
 
     await expect(page.getByRole('heading', { name: 'Overview' })).toBeVisible()
-    await expect(page.locator('.pill')).toHaveText('ok')
+    // The status is read through the header's own hook, not through the pill's styling class.
+    await expect(page.locator('.shell__status')).toHaveText('ok')
     await expect(page.getByRole('cell', { name: 'gohorizon-smoke', exact: true })).toBeVisible()
     await expect(page.getByText('EVENTS')).toBeVisible()
   })
@@ -170,12 +171,10 @@ test.describe('the dashboard against the real binary', () => {
 
     // The tally and the ratio it leads into are one sentence, worded by the same helper. It
     // grows a suffix when a worker has crashed or is crash looping, so the ratio is read out
-    // of the sentence rather than required to be the whole of it. The paragraph is found by
-    // its own hook rather than by its styling class, so restyling it does not take the smoke
-    // with it.
-    const sentence = page
-      .locator('.panel', { has: page.getByRole('heading', { name: 'Workers' }) })
-      .locator('.panel__summary')
+    // of the sentence rather than required to be the whole of it. The panel and the paragraph
+    // it holds are found by their own hooks rather than by their styling classes, so restyling
+    // either one does not take the smoke with it.
+    const sentence = page.locator('.overview__workers').locator('.panel__summary')
     await expect(sentence).toContainText(
       `3 supervisors, ${running} of ${workerCount(desired)} running`,
     )
@@ -280,13 +279,13 @@ test.describe('the dashboard against the real binary', () => {
     // the page instead of from the image.
     const outcomes = page.getByRole('img', { name: new RegExp(`, ${jobCount(total)}$`) })
     await expect(outcomes).toBeVisible()
-    await expect(page.locator('.chart__total')).toHaveText(jobCount(total))
+    await expect(page.locator('.outcome-chart__total')).toHaveText(jobCount(total))
 
     // The label at the top of the plot is the scale the columns are drawn against, so it is the
     // tallest column rather than the window's two attempts: a run that straddles a minute
     // boundary draws each attempt in its own minute, and neither column is worth 2.
     const tallest = Math.max(1, ...history.buckets.map(attemptCount))
-    await expect(outcomes.locator('.chart__scale')).toHaveText(jobCount(tallest))
+    await expect(outcomes.locator('.outcome-chart__scale')).toHaveText(jobCount(tallest))
 
     // The column is named by the minute the failure landed in, formatted by the page itself,
     // so this still asserts the right bucket when a run straddles a minute boundary.
@@ -341,7 +340,7 @@ test.describe('the dashboard against the real binary', () => {
     // The label at the top of the plot is what a full-height column is worth: the slowest
     // average in the window, which is the bucket's own average and not the scale's floor.
     const peak = Math.max(0, ...history.buckets.map(averageMs))
-    await expect(durationChart.locator('.chart__scale')).toHaveText(`${peak} ms`)
+    await expect(durationChart.locator('.duration-chart__scale')).toHaveText(`${peak} ms`)
     // Counted rather than required visible: a job that finished in under a millisecond is a
     // zero-height column, and this assertion is about the number it labels.
     await expect(
@@ -396,9 +395,7 @@ test.describe('the dashboard against the real binary', () => {
 
     const running = loopedSupervisors.reduce((sum, supervisor) => sum + supervisor.running, 0)
     const desired = loopedSupervisors.reduce((sum, supervisor) => sum + supervisor.desired, 0)
-    const sentence = page
-      .locator('.panel', { has: page.getByRole('heading', { name: 'Workers' }) })
-      .locator('.panel__summary')
+    const sentence = page.locator('.overview__workers').locator('.panel__summary')
     await expect(sentence).toHaveText(
       `${supervisorCount(loopedSupervisors.length)}, ${running} of ${workerCount(desired)} running, 1 crashed, 1 crash looping.`,
     )
@@ -409,7 +406,9 @@ test.describe('the dashboard against the real binary', () => {
     await expect(page.getByRole('heading').filter({ hasText: crashy })).toHaveText(
       `${crashy} ${loopedCrashy.running} of ${workerCount(loopedCrashy.desired)} running, 1 crashed`,
     )
-    const crashySection = page.locator('.panel', {
+    // The section is found by its own hook; the heading only picks the crashing supervisor out
+    // of the three, so a restyled panel keeps the badge assertion where it belongs.
+    const crashySection = page.locator('.workers__supervisor', {
       has: page.getByRole('heading').filter({ hasText: crashy }),
     })
     const badge = crashySection.getByText('crash looping', { exact: true })

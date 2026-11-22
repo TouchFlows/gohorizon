@@ -21,7 +21,7 @@ export default function OutcomeChart({ model, resolution }: { model: ChartModel;
   const barWidth = Math.max(1, slot - 1)
 
   return (
-    <figure className="chart">
+    <figure className="chart outcome-chart">
       <svg viewBox={`0 0 ${width} ${height}`} role="img" aria-label={`Outcomes over ${model.buckets.length} buckets, ${jobCount(model.total)}`}>
         <line
           x1={padding}
@@ -32,7 +32,7 @@ export default function OutcomeChart({ model, resolution }: { model: ChartModel;
         />
         {/* The top of the scale, so a full-height column is a number and not a guess. It
             sits in the margin above the plot, where no column can reach it. */}
-        <text className="chart__scale" x={padding} y={padding - 10}>
+        <text className="chart__scale outcome-chart__scale" x={padding} y={padding - 10}>
           {jobCount(model.max)}
         </text>
         {model.buckets.map((bucket, index) => {
@@ -80,7 +80,7 @@ export default function OutcomeChart({ model, resolution }: { model: ChartModel;
             </span>
           ))}
         </span>
-        <span className="chart__total">{jobCount(model.total)}</span>
+        <span className="chart__total outcome-chart__total">{jobCount(model.total)}</span>
       </figcaption>
     </figure>
   )

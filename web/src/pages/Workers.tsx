@@ -10,7 +10,7 @@ export default function Workers({ report }: { report: HealthReport }) {
       {supervisors.length === 0 && <p className="muted">No supervisor has reported yet.</p>}
 
       {supervisors.map((supervisor) => (
-        <section key={supervisor.id} className="panel">
+        <section key={supervisor.id} className="panel workers__supervisor">
           <h2>
             {supervisor.id}{' '}
             <span className="muted">

@@ -136,7 +136,7 @@ export default function Jobs({ report, pinnedOutcome }: { report: HealthReport; 
 
 function JobDetail({ job, onClose }: { job: Job; onClose: () => void }) {
   return (
-    <section className="panel detail" aria-label="Job detail">
+    <section className="panel detail jobs__detail" aria-label="Job detail">
       <div className="detail__head">
         <h2>{job.class}</h2>
         <button type="button" className="chip" onClick={onClose}>

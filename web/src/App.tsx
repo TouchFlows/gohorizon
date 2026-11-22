@@ -43,7 +43,7 @@ export default function App() {
             </a>
           ))}
         </nav>
-        <span className={warn ? 'pill pill--warn' : 'pill'}>
+        <span className={warn ? 'shell__status pill pill--warn' : 'shell__status pill'}>
           {report === null ? 'connecting' : report.status}
         </span>
       </header>
