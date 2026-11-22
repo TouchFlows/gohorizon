@@ -4,7 +4,7 @@ import net from 'node:net'
 import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { expect, test } from '@playwright/test'
+import { expect, test, type Page } from '@playwright/test'
 
 // The whole point of this suite is that it is not a component test: the pages below are
 // served by the compiled binary, from the embedded bundle, over a store the worker wrote.
@@ -158,7 +158,7 @@ test.describe('the dashboard against the real binary', () => {
   })
 
   test('the metrics chart draws the attempts in the minute they ran', async ({ page }) => {
-    await page.goto(`${base}/#/metrics`)
+    const history = await readHistory(page, `${base}/#/metrics`)
 
     await expect(page.getByRole('heading', { name: 'Metrics' })).toBeVisible()
     await expect(page.getByLabel('Queue')).toHaveValue('gohorizon-smoke')
@@ -166,7 +166,16 @@ test.describe('the dashboard against the real binary', () => {
 
     // One processed attempt and one failed one, and nothing else in the window: the store is
     // fresh for every run, so any third attempt would mean a job ran twice.
-    await expect(page.getByRole('img', { name: /, 2 jobs$/ })).toBeVisible()
+    const outcomes = page.getByRole('img', { name: /, 2 jobs$/ })
+    await expect(outcomes).toBeVisible()
+
+    // The label at the top of the plot is what a full-height column is worth, so it has to be
+    // the tallest column rather than the window's two attempts: a run that straddles a minute
+    // boundary draws each attempt in its own minute, and neither column is worth 2.
+    const tallest = Math.max(...history.buckets.map(attemptCount))
+    await expect(outcomes.locator('.chart__scale')).toHaveText(
+      `${tallest} ${tallest === 1 ? 'job' : 'jobs'}`,
+    )
 
     // The column is named by the minute the failure landed in, formatted by the page itself,
     // so this still asserts the right bucket when a run straddles a minute boundary.
@@ -192,23 +201,7 @@ test.describe('the dashboard against the real binary', () => {
   })
 
   test('the metrics screen draws the average duration the store returned', async ({ page }) => {
-    // The payload the page charts is the only honest source for the number it should draw,
-    // so the test reads the response the page itself made.
-    const [response] = await Promise.all([
-      page.waitForResponse((candidate) => candidate.url().includes('/api/v1/metrics') && candidate.ok()),
-      page.goto(`${base}/#/metrics`),
-    ])
-    const history = (await response.json()) as {
-      resolution: 'minute' | 'hourly' | 'daily'
-      buckets: {
-        start: string
-        processed: number
-        released: number
-        failed: number
-        timed_out: number
-        duration_ms: number
-      }[]
-    }
+    const history = await readHistory(page, `${base}/#/metrics`)
 
     // The failure is the attempt this smoke knows the time of, so its bucket is the one that
     // has to carry a duration column.
@@ -232,6 +225,16 @@ test.describe('the dashboard against the real binary', () => {
 
     const durationChart = page.getByRole('img', { name: /Average duration per attempt/ })
     await expect(durationChart).toBeVisible()
+
+    // The label at the top of the plot is what a full-height column is worth: the slowest
+    // average in the window, which is the bucket's own average and not the scale's floor.
+    const peak = Math.max(
+      0,
+      ...history.buckets.map((entry) =>
+        attemptCount(entry) === 0 ? 0 : Math.round(entry.duration_ms / attemptCount(entry)),
+      ),
+    )
+    await expect(durationChart.locator('.chart__scale')).toHaveText(`${peak} ms`)
     // Counted rather than required visible: a job that finished in under a millisecond is a
     // zero-height column, and this assertion is about the number it labels.
     await expect(
@@ -347,6 +350,39 @@ async function waitFor(what: string, condition: () => Promise<boolean>): Promise
     await new Promise((resolve) => setTimeout(resolve, 250))
   }
   throw new Error(`the service did not ${what} within ${pollMs} ms (${last})\n${readLog()}`)
+}
+
+// HistoryBucket is the part of the metrics payload the charts are drawn from, in the shape the
+// API sends it; the page converts it, and so does this file.
+interface HistoryBucket {
+  start: string
+  processed: number
+  released: number
+  failed: number
+  timed_out: number
+  duration_ms: number
+}
+
+// History is the window a chart covers: the resolution the store answered at, and its buckets.
+interface History {
+  resolution: 'minute' | 'hourly' | 'daily'
+  buckets: HistoryBucket[]
+}
+
+// readHistory opens the metrics screen and returns the payload the page charted, because the
+// response the page itself made is the only honest source for the numbers it should draw.
+async function readHistory(page: Page, url: string): Promise<History> {
+  const [response] = await Promise.all([
+    page.waitForResponse((candidate) => candidate.url().includes('/api/v1/metrics') && candidate.ok()),
+    page.goto(url),
+  ])
+  return (await response.json()) as History
+}
+
+// attemptCount is every outcome a bucket holds, which is what the page divides a bucket's
+// duration by and what it stacks a column from.
+function attemptCount(bucket: HistoryBucket): number {
+  return bucket.processed + bucket.released + bucket.failed + bucket.timed_out
 }
 
 // RecordedJob is the part of a stored attempt these waits read: that the worker ran this
