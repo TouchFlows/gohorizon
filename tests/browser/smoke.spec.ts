@@ -169,10 +169,10 @@ test.describe('the dashboard against the real binary', () => {
     const outcomes = page.getByRole('img', { name: /, 2 jobs$/ })
     await expect(outcomes).toBeVisible()
 
-    // The label at the top of the plot is what a full-height column is worth, so it has to be
-    // the tallest column rather than the window's two attempts: a run that straddles a minute
+    // The label at the top of the plot is the scale the columns are drawn against, so it is the
+    // tallest column rather than the window's two attempts: a run that straddles a minute
     // boundary draws each attempt in its own minute, and neither column is worth 2.
-    const tallest = Math.max(...history.buckets.map(attemptCount))
+    const tallest = Math.max(1, ...history.buckets.map(attemptCount))
     await expect(outcomes.locator('.chart__scale')).toHaveText(
       `${tallest} ${tallest === 1 ? 'job' : 'jobs'}`,
     )
@@ -215,8 +215,7 @@ test.describe('the dashboard against the real binary', () => {
       throw new Error('the window the page charted does not hold the failed attempt')
     }
 
-    const attempts = bucket.processed + bucket.released + bucket.failed + bucket.timed_out
-    const average = attempts === 0 ? 0 : Math.round(bucket.duration_ms / attempts)
+    const average = averageMs(bucket)
     const label = await page.evaluate(
       (start) =>
         new Date(start * 1000).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' }),
@@ -228,12 +227,7 @@ test.describe('the dashboard against the real binary', () => {
 
     // The label at the top of the plot is what a full-height column is worth: the slowest
     // average in the window, which is the bucket's own average and not the scale's floor.
-    const peak = Math.max(
-      0,
-      ...history.buckets.map((entry) =>
-        attemptCount(entry) === 0 ? 0 : Math.round(entry.duration_ms / attemptCount(entry)),
-      ),
-    )
+    const peak = Math.max(0, ...history.buckets.map(averageMs))
     await expect(durationChart.locator('.chart__scale')).toHaveText(`${peak} ms`)
     // Counted rather than required visible: a job that finished in under a millisecond is a
     // zero-height column, and this assertion is about the number it labels.
@@ -379,10 +373,16 @@ async function readHistory(page: Page, url: string): Promise<History> {
   return (await response.json()) as History
 }
 
-// attemptCount is every outcome a bucket holds, which is what the page divides a bucket's
-// duration by and what it stacks a column from.
+// attemptCount is every outcome a bucket holds, which is what the page stacks a column from.
 function attemptCount(bucket: HistoryBucket): number {
   return bucket.processed + bucket.released + bucket.failed + bucket.timed_out
+}
+
+// averageMs is what the page divides a bucket's duration by, and what it writes in a column's
+// title: nothing at all for a bucket that ran nothing, rather than an instant job.
+function averageMs(bucket: HistoryBucket): number {
+  const attempts = attemptCount(bucket)
+  return attempts === 0 ? 0 : Math.round(bucket.duration_ms / attempts)
 }
 
 // RecordedJob is the part of a stored attempt these waits read: that the worker ran this
