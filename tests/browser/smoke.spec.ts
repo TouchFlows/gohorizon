@@ -166,16 +166,20 @@ test.describe('the dashboard against the real binary', () => {
 
     // One processed attempt and one failed one, and nothing else in the window: the store is
     // fresh for every run, so any third attempt would mean a job ran twice.
-    const outcomes = page.getByRole('img', { name: /, 2 jobs$/ })
+    const total = history.buckets.reduce((sum, bucket) => sum + attemptCount(bucket), 0)
+    expect(total).toBe(2)
+
+    // The chart names that total in its accessible name and in its caption, which sits in the
+    // figure beside the plot rather than inside it, so it is read from the page.
+    const outcomes = page.getByRole('img', { name: new RegExp(`, ${jobCount(total)}$`) })
     await expect(outcomes).toBeVisible()
+    await expect(page.locator('.chart__total')).toHaveText(jobCount(total))
 
     // The label at the top of the plot is the scale the columns are drawn against, so it is the
     // tallest column rather than the window's two attempts: a run that straddles a minute
     // boundary draws each attempt in its own minute, and neither column is worth 2.
     const tallest = Math.max(1, ...history.buckets.map(attemptCount))
-    await expect(outcomes.locator('.chart__scale')).toHaveText(
-      `${tallest} ${tallest === 1 ? 'job' : 'jobs'}`,
-    )
+    await expect(outcomes.locator('.chart__scale')).toHaveText(jobCount(tallest))
 
     // The column is named by the minute the failure landed in, formatted by the page itself,
     // so this still asserts the right bucket when a run straddles a minute boundary.
@@ -376,6 +380,12 @@ async function readHistory(page: Page, url: string): Promise<History> {
 // attemptCount is every outcome a bucket holds, which is what the page stacks a column from.
 function attemptCount(bucket: HistoryBucket): number {
   return bucket.processed + bucket.released + bucket.failed + bucket.timed_out
+}
+
+// jobCount is the wording the outcomes chart uses for a total and for its scale label, and one
+// job is not "1 jobs": the smoke asserts the page in the words the page chose.
+function jobCount(count: number): string {
+  return `${count} ${count === 1 ? 'job' : 'jobs'}`
 }
 
 // averageMs is what the page divides a bucket's duration by, and what it writes in a column's
