@@ -139,6 +139,42 @@ test.describe('the dashboard against the real binary', () => {
     await expect(page.getByText('EVENTS')).toBeVisible()
   })
 
+  test('a one-worker supervisor reads in the singular on both screens', async ({ page }) => {
+    // The fixture's supervisor runs a fixed single worker, so the browser is looking at the
+    // only ratio the pages word with one worker in it. Its numbers come from the page's own
+    // report rather than from the config this file writes.
+    const [response] = await Promise.all([
+      page.waitForResponse((candidate) => candidate.url().includes('/api/v1/health') && candidate.ok()),
+      page.goto(`${base}/`),
+    ])
+    const report = (await response.json()) as {
+      supervisors?: { id: string; running: number; desired: number }[]
+    }
+    const supervisors = report.supervisors ?? []
+    expect(supervisors).toHaveLength(1)
+    const supervisor = supervisors[0]
+    // One worker is the whole point: with a wider pool the singular is on neither screen and
+    // this case would be asserting the plural it was written to catch.
+    expect(supervisor.desired).toBe(1)
+    expect(supervisor.running).toBe(1)
+
+    // The tally and the ratio it leads into are one sentence, worded by the same helper.
+    await expect(
+      page.getByText(`1 supervisor, ${supervisor.running} of ${workerCount(supervisor.desired)} running.`, {
+        exact: true,
+      }),
+    ).toBeVisible()
+
+    // Each supervisor's own header on the workers screen repeats the ratio.
+    await page.goto(`${base}/#/workers`)
+    await expect(
+      page.getByRole(
+        'heading',
+        { name: `${supervisor.id} ${supervisor.running} of ${workerCount(supervisor.desired)} running` },
+      ),
+    ).toBeVisible()
+  })
+
   test('the jobs page renders the job the worker just ran', async ({ page }) => {
     await page.goto(`${base}/#/jobs`)
 
@@ -387,6 +423,12 @@ function attemptCount(bucket: HistoryBucket): number {
 // not "1 jobs" — so the smoke reads the page back through the same rule it words it with.
 function jobCount(count: number): string {
   return `${count} ${count === 1 ? 'job' : 'jobs'}`
+}
+
+// workerCount is the supervisor pages' wording for a ratio's noun — one worker is not "1
+// workers" — so the smoke reads the ratio back through the same rule it words it with.
+function workerCount(count: number): string {
+  return `${count} ${count === 1 ? 'worker' : 'workers'}`
 }
 
 // averageMs is what the page divides a bucket's duration by, and what it writes in a column's
