@@ -14,6 +14,11 @@ const width = 720
 const height = 240
 const padding = 28
 
+// The scale and the caption count jobs in words, and one job is not "1 jobs".
+function jobCount(count: number): string {
+  return `${count} ${count === 1 ? 'job' : 'jobs'}`
+}
+
 export default function OutcomeChart({ model, resolution }: { model: ChartModel; resolution: Resolution }) {
   const plotWidth = width - padding * 2
   const plotHeight = height - padding * 2
@@ -22,7 +27,7 @@ export default function OutcomeChart({ model, resolution }: { model: ChartModel;
 
   return (
     <figure className="chart">
-      <svg viewBox={`0 0 ${width} ${height}`} role="img" aria-label={`Outcomes over ${model.buckets.length} buckets, ${model.total} jobs`}>
+      <svg viewBox={`0 0 ${width} ${height}`} role="img" aria-label={`Outcomes over ${model.buckets.length} buckets, ${jobCount(model.total)}`}>
         <line
           x1={padding}
           y1={padding + plotHeight}
@@ -33,7 +38,7 @@ export default function OutcomeChart({ model, resolution }: { model: ChartModel;
         {/* The top of the scale, so a full-height column is a number and not a guess. It
             sits in the margin above the plot, where no column can reach it. */}
         <text className="chart__scale" x={padding} y={padding - 10}>
-          {model.max} {model.max === 1 ? 'job' : 'jobs'}
+          {jobCount(model.max)}
         </text>
         {model.buckets.map((bucket, index) => {
           const x = padding + index * slot
@@ -80,7 +85,7 @@ export default function OutcomeChart({ model, resolution }: { model: ChartModel;
             </span>
           ))}
         </span>
-        <span className="chart__total">{model.total} jobs</span>
+        <span className="chart__total">{jobCount(model.total)}</span>
       </figcaption>
     </figure>
   )
