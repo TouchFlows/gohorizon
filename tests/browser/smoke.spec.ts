@@ -158,21 +158,22 @@ test.describe('the dashboard against the real binary', () => {
     expect(supervisor.desired).toBe(1)
     expect(supervisor.running).toBe(1)
 
-    // The tally and the ratio it leads into are one sentence, worded by the same helper.
-    await expect(
-      page.getByText(`1 supervisor, ${supervisor.running} of ${workerCount(supervisor.desired)} running.`, {
-        exact: true,
-      }),
-    ).toBeVisible()
+    // The tally and the ratio it leads into are one sentence, worded by the same helper. It
+    // grows a suffix when a worker has crashed or is crash looping, so the ratio is read out
+    // of the sentence rather than required to be the whole of it.
+    const sentence = page
+      .locator('.panel', { has: page.getByRole('heading', { name: 'Workers' }) })
+      .locator('p.muted')
+    await expect(sentence).toContainText(
+      `1 supervisor, ${supervisor.running} of ${workerCount(supervisor.desired)} running`,
+    )
 
-    // Each supervisor's own header on the workers screen repeats the ratio.
+    // Each supervisor's own header on the workers screen repeats the ratio, with its own
+    // crashed and escalated suffixes behind it.
     await page.goto(`${base}/#/workers`)
-    await expect(
-      page.getByRole(
-        'heading',
-        { name: `${supervisor.id} ${supervisor.running} of ${workerCount(supervisor.desired)} running` },
-      ),
-    ).toBeVisible()
+    await expect(page.getByRole('heading').filter({ hasText: supervisor.id })).toContainText(
+      `${supervisor.running} of ${workerCount(supervisor.desired)} running`,
+    )
   })
 
   test('the jobs page renders the job the worker just ran', async ({ page }) => {
