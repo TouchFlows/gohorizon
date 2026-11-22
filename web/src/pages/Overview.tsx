@@ -34,7 +34,7 @@ export default function Overview({ report, degraded }: { report: HealthReport; d
 
       <section className="panel">
         <h2>Workers</h2>
-        <p className="muted">{supervisorSummary(model.supervisors)}</p>
+        <p className="muted panel__summary">{supervisorSummary(model.supervisors)}</p>
         <p>
           <a href={routeHref('workers')}>All workers</a>
         </p>

@@ -170,10 +170,12 @@ test.describe('the dashboard against the real binary', () => {
 
     // The tally and the ratio it leads into are one sentence, worded by the same helper. It
     // grows a suffix when a worker has crashed or is crash looping, so the ratio is read out
-    // of the sentence rather than required to be the whole of it.
+    // of the sentence rather than required to be the whole of it. The paragraph is found by
+    // its own hook rather than by its styling class, so restyling it does not take the smoke
+    // with it.
     const sentence = page
       .locator('.panel', { has: page.getByRole('heading', { name: 'Workers' }) })
-      .locator('p.muted')
+      .locator('.panel__summary')
     await expect(sentence).toContainText(
       `3 supervisors, ${running} of ${workerCount(desired)} running`,
     )
@@ -396,7 +398,7 @@ test.describe('the dashboard against the real binary', () => {
     const desired = loopedSupervisors.reduce((sum, supervisor) => sum + supervisor.desired, 0)
     const sentence = page
       .locator('.panel', { has: page.getByRole('heading', { name: 'Workers' }) })
-      .locator('p.muted')
+      .locator('.panel__summary')
     await expect(sentence).toHaveText(
       `${supervisorCount(loopedSupervisors.length)}, ${running} of ${workerCount(desired)} running, 1 crashed, 1 crash looping.`,
     )
