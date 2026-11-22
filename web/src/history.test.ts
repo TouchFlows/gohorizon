@@ -125,12 +125,13 @@ describe('ranges', () => {
 })
 
 describe('jobCount', () => {
-  // The browser smoke always sees two attempts, so the singular caption has no other cover.
+  // The smoke's window always holds two attempts, so its caption only ever says "2 jobs": one
+  // job would otherwise be covered only by the scale label above the plot.
   it('words a one-job total in the singular, which is what the caption prints', () => {
     expect(jobCount(1)).toBe('1 job')
   })
 
-  it('keeps the plural for no jobs and for a column worth more than one', () => {
+  it('keeps the plural when nothing ran and when more than one job did', () => {
     expect(jobCount(0)).toBe('0 jobs')
     expect(jobCount(2)).toBe('2 jobs')
   })
