@@ -20,6 +20,9 @@ const fixture = path.join(root, 'tests', 'fixtures', 'laravel-app')
 const redis = { host: '127.0.0.1', port: 6379, db: 15 }
 const application = 'gohorizon-smoke'
 const queue = 'gohorizon-smoke'
+// A second queue, served by a two-worker supervisor: one page then carries a lone worker and
+// a pool, which is the only way both ratio spellings reach a browser.
+const extraQueue = 'gohorizon-smoke-extra'
 const pollMs = 30_000
 
 // The service and the fixture read the same environment: the worker it launches is the
@@ -99,6 +102,17 @@ test.describe('the dashboard against the real binary', () => {
       return Array.isArray(report.queues?.depths) && report.queues.depths.length > 0
     })
 
+    // Both supervisors at their configured size before anything is read back: the ratios and
+    // the aggregation word the pool, not a pool still starting.
+    await waitFor('start every worker', async () => {
+      const report = (await getJSON(`${base}/api/v1/health`)) as HealthReport
+      const supervisors = report.supervisors ?? []
+      return (
+        supervisors.length === 2 &&
+        supervisors.every((supervisor) => supervisor.running === supervisor.desired)
+      )
+    })
+
     dispatch(php, 'marker', path.join(dir, 'smoke-marker'))
     // A second job throws on purpose, so the failed screen has an attempt of its own to show.
     dispatch(php, 'fail')
@@ -139,18 +153,16 @@ test.describe('the dashboard against the real binary', () => {
     await expect(page.getByText('EVENTS')).toBeVisible()
   })
 
-  test('a one-worker supervisor reads in the singular on both screens', async ({ page }) => {
-    // The fixture's supervisor runs a fixed single worker, so the browser is looking at the
-    // only ratio the pages word with one worker in it. Its numbers come from the page's own
-    // report rather than from the config this file writes.
+  test('the supervisor ratios read singular for a lone worker and plural for a pool', async ({ page }) => {
+    // Two supervisors on purpose: one worker on the queue the jobs run through, two on the
+    // idle one. The Overview then aggregates a pool of three, while the workers screen keeps
+    // the ratios apart and words each one for its own size.
     const report = await readHealth(page, `${base}/`)
     const supervisors = report.supervisors ?? []
-    expect(supervisors).toHaveLength(1)
-    const supervisor = supervisors[0]
-    // One worker is the whole point: with a wider pool the singular is on neither screen and
-    // this case would be asserting the plural it was written to catch.
-    expect(supervisor.desired).toBe(1)
-    expect(supervisor.running).toBe(1)
+    expect(supervisors).toHaveLength(2)
+    expect(supervisors.map((supervisor) => supervisor.desired).sort()).toEqual([1, 2])
+    const running = supervisors.reduce((sum, supervisor) => sum + supervisor.running, 0)
+    const desired = supervisors.reduce((sum, supervisor) => sum + supervisor.desired, 0)
 
     // The tally and the ratio it leads into are one sentence, worded by the same helper. It
     // grows a suffix when a worker has crashed or is crash looping, so the ratio is read out
@@ -159,48 +171,53 @@ test.describe('the dashboard against the real binary', () => {
       .locator('.panel', { has: page.getByRole('heading', { name: 'Workers' }) })
       .locator('p.muted')
     await expect(sentence).toContainText(
-      `1 supervisor, ${supervisor.running} of ${workerCount(supervisor.desired)} running`,
+      `2 supervisors, ${running} of ${workerCount(desired)} running`,
     )
 
-    // Each supervisor's own header on the workers screen repeats the ratio, with its own
-    // crashed and escalated suffixes behind it.
+    // Each supervisor's own header on the workers screen repeats its ratio, with its own
+    // crashed and escalated suffixes behind it. Both spellings have to be on the page.
     await page.goto(`${base}/#/workers`)
-    await expect(page.getByRole('heading').filter({ hasText: supervisor.id })).toContainText(
-      `${supervisor.running} of ${workerCount(supervisor.desired)} running`,
-    )
+    const ratios: string[] = []
+    for (const supervisor of supervisors) {
+      const ratio = `${supervisor.running} of ${workerCount(supervisor.desired)} running`
+      ratios.push(ratio)
+      await expect(page.getByRole('heading').filter({ hasText: supervisor.id })).toContainText(ratio)
+    }
+    expect(ratios).toContain('1 of 1 worker running')
+    expect(ratios).toContain('2 of 2 workers running')
   })
 
-  test('the workers screen lists the worker the supervisor started', async ({ page }) => {
+  test('the workers screen lists every worker the supervisors started', async ({ page }) => {
     const report = await readHealth(page, `${base}/#/workers`)
     const supervisors = report.supervisors ?? []
-    expect(supervisors).toHaveLength(1)
-    const workers = supervisors[0].workers ?? []
-    // The fixture runs one worker, and the table lists the processes the report names.
-    expect(workers).toHaveLength(1)
+    expect(supervisors).toHaveLength(2)
+    const workers = supervisors.flatMap((supervisor) => supervisor.workers ?? [])
+    // Two on the idle queue and one on the queue the jobs run through.
+    expect(workers).toHaveLength(3)
 
-    const worker = workers[0]
+    // One row per process, across both supervisors' tables.
     await expect(page.locator('tbody tr')).toHaveCount(workers.length)
 
-    // Every cell is the report's own field, so the row shows the process the supervisor is
+    // Every cell is the report's own field, so a row shows the process the supervisor is
     // running rather than a placeholder that merely looks like one.
-    const row = page.getByRole('row', { name: new RegExp(worker.uuid) })
-    await expect(row.getByRole('cell')).toHaveText([
-      worker.uuid,
-      worker.queue,
-      String(worker.pid),
-      worker.state,
-      String(worker.restarts),
-      String(worker.last_exit_code) + (worker.last_exit_reason ? ` ${worker.last_exit_reason}` : ''),
-    ])
+    for (const worker of workers) {
+      const row = page.getByRole('row', { name: new RegExp(worker.uuid) })
+      await expect(row.getByRole('cell')).toHaveText([
+        worker.uuid,
+        worker.queue,
+        String(worker.pid),
+        worker.state,
+        String(worker.restarts),
+        String(worker.last_exit_code) + (worker.last_exit_reason ? ` ${worker.last_exit_reason}` : ''),
+      ])
+    }
   })
 
-  test('the queues screen shows the depth it inspected for the smoke queue', async ({ page }) => {
+  test('the queues screen shows the depth it inspected for each queue', async ({ page }) => {
     const report = await readHealth(page, `${base}/#/queues`)
     const depths = report.queues.depths ?? []
-    const depth = depths.find((candidate) => candidate.queue === queue)
-    if (depth === undefined) {
-      throw new Error(`the report does not list the ${queue} queue`)
-    }
+    // Both configured queues are sampled, not only the one that carried the jobs.
+    expect(depths.map((depth) => depth.queue).sort()).toEqual([extraQueue, queue].sort())
 
     await expect(page.getByRole('heading', { name: 'Queues' })).toBeVisible()
     await expect(page.locator('tbody tr')).toHaveCount(depths.length)
@@ -208,14 +225,18 @@ test.describe('the dashboard against the real binary', () => {
     // The counts are the driver's own numbers. The age is formatted by the page from the
     // browser's clock, so only the shape of it is asserted here.
     const oldest = /^(?:unknown|just now|\d+[sm]|\d+h \d+m|\d+d(?: \d+h)?)(?: — .*)?$/
-    const row = page.getByRole('row', { name: new RegExp(`^${depth.queue}`) })
-    await expect(row.getByRole('cell')).toHaveText([
-      depth.queue,
-      numberCell(depth.pending),
-      numberCell(depth.reserved),
-      numberCell(depth.delayed),
-      oldest,
-    ])
+    for (const depth of depths) {
+      const row = page
+        .getByRole('row')
+        .filter({ has: page.getByRole('cell', { name: depth.queue, exact: true }) })
+      await expect(row.getByRole('cell')).toHaveText([
+        depth.queue,
+        numberCell(depth.pending),
+        numberCell(depth.reserved),
+        numberCell(depth.delayed),
+        oldest,
+      ])
+    }
   })
 
   test('the jobs page renders the job the worker just ran', async ({ page }) => {
@@ -237,10 +258,10 @@ test.describe('the dashboard against the real binary', () => {
   })
 
   test('the metrics chart draws the attempts in the minute they ran', async ({ page }) => {
-    const history = await readHistory(page, `${base}/#/metrics`)
+    const history = await readHistory(page, `${base}/#/metrics`, queue)
 
     await expect(page.getByRole('heading', { name: 'Metrics' })).toBeVisible()
-    await expect(page.getByLabel('Queue')).toHaveValue('gohorizon-smoke')
+    await expect(page.getByLabel('Queue')).toHaveValue(queue)
     await expect(page.getByRole('button', { name: 'minute' })).toHaveAttribute('aria-pressed', 'true')
 
     // One processed attempt and one failed one, and nothing else in the window: the store is
@@ -273,7 +294,9 @@ test.describe('the dashboard against the real binary', () => {
 
   test('a daily window is empty, and the chip says which resolution is drawn', async ({ page }) => {
     await page.goto(`${base}/#/metrics`)
-    await expect(page.getByLabel('Queue')).toHaveValue('gohorizon-smoke')
+    // Two queues are configured now, so the window under test is chosen rather than assumed.
+    await page.getByLabel('Queue').selectOption(queue)
+    await expect(page.getByLabel('Queue')).toHaveValue(queue)
 
     // Nothing is folded into the daily table until an hour has closed, so a store this young
     // has no daily rows: the page has to say that rather than draw a flat line at zero.
@@ -285,7 +308,7 @@ test.describe('the dashboard against the real binary', () => {
   })
 
   test('the metrics screen draws the average duration the store returned', async ({ page }) => {
-    const history = await readHistory(page, `${base}/#/metrics`)
+    const history = await readHistory(page, `${base}/#/metrics`, queue)
 
     // The failure is the attempt this smoke knows the time of, so its bucket is the one that
     // has to carry a duration column.
@@ -388,6 +411,21 @@ applications:
           memory: 128
         shutdown_grace: 30
         restart_backoff: 1
+      - id: extra
+        queues:
+          - ${extraQueue}
+        balance:
+          strategy: fixed
+        workers:
+          min: 2
+          max: 2
+        worker:
+          sleep: 1
+          tries: 1
+          timeout: 6
+          memory: 128
+        shutdown_grace: 30
+        restart_backoff: 1
 `
 }
 
@@ -443,6 +481,7 @@ interface HistoryBucket {
 
 // History is the window a chart covers: the resolution the store answered at, and its buckets.
 interface History {
+  queue: string
   resolution: 'minute' | 'hourly' | 'daily'
   buckets: HistoryBucket[]
 }
@@ -494,14 +533,27 @@ async function readHealth(page: Page, url: string): Promise<HealthReport> {
   return (await response.json()) as HealthReport
 }
 
-// readHistory opens the metrics screen and returns the payload the page charted, because the
-// response the page itself made is the only honest source for the numbers it should draw.
-async function readHistory(page: Page, url: string): Promise<History> {
-  const [response] = await Promise.all([
-    page.waitForResponse((candidate) => candidate.url().includes('/api/v1/metrics') && candidate.ok()),
+// readHistory opens the metrics screen, selects the queue the smoke ran on, and returns the
+// payload the page charted, because the response the page itself made is the only honest
+// source for the numbers it should draw. With two queues configured the page's default is not
+// the smoke's queue by definition, so the selection is made here rather than assumed.
+async function readHistory(page: Page, url: string, queueName: string): Promise<History> {
+  const metricsResponse = (candidate: { url(): string; ok(): boolean }) =>
+    candidate.url().includes('/api/v1/metrics') && candidate.ok()
+
+  const [initial] = await Promise.all([
+    page.waitForResponse(metricsResponse),
     page.goto(url),
   ])
-  return (await response.json()) as History
+  let history = (await initial.json()) as History
+  if (history.queue !== queueName) {
+    const [selected] = await Promise.all([
+      page.waitForResponse(metricsResponse),
+      page.getByLabel('Queue').selectOption(queueName),
+    ])
+    history = (await selected.json()) as History
+  }
+  return history
 }
 
 // attemptCount is every outcome a bucket holds, which is what the page stacks a column from.
