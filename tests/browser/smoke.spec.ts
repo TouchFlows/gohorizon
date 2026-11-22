@@ -143,13 +143,7 @@ test.describe('the dashboard against the real binary', () => {
     // The fixture's supervisor runs a fixed single worker, so the browser is looking at the
     // only ratio the pages word with one worker in it. Its numbers come from the page's own
     // report rather than from the config this file writes.
-    const [response] = await Promise.all([
-      page.waitForResponse((candidate) => candidate.url().includes('/api/v1/health') && candidate.ok()),
-      page.goto(`${base}/`),
-    ])
-    const report = (await response.json()) as {
-      supervisors?: { id: string; running: number; desired: number }[]
-    }
+    const report = await readHealth(page, `${base}/`)
     const supervisors = report.supervisors ?? []
     expect(supervisors).toHaveLength(1)
     const supervisor = supervisors[0]
@@ -174,6 +168,54 @@ test.describe('the dashboard against the real binary', () => {
     await expect(page.getByRole('heading').filter({ hasText: supervisor.id })).toContainText(
       `${supervisor.running} of ${workerCount(supervisor.desired)} running`,
     )
+  })
+
+  test('the workers screen lists the worker the supervisor started', async ({ page }) => {
+    const report = await readHealth(page, `${base}/#/workers`)
+    const supervisors = report.supervisors ?? []
+    expect(supervisors).toHaveLength(1)
+    const workers = supervisors[0].workers ?? []
+    // The fixture runs one worker, and the table lists the processes the report names.
+    expect(workers).toHaveLength(1)
+
+    const worker = workers[0]
+    await expect(page.locator('tbody tr')).toHaveCount(workers.length)
+
+    // Every cell is the report's own field, so the row shows the process the supervisor is
+    // running rather than a placeholder that merely looks like one.
+    const row = page.getByRole('row', { name: new RegExp(worker.uuid) })
+    await expect(row.getByRole('cell')).toHaveText([
+      worker.uuid,
+      worker.queue,
+      String(worker.pid),
+      worker.state,
+      String(worker.restarts),
+      String(worker.last_exit_code) + (worker.last_exit_reason ? ` ${worker.last_exit_reason}` : ''),
+    ])
+  })
+
+  test('the queues screen shows the depth it inspected for the smoke queue', async ({ page }) => {
+    const report = await readHealth(page, `${base}/#/queues`)
+    const depths = report.queues.depths ?? []
+    const depth = depths.find((candidate) => candidate.queue === queue)
+    if (depth === undefined) {
+      throw new Error(`the report does not list the ${queue} queue`)
+    }
+
+    await expect(page.getByRole('heading', { name: 'Queues' })).toBeVisible()
+    await expect(page.locator('tbody tr')).toHaveCount(depths.length)
+
+    // The counts are the driver's own numbers. The age is formatted by the page from the
+    // browser's clock, so only the shape of it is asserted here.
+    const oldest = /^(?:unknown|just now|\d+[sm]|\d+h \d+m|\d+d(?: \d+h)?)(?: — .*)?$/
+    const row = page.getByRole('row', { name: new RegExp(`^${depth.queue}`) })
+    await expect(row.getByRole('cell')).toHaveText([
+      depth.queue,
+      numberCell(depth.pending),
+      numberCell(depth.reserved),
+      numberCell(depth.delayed),
+      oldest,
+    ])
   })
 
   test('the jobs page renders the job the worker just ran', async ({ page }) => {
@@ -405,6 +447,53 @@ interface History {
   buckets: HistoryBucket[]
 }
 
+// HealthReport is the part of the report the supervisor and queue screens are read against,
+// in the shape the API sends it; the pages convert it, and so does this file.
+interface HealthReport {
+  queues: { connection?: string; error?: string; depths: QueueDepth[] | null }
+  supervisors?: SupervisorReport[] | null
+}
+
+interface QueueDepth {
+  queue: string
+  pending: number | null
+  reserved: number | null
+  delayed: number | null
+  oldest_pending_at: number | null
+  oldest_pending_error?: string
+}
+
+interface SupervisorReport {
+  id: string
+  running: number
+  desired: number
+  crashed: number
+  escalations: number
+  workers: WorkerReport[] | null
+}
+
+interface WorkerReport {
+  uuid: string
+  queue: string
+  pid: number
+  state: string
+  restarts: number
+  last_exit_code: number
+  last_exit_reason?: string
+  adopted: boolean
+  crash_looping: boolean
+}
+
+// readHealth opens a screen and returns the report it rendered, because the response the page
+// itself made is the only honest source for the numbers it should show.
+async function readHealth(page: Page, url: string): Promise<HealthReport> {
+  const [response] = await Promise.all([
+    page.waitForResponse((candidate) => candidate.url().includes('/api/v1/health') && candidate.ok()),
+    page.goto(url),
+  ])
+  return (await response.json()) as HealthReport
+}
+
 // readHistory opens the metrics screen and returns the payload the page charted, because the
 // response the page itself made is the only honest source for the numbers it should draw.
 async function readHistory(page: Page, url: string): Promise<History> {
@@ -430,6 +519,12 @@ function jobCount(count: number): string {
 // workers" — so the smoke reads the ratio back through the same rule it words it with.
 function workerCount(count: number): string {
   return `${count} ${count === 1 ? 'worker' : 'workers'}`
+}
+
+// numberCell is the page's wording for a sampled depth: a count the driver could not report
+// is "unknown", never a zero it did not sample.
+function numberCell(value: number | null): string {
+  return value === null ? 'unknown' : String(value)
 }
 
 // averageMs is what the page divides a bucket's duration by, and what it writes in a column's
