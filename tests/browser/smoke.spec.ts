@@ -352,17 +352,26 @@ test.describe('the dashboard against the real binary', () => {
     // crash to the supervisor, which replaces the worker with a growing backoff. Three of
     // those in a row cross its crash-loop threshold. The counts are polled rather than slept
     // through, and the last crash leaves a twenty-second window for the page to fetch in.
-    test.setTimeout(90_000)
-    for (let crashes = 0; crashes < 3; crashes++) {
+    test.setTimeout(180_000)
+    for (let crashes = 0; crashes < 3; ) {
       const victim = await waitForCrashyWorker(
         'report a worker that can be killed',
         (worker) => worker.pid > 0 && worker.state === 'running',
       )
-      process.kill(victim.pid, 'SIGKILL')
+      if (!killWorker(victim.pid)) {
+        // A reap won the race: the supervisor is already replacing it, so this kill is not
+        // one of the three, and the replacement is what the next pass targets.
+        await waitForCrashyWorker(
+          'replace a worker that was already gone',
+          (worker) => worker.pid !== victim.pid,
+        )
+        continue
+      }
       await waitForCrashyWorker(
         'record the crash',
         (worker) => worker.state === 'crashed' || worker.pid !== victim.pid,
       )
+      crashes++
     }
 
     const looping = await waitForCrashyWorker('be flagged crash looping', (worker) => worker.crash_looping)
@@ -381,6 +390,38 @@ test.describe('the dashboard against the real binary', () => {
     await expect(page.getByRole('heading').filter({ hasText: crashy })).toContainText(
       ', 1 crashed',
       { timeout: 30_000 },
+    )
+
+    // The flag belongs to the streak, and the streak ends only once a replacement outlives
+    // the supervisor's stable window. Nothing sleeps for it: this waits until the report
+    // itself says the flag is gone.
+    await waitFor(
+      'clear the crash loop after a stable run',
+      async () => {
+        const worker = await crashyWorker()
+        return worker !== undefined && worker.state === 'running' && !worker.crash_looping
+      },
+      90_000,
+    )
+
+    const cleared = await readHealth(page, `${base}/`)
+    const steady = cleared.supervisors ?? []
+    const steadyCrashy = steady.find((supervisor) => supervisor.id === crashy)
+    if (steadyCrashy === undefined) {
+      throw new Error(`the report does not list the ${crashy} supervisor`)
+    }
+    expect(steadyCrashy.crashed).toBe(0)
+    expect(steadyCrashy.workers?.[0]?.crash_looping).toBe(false)
+
+    // A healthy worker carries neither suffix, and the sentence is exactly the ratio again.
+    const running = steady.reduce((sum, supervisor) => sum + supervisor.running, 0)
+    const desired = steady.reduce((sum, supervisor) => sum + supervisor.desired, 0)
+    await expect(sentence).toHaveText(
+      `3 supervisors, ${running} of ${workerCount(desired)} running.`,
+    )
+    await page.goto(`${base}/#/workers`)
+    await expect(page.getByRole('heading').filter({ hasText: crashy })).toHaveText(
+      `${crashy} ${steadyCrashy.running} of ${workerCount(steadyCrashy.desired)} running`,
     )
   })
 
@@ -509,8 +550,12 @@ async function getJSON(url: string): Promise<unknown> {
 // waitFor polls until the condition holds, so a slow worker or a slow first inspect is a
 // longer wait rather than a flaky test. Its failure carries the service log, which is where
 // a store it cannot read or a worker that never started says so.
-async function waitFor(what: string, condition: () => Promise<boolean>): Promise<void> {
-  const deadline = Date.now() + pollMs
+async function waitFor(
+  what: string,
+  condition: () => Promise<boolean>,
+  timeoutMs = pollMs,
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs
   let last = ''
   while (Date.now() < deadline) {
     try {
@@ -522,7 +567,7 @@ async function waitFor(what: string, condition: () => Promise<boolean>): Promise
     }
     await new Promise((resolve) => setTimeout(resolve, 250))
   }
-  throw new Error(`the service did not ${what} within ${pollMs} ms (${last})\n${readLog()}`)
+  throw new Error(`the service did not ${what} within ${timeoutMs} ms (${last})\n${readLog()}`)
 }
 
 // HistoryBucket is the part of the metrics payload the charts are drawn from, in the shape the
@@ -628,6 +673,21 @@ function jobCount(count: number): string {
 // workers" — so the smoke reads the ratio back through the same rule it words it with.
 function workerCount(count: number): string {
   return `${count} ${count === 1 ? 'worker' : 'workers'}`
+}
+
+// killWorker sends the crash and reports whether the process was still there. A worker that
+// exited between the report and the signal is the supervisor's to replace, so that race is a
+// retry rather than a test failure.
+function killWorker(pid: number): boolean {
+  try {
+    process.kill(pid, 'SIGKILL')
+    return true
+  } catch (failure) {
+    if ((failure as NodeJS.ErrnoException).code === 'ESRCH') {
+      return false
+    }
+    throw failure
+  }
 }
 
 // crashyWorker reads the third supervisor's worker, which is the one this smoke kills.
