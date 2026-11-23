@@ -10,6 +10,25 @@ import { expect, test, type Page } from '@playwright/test'
 // served by the compiled binary, from the embedded bundle, over a store the worker wrote.
 // This file starts that service in `beforeAll` and ends it in `afterAll`, so nothing has to
 // travel between processes: the config runs one worker, and the worker owns the setup.
+//
+// Hooks. An element the smoke has to find carries a second class beside its styling ones,
+// named `<area>__<part>` and read as a class selector, as in `.jobs__detail` or
+// `.outcome-chart__scale`. It is BEM-ish and appended rather than swapped in
+// (`panel detail jobs__detail`, `shell__status pill pill--warn`), so the hook says what the
+// element is and not how it is drawn, and restyling cannot move the smoke off it. There is
+// no data-testid here: the class attribute is the only marker the pages carry, which is why
+// a hook must not read like a style — a styling class can be renamed freely, a hook only
+// with its reader.
+//
+// A hook exists exactly as long as a reader does. It is added when a test starts reading
+// that element and deleted when the last one stops, so the name and the only test that reads
+// it always land in the same commit; a hook nothing reads is dead markup that still looks
+// load-bearing. The eight read today are .shell__status, .overview__workers,
+// .panel__summary, .workers__supervisor, .jobs__detail, .outcome-chart__total,
+// .outcome-chart__scale and .duration-chart__scale. Everything else in a className is
+// styling. Where the assertion is about what a reader perceives — a heading, a labelled
+// control, a field's label beside its value — the element is found by role, accessible name
+// or structure instead, which is why most elements carry no hook at all.
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..')
 const fixture = path.join(root, 'tests', 'fixtures', 'laravel-app')
