@@ -23,8 +23,6 @@ describe('applyHealth', () => {
     })
   })
 
-  // A blank screen is the one thing the dashboard must not do on a bad start: the shell has an
-  // error to render, and no report is invented to render beside it.
   it('records a first failure without inventing a report', () => {
     expect(applyHealth(empty, { kind: 'failure', message: '/api/v1/health returned 500' })).toEqual({
       report: null,
@@ -33,8 +31,6 @@ describe('applyHealth', () => {
     })
   })
 
-  // A blip must not blank a screen an operator is watching, so the report and its 503 flag
-  // survive the failed poll and only the reason is added.
   it('keeps the report a failed poll could not refresh', () => {
     const loaded = applyHealth(empty, { kind: 'report', report, degraded: true })
     expect(applyHealth(loaded, { kind: 'failure', message: 'fetch failed' })).toEqual({
