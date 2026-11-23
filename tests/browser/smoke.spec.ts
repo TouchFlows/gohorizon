@@ -167,14 +167,58 @@ test.describe('the dashboard against the real binary', () => {
     fs.rmSync(dir, { recursive: true, force: true })
   })
 
-  test('the overview renders the service and the queue it supervises', async ({ page }) => {
-    await page.goto(`${base}/`)
+  test('the overview renders the service, its queues and its telemetry', async ({ page }) => {
+    // Every number below comes from the health payload the page itself fetched, so this reads
+    // the page against its own response instead of against literals. Both panels are found by
+    // their heading rather than by a hook: an operator reads them by that heading too, and a
+    // hook is only for what a heading or a role cannot pick out.
+    const report = await readHealth(page, `${base}/`)
 
     await expect(page.getByRole('heading', { name: 'Overview' })).toBeVisible()
     // The status is read through the header's own hook, not through the pill's styling class.
-    await expect(page.locator('.shell__status')).toHaveText('ok')
-    await expect(page.getByRole('cell', { name: 'gohorizon-smoke', exact: true })).toBeVisible()
-    await expect(page.getByText('EVENTS')).toBeVisible()
+    await expect(page.locator('.shell__status')).toHaveText(report.status)
+
+    // One row per depth the driver inspected, with the counts it reported. A count it could
+    // not sample reads "unknown", which is why the cells go through numberCell. The oldest
+    // pending age is formatted from the browser's clock, so its shape is asserted on the
+    // queues screen, where this same table is drawn, rather than twice here.
+    const depths = report.queues.depths ?? []
+    expect(depths.map((depth) => depth.queue).sort()).toEqual([crashyQueue, extraQueue, queue].sort())
+    const queues = page.locator('section', {
+      has: page.getByRole('heading', { name: 'Queues', exact: true }),
+    })
+    await expect(queues.locator('tbody tr')).toHaveCount(depths.length)
+    for (const depth of depths) {
+      const cells = queues
+        .getByRole('row')
+        .filter({ has: page.getByRole('cell', { name: depth.queue, exact: true }) })
+        .getByRole('cell')
+      await expect(cells.nth(0)).toHaveText(depth.queue)
+      await expect(cells.nth(1)).toHaveText(numberCell(depth.pending))
+      await expect(cells.nth(2)).toHaveText(numberCell(depth.reserved))
+      await expect(cells.nth(3)).toHaveText(numberCell(depth.delayed))
+    }
+
+    // The counters are the ingestion tallies from that same payload, one row per label the
+    // page words. The failure banner beside them is drawn only when ingestion is failing,
+    // which this run is not, so that branch stays unit-only.
+    const counters = page
+      .locator('section', { has: page.getByRole('heading', { name: 'Telemetry', exact: true }) })
+      .locator('li')
+    const tallies = [
+      ['events', report.telemetry.events],
+      ['duplicates', report.telemetry.duplicates],
+      ['invalid', report.telemetry.invalid],
+      ['errors', report.telemetry.errors],
+    ] as const
+    await expect(counters).toHaveCount(tallies.length)
+    for (const [label, value] of tallies) {
+      // The label and its value are separate spans, so the row is picked out by the label and
+      // the value is then read on its own rather than as part of the row's text.
+      const row = counters.filter({ hasText: label })
+      await expect(row).toHaveCount(1)
+      await expect(row.getByText(String(value), { exact: true })).toBeVisible()
+    }
   })
 
   test('the supervisor ratios read singular for a lone worker and plural for a pool', async ({ page }) => {
@@ -691,6 +735,8 @@ interface History {
 // HealthReport is the part of the report the supervisor and queue screens are read against,
 // in the shape the API sends it; the pages convert it, and so does this file.
 interface HealthReport {
+  status: string
+  telemetry: { events: number; duplicates: number; invalid: number; errors: number }
   queues: { connection?: string; error?: string; depths: QueueDepth[] | null }
   supervisors?: SupervisorReport[] | null
 }
