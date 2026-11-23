@@ -29,6 +29,19 @@ import { expect, test, type Page } from '@playwright/test'
 // styling. Where the assertion is about what a reader perceives — a heading, a labelled
 // control, a field's label beside its value — the element is found by role, accessible name
 // or structure instead, which is why most elements carry no hook at all.
+//
+// Two branches are left to the unit tests on purpose, and named here so the gap is stated
+// rather than implied by their absence from the cases below:
+//
+//   - the status pill's warn branch. App.tsx selects `pill--warn` when the health response is
+//     degraded or its status is anything but ok, while the pill's text stays that status.
+//     The service this suite starts is healthy, so only the ok pill is ever read: view.test.ts
+//     covers the model's `healthy` flag, but the warn expression in App.tsx and the class it
+//     selects have no browser reader.
+//   - the telemetry failure banner. Overview draws `Ingestion is failing: <reason>` only when
+//     ingestion reports failing, which a run against a working Redis cannot produce.
+//     view.test.ts asserts the model's `telemetryFailure` instead, which is what the banner
+//     is drawn from.
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..')
 const fixture = path.join(root, 'tests', 'fixtures', 'laravel-app')
