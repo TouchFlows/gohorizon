@@ -176,7 +176,7 @@ test.describe('the dashboard against the real binary', () => {
     // either one does not take the smoke with it.
     const sentence = page.locator('.overview__workers').locator('.panel__summary')
     await expect(sentence).toContainText(
-      `3 supervisors, ${running} of ${workerCount(desired)} running`,
+      `3 supervisors, ${running} of ${countNoun(desired, 'worker')} running`,
     )
 
     // Each supervisor's own header on the workers screen repeats its ratio, with its own
@@ -184,7 +184,7 @@ test.describe('the dashboard against the real binary', () => {
     await page.goto(`${base}/#/workers`)
     const ratios: string[] = []
     for (const supervisor of supervisors) {
-      const ratio = `${supervisor.running} of ${workerCount(supervisor.desired)} running`
+      const ratio = `${supervisor.running} of ${countNoun(supervisor.desired, 'worker')} running`
       ratios.push(ratio)
       await expect(page.getByRole('heading').filter({ hasText: supervisor.id })).toContainText(ratio)
     }
@@ -322,15 +322,15 @@ test.describe('the dashboard against the real binary', () => {
     // The chart names that total twice: in the figure's accessible name, and in its caption,
     // which sits in the figcaption beside the plot rather than in the svg, so it is read from
     // the page instead of from the image.
-    const outcomes = page.getByRole('img', { name: new RegExp(`, ${jobCount(total)}$`) })
+    const outcomes = page.getByRole('img', { name: new RegExp(`, ${countNoun(total, 'job')}$`) })
     await expect(outcomes).toBeVisible()
-    await expect(page.locator('.outcome-chart__total')).toHaveText(jobCount(total))
+    await expect(page.locator('.outcome-chart__total')).toHaveText(countNoun(total, 'job'))
 
     // The label at the top of the plot is the scale the columns are drawn against, so it is the
     // tallest column rather than the window's two attempts: a run that straddles a minute
     // boundary draws each attempt in its own minute, and neither column is worth 2.
     const tallest = Math.max(1, ...history.buckets.map(attemptCount))
-    await expect(outcomes.locator('.outcome-chart__scale')).toHaveText(jobCount(tallest))
+    await expect(outcomes.locator('.outcome-chart__scale')).toHaveText(countNoun(tallest, 'job'))
 
     // The column is named by the minute the failure landed in, formatted by the page itself,
     // so this still asserts the right bucket when a run straddles a minute boundary.
@@ -442,14 +442,14 @@ test.describe('the dashboard against the real binary', () => {
     const desired = loopedSupervisors.reduce((sum, supervisor) => sum + supervisor.desired, 0)
     const sentence = page.locator('.overview__workers').locator('.panel__summary')
     await expect(sentence).toHaveText(
-      `${supervisorCount(loopedSupervisors.length)}, ${running} of ${workerCount(desired)} running, 1 crashed, 1 crash looping.`,
+      `${countNoun(loopedSupervisors.length, 'supervisor')}, ${running} of ${countNoun(desired, 'worker')} running, 1 crashed, 1 crash looping.`,
     )
 
     // The crashing supervisor's own header repeats the suffix, and its worker's row carries
     // the badge of its own: the header is the tally, the state cell is that worker's flag.
     await page.goto(`${base}/#/workers`)
     await expect(page.getByRole('heading').filter({ hasText: crashy })).toHaveText(
-      `${crashy} ${loopedCrashy.running} of ${workerCount(loopedCrashy.desired)} running, 1 crashed`,
+      `${crashy} ${loopedCrashy.running} of ${countNoun(loopedCrashy.desired, 'worker')} running, 1 crashed`,
     )
     // The section is found by its own hook; the heading only picks the crashing supervisor out
     // of the three, so a restyled panel keeps the badge assertion where it belongs.
@@ -490,11 +490,11 @@ test.describe('the dashboard against the real binary', () => {
     const steadyRunning = steady.reduce((sum, supervisor) => sum + supervisor.running, 0)
     const steadyDesired = steady.reduce((sum, supervisor) => sum + supervisor.desired, 0)
     await expect(sentence).toHaveText(
-      `3 supervisors, ${steadyRunning} of ${workerCount(steadyDesired)} running.`,
+      `3 supervisors, ${steadyRunning} of ${countNoun(steadyDesired, 'worker')} running.`,
     )
     await page.goto(`${base}/#/workers`)
     await expect(page.getByRole('heading').filter({ hasText: crashy })).toHaveText(
-      `${crashy} ${steadyCrashy.running} of ${workerCount(steadyCrashy.desired)} running`,
+      `${crashy} ${steadyCrashy.running} of ${countNoun(steadyCrashy.desired, 'worker')} running`,
     )
 
     // The badge was the streak's, so it leaves with it: on the row it was asserted on there is
@@ -774,22 +774,12 @@ function attemptCount(bucket: HistoryBucket): number {
   return bucket.processed + bucket.released + bucket.failed + bucket.timed_out
 }
 
-// jobCount is the outcomes chart's wording for a total and for its scale label — one job is
-// not "1 jobs" — so the smoke reads the page back through the same rule it words it with.
-function jobCount(count: number): string {
-  return `${count} ${count === 1 ? 'job' : 'jobs'}`
-}
-
-// workerCount is the supervisor pages' wording for a ratio's noun — one worker is not "1
-// workers" — so the smoke reads the ratio back through the same rule it words it with.
-function workerCount(count: number): string {
-  return `${count} ${count === 1 ? 'worker' : 'workers'}`
-}
-
-// supervisorCount is the same rule for the Overview sentence's leading noun, mirrored here
-// rather than imported so the smoke can disagree with the page instead of sharing its answer.
-function supervisorCount(count: number): string {
-  return `${count} ${count === 1 ? 'supervisor' : 'supervisors'}`
+// countNoun is the page's rule for a tally — one is singular, everything else including zero
+// takes the plural — and the one place a noun's wording lives on this side. It is mirrored
+// here rather than imported so the smoke can disagree with the page instead of sharing its
+// answer; the page's own countNoun words the same three nouns.
+function countNoun(count: number, noun: string): string {
+  return `${count} ${noun}${count === 1 ? '' : 's'}`
 }
 
 // killWorker sends the crash and reports whether the process was still there. A worker that
