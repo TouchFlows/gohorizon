@@ -40,7 +40,7 @@ export default function Overview({ report, degraded }: { report: HealthReport; d
         </p>
       </section>
 
-      <section className="panel overview__queues">
+      <section className="panel">
         <h2>Queues</h2>
         {model.queueError !== null && (
           <p className="banner">Queue inspection failed: {model.queueError}</p>
@@ -51,7 +51,7 @@ export default function Overview({ report, degraded }: { report: HealthReport; d
         </p>
       </section>
 
-      <section className="panel overview__telemetry">
+      <section className="panel">
         <h2>Telemetry</h2>
         <ul className="counters">
           {model.telemetry.map((row) => (

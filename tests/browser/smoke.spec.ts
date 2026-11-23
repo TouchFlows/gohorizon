@@ -244,12 +244,57 @@ test.describe('the dashboard against the real binary', () => {
     }
   })
 
-  test('the jobs page renders the job the worker just ran', async ({ page }) => {
-    await page.goto(`${base}/#/jobs`)
+  test('a job row opens the detail its payload describes', async ({ page }) => {
+    const payload = await readJobs(page, `${base}/#/jobs`)
+    const job = payload.jobs.find((candidate) => candidate.class === 'App\\Jobs\\RecordMarker')
+    if (job === undefined) {
+      throw new Error('the jobs page was not given the attempt the worker ran')
+    }
 
     await expect(page.getByRole('heading', { name: 'Jobs' })).toBeVisible()
-    await expect(page.getByText('App\\Jobs\\RecordMarker')).toBeVisible()
-    await expect(page.getByRole('cell', { name: 'processed', exact: true })).toBeVisible()
+
+    // The finish time is the cell's own text, formatted by the browser with the page's own
+    // options, so the row is found by what the payload says rather than by its position: an
+    // attempt that lands while the smoke runs shifts the rows but not this one's finish.
+    const finished = await page.evaluate(
+      (finishedAt) =>
+        new Date(finishedAt).toLocaleString(undefined, {
+          year: 'numeric',
+          month: 'short',
+          day: 'numeric',
+          hour: '2-digit',
+          minute: '2-digit',
+          second: '2-digit',
+        }),
+      job.finished_at,
+    )
+    const row = page
+      .getByRole('row')
+      .filter({ has: page.getByRole('cell', { name: job.class, exact: true }) })
+      .filter({ has: page.getByRole('cell', { name: finished, exact: true }) })
+    await expect(row).toHaveCount(1)
+
+    // The pane is opened from the row itself, so the detail is the one that row describes.
+    await row.getByRole('button', { name: 'details' }).click()
+
+    // Every field is the attempt's own value, in the order the pane lists them.
+    const detail = page.locator('.jobs__detail')
+    await expect(detail).toBeVisible()
+    await expect(detail.getByRole('heading', { name: job.class, exact: true })).toBeVisible()
+    await expect(detail.locator('dd')).toHaveText([
+      job.outcome,
+      job.queue,
+      String(job.attempts),
+      durationText(job.duration_ms),
+      finished,
+      job.uuid === '' ? 'none published' : job.uuid,
+      job.job_id,
+      job.id,
+    ])
+
+    // A processed attempt threw nothing, and the pane says so rather than naming an
+    // exception it does not have.
+    await expect(detail).toContainText('No exception was recorded for this attempt.')
   })
 
   test('the failed page renders the attempt with the exception it threw', async ({ page }) => {
@@ -661,6 +706,26 @@ interface WorkerReport {
   crash_looping: boolean
 }
 
+// JobsPayload is a page of job history as the API sends it: the page turns it into rows and
+// a detail pane, and so does this file.
+interface JobsPayload {
+  jobs: JobAttempt[]
+  next_before: string
+}
+
+interface JobAttempt {
+  id: string
+  job_id: string
+  uuid: string
+  class: string
+  queue: string
+  outcome: string
+  attempts: number
+  duration_ms: number
+  finished_at: string
+  exception: { class: string; message: string } | null
+}
+
 // readHealth opens a screen and returns the report it rendered, because the response the page
 // itself made is the only honest source for the numbers it should show.
 async function readHealth(page: Page, url: string): Promise<HealthReport> {
@@ -669,6 +734,16 @@ async function readHealth(page: Page, url: string): Promise<HealthReport> {
     page.goto(url),
   ])
   return (await response.json()) as HealthReport
+}
+
+// readJobs opens the jobs screen and returns the page it was given, because the response the
+// page itself made is the only honest source for the attempt its detail should describe.
+async function readJobs(page: Page, url: string): Promise<JobsPayload> {
+  const [response] = await Promise.all([
+    page.waitForResponse((candidate) => candidate.url().includes('/api/v1/jobs') && candidate.ok()),
+    page.goto(url),
+  ])
+  return (await response.json()) as JobsPayload
 }
 
 // readHistory opens the metrics screen, selects the queue the smoke ran on, and returns the
@@ -766,6 +841,12 @@ function stateCell(worker: WorkerReport): string {
 // is "unknown", never a zero it did not sample.
 function numberCell(value: number | null): string {
   return value === null ? 'unknown' : String(value)
+}
+
+// durationText is the jobs table's and the detail pane's wording for an attempt: milliseconds
+// when it was quick, tenths of a second when it was not.
+function durationText(milliseconds: number): string {
+  return milliseconds < 1000 ? `${milliseconds} ms` : `${(milliseconds / 1000).toFixed(1)} s`
 }
 
 // averageMs is what the page divides a bucket's duration by, and what it writes in a column's
