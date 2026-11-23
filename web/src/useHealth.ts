@@ -16,6 +16,23 @@ export interface HealthState {
   error: string | null
 }
 
+// HealthEvent is one settled refresh: what the service answered with, or why it did not answer
+// at all.
+export type HealthEvent =
+  | { kind: 'report'; report: HealthReport; degraded: boolean }
+  | { kind: 'failure'; message: string }
+
+// applyHealth is the hook's whole state decision, kept out of React so a first load and a
+// failed poll can be read without a DOM: an answer replaces the report and clears the error,
+// while a failure keeps the report an operator is already watching and only records why it is
+// stale. Zero is not an answer here, so a first failure never invents a report.
+export function applyHealth(current: HealthState, event: HealthEvent): HealthState {
+  if (event.kind === 'report') {
+    return { report: event.report, degraded: event.degraded, error: null }
+  }
+  return { ...current, error: event.message }
+}
+
 export function useHealth(): HealthState {
   const [state, setState] = useState<HealthState>({ report: null, degraded: false, error: null })
 
@@ -26,13 +43,13 @@ export function useHealth(): HealthState {
     const load = async () => {
       try {
         const { report, degraded } = await fetchHealth(controller.signal)
-        setState({ report, degraded, error: null })
+        setState((current) => applyHealth(current, { kind: 'report', report, degraded }))
       } catch (failure) {
         if (controller.signal.aborted) {
           return
         }
         const message = failure instanceof Error ? failure.message : String(failure)
-        setState((current) => ({ ...current, error: message }))
+        setState((current) => applyHealth(current, { kind: 'failure', message }))
       }
       if (!controller.signal.aborted) {
         timer = window.setTimeout(load, pollInterval)

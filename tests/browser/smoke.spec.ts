@@ -47,10 +47,11 @@ import { expect, test, type Page } from '@playwright/test'
 //   - the queue inspection banner, `Queue inspection failed: <reason>`, which Overview and
 //     Queues both draw. view.test.ts covers `queueError` and the model's `queueError`; the
 //     banner itself is reached only when the inspector fails, which this Redis does not.
-//   - the shell's refresh failure banner, `Refresh failed: <reason>`, drawn when a poll fails.
-//     Nothing tests it at any level — useHealth has no unit test — so it is a known gap
-//     rather than a branch left to the unit tests, and the `Waiting for the first report…`
-//     line and `connecting` pill on that same first-load path are uncovered too.
+//   - the shell's refresh failure banner, `Refresh failed: <reason>`, drawn when a poll fails,
+//     with the `Waiting for the first report…` line and `connecting` pill before the first
+//     answer. useHealth's decision is a pure applyHealth, covered by useHealth.test.ts for a
+//     first load, a failed poll and the recovery after one; still uncovered at any level are
+//     the banner itself, the poll timer and the abort that ends it.
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..')
 const fixture = path.join(root, 'tests', 'fixtures', 'laravel-app')
