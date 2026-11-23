@@ -30,8 +30,10 @@ import { expect, test, type Page } from '@playwright/test'
 // control, a field's label beside its value — the element is found by role, accessible name
 // or structure instead, which is why most elements carry no hook at all.
 //
-// Two branches are left to the unit tests on purpose, and named here so the gap is stated
-// rather than implied by their absence from the cases below:
+// Coverage gaps. This list is not exhaustive, and the cases below should not be read as though
+// the suite drew every branch: a branch that needs a broken service, a failing inspector or a
+// first answer that never arrives cannot be produced against a working store. The branches
+// known to be out of reach are named here so the gap is stated rather than implied:
 //
 //   - the status pill's warn branch. App.tsx selects `pill--warn` when the health response is
 //     degraded or its status is anything but ok, while the pill's text stays that status.
@@ -42,6 +44,13 @@ import { expect, test, type Page } from '@playwright/test'
 //     ingestion reports failing, which a run against a working Redis cannot produce.
 //     view.test.ts asserts the model's `telemetryFailure` instead, which is what the banner
 //     is drawn from.
+//   - the queue inspection banner, `Queue inspection failed: <reason>`, which Overview and
+//     Queues both draw. view.test.ts covers `queueError` and the model's `queueError`; the
+//     banner itself is reached only when the inspector fails, which this Redis does not.
+//   - the shell's refresh failure banner, `Refresh failed: <reason>`, drawn when a poll fails.
+//     Nothing tests it at any level — useHealth has no unit test — so it is a known gap
+//     rather than a branch left to the unit tests, and the `Waiting for the first report…`
+//     line and `connecting` pill on that same first-load path are uncovered too.
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..')
 const fixture = path.join(root, 'tests', 'fixtures', 'laravel-app')
