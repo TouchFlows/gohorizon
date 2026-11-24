@@ -35,11 +35,6 @@ import { expect, test, type Page } from '@playwright/test'
 // first answer that never arrives cannot be produced against a working store. The branches
 // known to be out of reach are named here so the gap is stated rather than implied:
 //
-//   - the status pill's warn branch. App.tsx selects `pill--warn` when the health response is
-//     degraded or its status is anything but ok, while the pill's text stays that status.
-//     The service this suite starts is healthy, so only the ok pill is ever read: view.test.ts
-//     covers the model's `healthy` flag, but the warn expression in App.tsx and the class it
-//     selects have no browser reader.
 //   - the telemetry failure banner. Overview draws `Ingestion is failing: <reason>` only when
 //     ingestion reports failing, which a run against a working Redis cannot produce.
 //     view.test.ts asserts the model's `telemetryFailure` instead, which is what the banner
@@ -280,6 +275,53 @@ test.describe('the dashboard against the real binary', () => {
 
     // The banner describes the refresh, not the report, so the next answer ends it.
     await expect(banner).toHaveCount(0)
+  })
+
+  test('the status pill warns when the service reports trouble', async ({ page }) => {
+    const report = await readHealth(page, `${base}/`)
+    const pill = page.locator('.shell__status')
+    await expect(pill).toHaveText(report.status)
+    await expect(pill).not.toHaveClass(/pill--warn/)
+
+    // The service this suite starts is healthy for every other case, so the answers that make
+    // the pill warn are dressed in the browser: each poll is forwarded and its own body comes
+    // back with a different status line. The pill's text stays the status the page was told,
+    // so both arms are read against the payload served here rather than a phrase written into
+    // the page.
+    let answer: 'degraded' | 'shaky' | 'recovered' = 'degraded'
+    await page.route('**/api/v1/health', async (route) => {
+      const response = await route.fetch()
+      if (answer === 'recovered') {
+        await route.fulfill({ response })
+        return
+      }
+      const body = (await response.json()) as HealthReport
+      if (answer === 'degraded') {
+        // A degraded lock answers 503 with its report still in the body, so the page has to
+        // warn without any status string changing.
+        await route.fulfill({ status: 503, contentType: 'application/json', body: JSON.stringify(body) })
+        return
+      }
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({ ...body, status: 'shaky' }),
+      })
+    })
+
+    // One poll answers 503: the pill warns while its text is still the report's own status.
+    await expect(pill).toHaveClass(/pill--warn/)
+    await expect(pill).toHaveText(report.status)
+
+    // The next answers 200 with a status that is not ok: the warning comes with the text.
+    answer = 'shaky'
+    await expect(pill).toHaveText('shaky')
+    await expect(pill).toHaveClass(/pill--warn/)
+
+    // A healthy answer again drops the warning rather than leaving it stuck on.
+    answer = 'recovered'
+    await expect(pill).toHaveText(report.status)
+    await expect(pill).not.toHaveClass(/pill--warn/)
   })
 
   test('the supervisor ratios read singular for a lone worker and plural for a pool', async ({ page }) => {
