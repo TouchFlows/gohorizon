@@ -47,11 +47,11 @@ import { expect, test, type Page } from '@playwright/test'
 //   - the queue inspection banner, `Queue inspection failed: <reason>`, which Overview and
 //     Queues both draw. view.test.ts covers `queueError` and the model's `queueError`; the
 //     banner itself is reached only when the inspector fails, which this Redis does not.
-//   - the shell's poll timer and the abort that ends it, and the `Waiting for the first
-//     report…` line and `connecting` pill drawn before any answer arrives. A failed poll is
-//     no longer a gap: the case below injects a 500 into the page's own next poll, which a
-//     healthy store cannot produce by itself, and reads the banner, the report it keeps and
-//     the next answer that clears it.
+//   - the abort that ends the poll on unmount, and the shell's `Waiting for the first
+//     report…` line and `connecting` pill, drawn only before any answer arrives. The poll
+//     timer is not a gap: the failed-poll case below can only reach its banner on a second
+//     poll and only clear it on a third, so a timer that stopped would fail it — what stays
+//     unasserted is the 5 s interval itself, and the abort has no reader at all.
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..')
 const fixture = path.join(root, 'tests', 'fixtures', 'laravel-app')
