@@ -489,6 +489,13 @@ test.describe('the dashboard against the real binary', () => {
     await page.goto(`${base}/#/jobs`)
     await expect(readingJobs).toBeVisible()
 
+    // An answer that was not really held lands in milliseconds and takes the line with it, so
+    // a line that is still up after the page's next health poll, five seconds later, was drawn
+    // while the read was genuinely outstanding. The wait is on the page's own request, so this
+    // is still a poll and not a sleep.
+    await page.waitForResponse((candidate) => candidate.url().includes('/api/v1/health'))
+    await expect(readingJobs).toBeVisible()
+
     // The answer is let through, and the line gives way to the screen it was standing in for.
     const jobsAnswered = page.waitForResponse(
       (candidate) => candidate.url().includes('/api/v1/jobs') && candidate.ok(),
@@ -507,6 +514,10 @@ test.describe('the dashboard against the real binary', () => {
 
     const readingHistory = page.getByText('Reading history…')
     await page.getByRole('link', { name: 'Metrics', exact: true }).click()
+    await expect(readingHistory).toBeVisible()
+
+    // Held for a poll interval here too: the same line would be gone if the answer had landed.
+    await page.waitForResponse((candidate) => candidate.url().includes('/api/v1/health'))
     await expect(readingHistory).toBeVisible()
 
     const historyAnswered = page.waitForResponse(
