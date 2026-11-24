@@ -381,6 +381,12 @@ test.describe('the dashboard against the real binary', () => {
     // A processed attempt threw nothing, and the pane says so rather than naming an
     // exception it does not have.
     await expect(detail).toContainText('No exception was recorded for this attempt.')
+
+    // Close belongs to the pane, not the page: the detail goes away and the table that
+    // described it stays, still listing the row the payload named.
+    await detail.getByRole('button', { name: 'close' }).click()
+    await expect(detail).toHaveCount(0)
+    await expect(row).toBeVisible()
   })
 
   test('the failed page renders the attempt with the exception it threw', async ({ page }) => {
