@@ -4,7 +4,7 @@ import net from 'node:net'
 import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { expect, test, type Page } from '@playwright/test'
+import { expect, test, type Page, type Route } from '@playwright/test'
 
 // The whole point of this suite is that it is not a component test: the pages below are
 // served by the compiled binary, from the embedded bundle, over a store the worker wrote.
@@ -38,17 +38,13 @@ import { expect, test, type Page } from '@playwright/test'
 // The models those banners are drawn from are read in web/src/view.test.ts, and the poll loop
 // in web/src/useHealth.test.ts under fake timers, which is where its 5 s re-arm and the abort
 // that ends it on unmount can be timed.
+// The history banners are dressed the same way, through /api/v1/jobs and /api/v1/metrics, so no
+// branch this suite knows of is left unread.
 //
-// The gaps left are named rather than implied, including the ones this technique could reach:
-//
-//   - the four history banners — `Could not read job history: <reason>`, `Job history is
-//     unavailable`, `Could not read history: <reason>` and `History is unavailable` — drawn by
-//     the Jobs and Metrics screens. A working metrics database answers none of them, but none
-//     of them needs a broken store to be read: an answer to /api/v1/jobs or /api/v1/metrics can
-//     be dressed the way the health answers below are, and none is dressed yet.
-//
-// A branch added for a state no case here reaches belongs in this list, stated, before it
-// belongs in a case that cannot reach it.
+// That is a claim about the branches known today, not a proof of exhaustiveness: a branch added
+// for a state no case here reaches belongs in this paragraph, named, before it belongs in a case
+// that cannot reach it. The list is empty for now, and an empty list is only worth having if it
+// stays honest.
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..')
 const fixture = path.join(root, 'tests', 'fixtures', 'laravel-app')
@@ -453,6 +449,69 @@ test.describe('the dashboard against the real binary', () => {
     await page.getByRole('link', { name: 'Overview', exact: true }).click()
     await expect(page.getByRole('heading', { name: 'Overview', exact: true })).toBeVisible()
     await expect(page.getByText('Ingestion is failing: ingestion is failing right now')).toHaveCount(0)
+  })
+
+  test('the jobs and metrics screens say when their history cannot be read', async ({ page }) => {
+    // Both screens read their own endpoint, so one knob decides what each of them is told: 503
+    // is the answer for a service started without its metrics database, any other failure is
+    // the one that names the status. Neither needs the store to break, which is why both
+    // lines are read here rather than only in the models that word them.
+    let answer: 'unavailable' | 'failing' | 'recovered' = 'unavailable'
+    const dress = async (route: Route) => {
+      if (answer === 'recovered') {
+        await route.continue()
+        return
+      }
+      await route.fulfill({
+        status: answer === 'unavailable' ? 503 : 500,
+        contentType: 'application/json',
+        body: '{}',
+      })
+    }
+    await page.route('**/api/v1/jobs*', dress)
+    await page.route('**/api/v1/metrics*', dress)
+
+    const jobUnavailable = page.getByText('Job history is unavailable:')
+    const jobFailure = page.getByText('Could not read job history: /api/v1/jobs returned 500')
+    const historyUnavailable = page.getByText('History is unavailable:')
+    const historyFailure = page.getByText('Could not read history: /api/v1/metrics returned 500')
+
+    // A 503 is not an error: the screen says the service was started without the database the
+    // history lives in and keeps working around it, without claiming a failed read.
+    await page.goto(`${base}/#/jobs`)
+    await expect(jobUnavailable).toBeVisible()
+    await expect(jobFailure).toHaveCount(0)
+
+    // Any other status is a failure, and the line carries the status the page was answered
+    // with. This screen does not poll, so it has to be asked again: it is left and re-entered
+    // rather than waited on.
+    answer = 'failing'
+    await page.getByRole('link', { name: 'Overview', exact: true }).click()
+    await page.getByRole('link', { name: 'Jobs', exact: true }).click()
+    await expect(jobFailure).toBeVisible()
+    await expect(jobUnavailable).toHaveCount(0)
+
+    // The metrics screen is told the same two ways and words its own lines from the same
+    // statuses: the failure first, then the 503 it reaches by asking a different question.
+    await page.getByRole('link', { name: 'Metrics', exact: true }).click()
+    await expect(historyFailure).toBeVisible()
+    await expect(historyUnavailable).toHaveCount(0)
+
+    answer = 'unavailable'
+    await page.getByRole('button', { name: 'hourly', exact: true }).click()
+    await expect(historyUnavailable).toBeVisible()
+    await expect(historyFailure).toHaveCount(0)
+
+    // A read that answers again clears the line rather than leaving it behind, and the jobs
+    // screen does the same when it is next asked.
+    answer = 'recovered'
+    await page.getByRole('button', { name: 'daily', exact: true }).click()
+    await expect(historyUnavailable).toHaveCount(0)
+    await expect(historyFailure).toHaveCount(0)
+
+    await page.getByRole('link', { name: 'Jobs', exact: true }).click()
+    await expect(jobUnavailable).toHaveCount(0)
+    await expect(jobFailure).toHaveCount(0)
   })
 
   test('the supervisor ratios read singular for a lone worker and plural for a pool', async ({ page }) => {
