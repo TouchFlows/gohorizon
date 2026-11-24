@@ -40,9 +40,11 @@ import { expect, test, type Page, type Route } from '@playwright/test'
 // rewritten on its way through, /api/v1/jobs and /api/v1/metrics are answered on the way
 // through, and the answers the two history screens wait on are held at the socket until the
 // line they stand in for has been read. The pills, banners and waiting lines below are read
-// against payloads this file wrote rather than phrases the page carries. The models behind them
-// are read in web/src/view.test.ts, and the poll loop in web/src/useHealth.test.ts under fake
-// timers, where its 5 s re-arm and the abort that ends it on unmount can be timed.
+// against payloads this file wrote rather than phrases the page carries. All of it goes through
+// the one `dress` helper at the bottom: a case names the endpoints it is dressing and turns the
+// answer it wants read, so no case carries route plumbing of its own. The models behind them are
+// read in web/src/view.test.ts, and the poll loop in web/src/useHealth.test.ts under fake timers,
+// where its 5 s re-arm and the abort that ends it on unmount can be timed.
 //
 // What that leaves is a rule rather than a list: a branch the pages draw and no case reaches
 // belongs in this paragraph, named, because staying unnamed is how it goes unread.
@@ -247,18 +249,11 @@ test.describe('the dashboard against the real binary', () => {
     await expect(page.locator('.shell__status')).toHaveText(report.status)
 
     // The service is healthy for every other case, so the poll is broken from the browser
-    // side: the page's next health request answers 500 once, and the polls after it go
-    // through. Intercepting the request the page itself makes is the only way to fail one
-    // without breaking the store for the cases that follow.
-    let broken = false
-    await page.route('**/api/v1/health', async (route) => {
-      if (broken) {
-        await route.continue()
-        return
-      }
-      broken = true
-      await route.fulfill({ status: 500, contentType: 'application/json', body: '{}' })
-    })
+    // side: the page's next health request answers 500, and the polls after it go through.
+    // Intercepting the request the page itself makes is the only way to fail one without
+    // breaking the store for the cases that follow.
+    const health = await dress(page, '**/api/v1/health')
+    health.answer({ kind: 'status', status: 500 })
 
     // The reason is the page's own wording for a status it will not read, and what stays on
     // screen is the report whose numbers were just read: a blip may not blank the page.
@@ -273,6 +268,7 @@ test.describe('the dashboard against the real binary', () => {
     await expect(kept).toHaveCount(1)
 
     // The banner describes the refresh, not the report, so the next answer ends it.
+    health.answer({ kind: 'through' })
     await expect(banner).toHaveCount(0)
   })
 
@@ -287,38 +283,22 @@ test.describe('the dashboard against the real binary', () => {
     // back with a different status line. The pill's text stays the status the page was told,
     // so both arms are read against the payload served here rather than a phrase written into
     // the page.
-    let answer: 'degraded' | 'shaky' | 'recovered' = 'degraded'
-    await page.route('**/api/v1/health', async (route) => {
-      const response = await route.fetch()
-      if (answer === 'recovered') {
-        await route.fulfill({ response })
-        return
-      }
-      const body = (await response.json()) as HealthReport
-      if (answer === 'degraded') {
-        // A degraded lock answers 503 with its report still in the body, so the page has to
-        // warn without any status string changing.
-        await route.fulfill({ status: 503, contentType: 'application/json', body: JSON.stringify(body) })
-        return
-      }
-      await route.fulfill({
-        status: 200,
-        contentType: 'application/json',
-        body: JSON.stringify({ ...body, status: 'shaky' }),
-      })
-    })
+    const health = await dress(page, '**/api/v1/health')
+    // A degraded lock answers 503 with its report still in the body, so the page has to warn
+    // without any status string changing.
+    health.answer({ kind: 'report', status: 503, edit: (body) => body })
 
     // One poll answers 503: the pill warns while its text is still the report's own status.
     await expect(pill).toHaveClass(/pill--warn/)
     await expect(pill).toHaveText(report.status)
 
     // The next answers 200 with a status that is not ok: the warning comes with the text.
-    answer = 'shaky'
+    health.answer({ kind: 'report', edit: (body) => ({ ...body, status: 'shaky' }) })
     await expect(pill).toHaveText('shaky')
     await expect(pill).toHaveClass(/pill--warn/)
 
     // A healthy answer again drops the warning rather than leaving it stuck on.
-    answer = 'recovered'
+    health.answer({ kind: 'through' })
     await expect(pill).toHaveText(report.status)
     await expect(pill).not.toHaveClass(/pill--warn/)
   })
@@ -329,22 +309,14 @@ test.describe('the dashboard against the real binary', () => {
     // the socket instead: nothing sleeps, and the test releases the answer once it has read
     // what is on screen.
     let releaseFirst!: () => void
-    const held = new Promise<void>((resolve) => {
+    const firstAnswer = new Promise<void>((resolve) => {
       releaseFirst = resolve
     })
     // Every answer fails until the case is ready for one to succeed: a state that only lasts
-    // until the next poll would be read on a timer, not by this test.
-    let answer: 'held' | 'failing' | 'through' = 'held'
-    await page.route('**/api/v1/health', async (route) => {
-      if (answer === 'held') {
-        await held
-      }
-      if (answer === 'through') {
-        await route.continue()
-        return
-      }
-      await route.fulfill({ status: 500, contentType: 'application/json', body: '{}' })
-    })
+    // until the next poll would be read on a timer, not by this test. The first request is
+    // held, and it is the failure it is released into.
+    const health = await dress(page, '**/api/v1/health')
+    health.answer({ kind: 'status', status: 500, until: firstAnswer })
 
     const pill = page.locator('.shell__status')
     const waiting = page.getByText('Waiting for the first report…')
@@ -356,7 +328,6 @@ test.describe('the dashboard against the real binary', () => {
     await expect(pill).not.toHaveClass(/pill--warn/)
     await expect(waiting).toBeVisible()
 
-    answer = 'failing'
     releaseFirst()
 
     // The refresh failed and there is still no report: the reason takes the waiting line's
@@ -368,7 +339,7 @@ test.describe('the dashboard against the real binary', () => {
 
     // One poll is let through, and the status the pill then names is the one that answer
     // carried.
-    answer = 'through'
+    health.answer({ kind: 'through' })
     const response = await page.waitForResponse(
       (candidate) => candidate.url().includes('/api/v1/health') && candidate.ok(),
     )
@@ -395,24 +366,18 @@ test.describe('the dashboard against the real binary', () => {
     // each poll is forwarded and its own report comes back with ingestion failing and with the
     // inspector reporting an error, in the shape the API sends them. The rest of the report is
     // left as the service wrote it, so only these two lines change on screen.
-    let answer: 'failing' | 'unexplained' | 'recovered' = 'failing'
-    await page.route('**/api/v1/health', async (route) => {
-      const response = await route.fetch()
-      if (answer === 'recovered') {
-        await route.fulfill({ response })
-        return
-      }
-      const body = (await response.json()) as HealthReport
-      const telemetry =
-        answer === 'failing'
-          ? { ...body.telemetry, failing: true, last_error: ingestion }
-          : { ...body.telemetry, failing: true }
-      await route.fulfill({
-        status: 200,
-        contentType: 'application/json',
-        body: JSON.stringify({ ...body, telemetry, queues: { ...body.queues, error: inspection } }),
-      })
+    const failing = (body: HealthReport): HealthReport => ({
+      ...body,
+      telemetry: { ...body.telemetry, failing: true, last_error: ingestion },
+      queues: { ...body.queues, error: inspection },
     })
+    const unexplained = (body: HealthReport): HealthReport => ({
+      ...body,
+      telemetry: { ...body.telemetry, failing: true },
+      queues: { ...body.queues, error: inspection },
+    })
+    const health = await dress(page, '**/api/v1/health')
+    health.answer({ kind: 'report', edit: failing })
 
     const telemetryPanel = page.locator('section', {
       has: page.getByRole('heading', { name: 'Telemetry', exact: true }),
@@ -428,7 +393,7 @@ test.describe('the dashboard against the real binary', () => {
 
     // A failing ingestion with no reason in it has its own wording, rather than an empty line
     // where the reason would have been.
-    answer = 'unexplained'
+    health.answer({ kind: 'report', edit: unexplained })
     await expect(
       telemetryPanel.getByText('Ingestion is failing: ingestion is failing right now'),
     ).toBeVisible()
@@ -444,7 +409,7 @@ test.describe('the dashboard against the real binary', () => {
     await expect(page.getByText('Ingestion is failing:')).toHaveCount(0)
 
     // A healthy answer again drops the banner instead of leaving it stuck on the screen.
-    answer = 'recovered'
+    health.answer({ kind: 'through' })
     await expect(page.getByText(`Queue inspection failed: ${inspection}`)).toHaveCount(0)
 
     await page.getByRole('link', { name: 'Overview', exact: true }).click()
@@ -457,20 +422,8 @@ test.describe('the dashboard against the real binary', () => {
     // is the answer for a service started without its metrics database, any other failure is
     // the one that names the status. Neither needs the store to break, which is why both
     // lines are read here rather than only in the models that word them.
-    let answer: 'unavailable' | 'failing' | 'recovered' = 'unavailable'
-    const dress = async (route: Route) => {
-      if (answer === 'recovered') {
-        await route.continue()
-        return
-      }
-      await route.fulfill({
-        status: answer === 'unavailable' ? 503 : 500,
-        contentType: 'application/json',
-        body: '{}',
-      })
-    }
-    await page.route('**/api/v1/jobs*', dress)
-    await page.route('**/api/v1/metrics*', dress)
+    const history = await dress(page, '**/api/v1/jobs*', '**/api/v1/metrics*')
+    history.answer({ kind: 'status', status: 503 })
 
     const jobUnavailable = page.getByText('Job history is unavailable:')
     const jobFailure = page.getByText('Could not read job history: /api/v1/jobs returned 500')
@@ -486,7 +439,7 @@ test.describe('the dashboard against the real binary', () => {
     // Any other status is a failure, and the line carries the status the page was answered
     // with. This screen does not poll, so it has to be asked again: it is left and re-entered
     // rather than waited on.
-    answer = 'failing'
+    history.answer({ kind: 'status', status: 500 })
     await page.getByRole('link', { name: 'Overview', exact: true }).click()
     await page.getByRole('link', { name: 'Jobs', exact: true }).click()
     await expect(jobFailure).toBeVisible()
@@ -498,14 +451,14 @@ test.describe('the dashboard against the real binary', () => {
     await expect(historyFailure).toBeVisible()
     await expect(historyUnavailable).toHaveCount(0)
 
-    answer = 'unavailable'
+    history.answer({ kind: 'status', status: 503 })
     await page.getByRole('button', { name: 'hourly', exact: true }).click()
     await expect(historyUnavailable).toBeVisible()
     await expect(historyFailure).toHaveCount(0)
 
     // A read that answers again clears the line rather than leaving it behind, and the jobs
     // screen does the same when it is next asked.
-    answer = 'recovered'
+    history.answer({ kind: 'through' })
     await page.getByRole('button', { name: 'daily', exact: true }).click()
     await expect(historyUnavailable).toHaveCount(0)
     await expect(historyFailure).toHaveCount(0)
@@ -526,10 +479,8 @@ test.describe('the dashboard against the real binary', () => {
     const jobsHeld = new Promise<void>((resolve) => {
       releaseJobs = resolve
     })
-    await page.route('**/api/v1/jobs*', async (route) => {
-      await jobsHeld
-      await route.continue()
-    })
+    const jobsRead = await dress(page, '**/api/v1/jobs*')
+    jobsRead.answer({ kind: 'through', until: jobsHeld })
 
     const readingJobs = page.getByText('Reading job history…')
 
@@ -545,17 +496,14 @@ test.describe('the dashboard against the real binary', () => {
     releaseJobs()
     await jobsAnswered
     await expect(readingJobs).toHaveCount(0)
-    await page.unroute('**/api/v1/jobs*')
 
     // The metrics screen holds the same kind of line for its own read.
     let releaseHistory!: () => void
     const historyHeld = new Promise<void>((resolve) => {
       releaseHistory = resolve
     })
-    await page.route('**/api/v1/metrics*', async (route) => {
-      await historyHeld
-      await route.continue()
-    })
+    const historyRead = await dress(page, '**/api/v1/metrics*')
+    historyRead.answer({ kind: 'through', until: historyHeld })
 
     const readingHistory = page.getByText('Reading history…')
     await page.getByRole('link', { name: 'Metrics', exact: true }).click()
@@ -575,14 +523,10 @@ test.describe('the dashboard against the real binary', () => {
     // every health answer comes back with an empty depth list, which is what the screen reads
     // to decide it has nothing to chart. The lines it draws then are its own.
     await readHealth(page, `${base}/#/metrics`)
-    await page.route('**/api/v1/health', async (route) => {
-      const response = await route.fetch()
-      const body = (await response.json()) as HealthReport
-      await route.fulfill({
-        status: 200,
-        contentType: 'application/json',
-        body: JSON.stringify({ ...body, queues: { ...body.queues, depths: [] } }),
-      })
+    const health = await dress(page, '**/api/v1/health')
+    health.answer({
+      kind: 'report',
+      edit: (body) => ({ ...body, queues: { ...body.queues, depths: [] } }),
     })
 
     const nothingYet = page.getByText('No queue has been sampled yet, so there is no history to chart.')
@@ -595,7 +539,7 @@ test.describe('the dashboard against the real binary', () => {
     await expect(queueChoice.locator('option:checked')).toHaveText('none sampled')
 
     // A real answer again puts the queues back, and the line goes with the state it described.
-    await page.unroute('**/api/v1/health')
+    health.answer({ kind: 'through' })
     await expect(nothingYet).toHaveCount(0)
     await expect(queueChoice).toBeEnabled()
   })
@@ -1224,6 +1168,66 @@ async function readHistory(page: Page, url: string, queueName: string): Promise<
     history = (await selected.json()) as History
   }
   return history
+}
+
+// An answer the page can be given in place of the service's own. Every failure below is
+// produced this way, because the service the suite starts is healthy for all of them: the
+// request the page itself makes is intercepted and answered from a knob the case turns.
+//   through — the service's own answer, untouched: the state a case was dressing is over.
+//   status  — a status with no report in it, worded by whatever the page says for that status.
+//   report  — the service's own report with these edits, so only what the case names differs on
+//             screen. A degraded lock answers 503 with its report still in the body, so that
+//             status is the answer's, not the body's.
+// until holds any of them at the socket, because some states only last while a read is in
+// flight. A held request must be released while the page that asked for it is still mounted:
+// leaving a screen aborts its read.
+type Gate = { until?: Promise<void> }
+type Answer =
+  | (Gate & { kind: 'through' })
+  | (Gate & { kind: 'status'; status: number })
+  | (Gate & { kind: 'report'; edit: (report: HealthReport) => HealthReport; status?: number })
+
+// dress answers every endpoint it is given from one knob, so a case reads as the answers it
+// turns through rather than as route plumbing, and a state that lasts until the case says it
+// is over does not depend on a poll landing while an assertion is reading.
+async function dress(page: Page, ...endpoints: string[]) {
+  let answer: Answer = { kind: 'through' }
+  for (const endpoint of endpoints) {
+    await page.route(endpoint, async (route: Route) => {
+      // The gate is read first and the answer after it: a case that holds a request switches
+      // the knob and then releases, so the released request gets the answer it turned to.
+      const gate = answer.until
+      if (gate !== undefined) {
+        await gate
+      }
+      const answering = answer
+      if (answering.kind === 'through') {
+        await route.continue()
+        return
+      }
+      if (answering.kind === 'status') {
+        await route.fulfill({
+          status: answering.status,
+          contentType: 'application/json',
+          body: '{}',
+        })
+        return
+      }
+      // The service's own report, so nothing but what the case edits changes on screen.
+      const response = await route.fetch()
+      const report = (await response.json()) as HealthReport
+      await route.fulfill({
+        status: answering.status ?? 200,
+        contentType: 'application/json',
+        body: JSON.stringify(answering.edit(report)),
+      })
+    })
+  }
+  return {
+    answer(next: Answer) {
+      answer = next
+    },
+  }
 }
 
 // attemptCount is every outcome a bucket holds, which is what the page stacks a column from.
