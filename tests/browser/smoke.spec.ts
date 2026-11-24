@@ -31,9 +31,9 @@ import { expect, test, type Page } from '@playwright/test'
 // or structure instead, which is why most elements carry no hook at all.
 //
 // Coverage gaps. This list is not exhaustive, and the cases below should not be read as though
-// the suite drew every branch: a branch that needs a broken service, a failing inspector or a
-// first answer that never arrives cannot be produced against a working store. The branches
-// known to be out of reach are named here so the gap is stated rather than implied:
+// the suite drew every branch: a branch that needs a broken service or a failing inspector
+// cannot be produced against a working store. The branches known to be out of reach are named
+// here so the gap is stated rather than implied:
 //
 //   - the telemetry failure banner. Overview draws `Ingestion is failing: <reason>` only when
 //     ingestion reports failing, which a run against a working Redis cannot produce.
@@ -42,11 +42,10 @@ import { expect, test, type Page } from '@playwright/test'
 //   - the queue inspection banner, `Queue inspection failed: <reason>`, which Overview and
 //     Queues both draw. view.test.ts covers `queueError` and the model's `queueError`; the
 //     banner itself is reached only when the inspector fails, which this Redis does not.
-//   - the abort that ends the poll on unmount, and the shell's `Waiting for the first
-//     report…` line and `connecting` pill, drawn only before any answer arrives. The poll
-//     timer is not a gap: the failed-poll case below can only reach its banner on a second
-//     poll and only clear it on a third, so a timer that stopped would fail it — what stays
-//     unasserted is the 5 s interval itself, and the abort has no reader at all.
+//   - the abort that ends the poll on unmount, which has no reader at all. Every other branch
+//     of the shell is read somewhere, though the 5 s interval itself is never asserted: the
+//     failed-poll case below can only reach its banner on a second poll and only clear it on
+//     a third, so a timer that stopped would fail it.
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..')
 const fixture = path.join(root, 'tests', 'fixtures', 'laravel-app')
@@ -322,6 +321,61 @@ test.describe('the dashboard against the real binary', () => {
     answer = 'recovered'
     await expect(pill).toHaveText(report.status)
     await expect(pill).not.toHaveClass(/pill--warn/)
+  })
+
+  test('the shell says it is connecting until the first report arrives', async ({ page }) => {
+    // The service is healthy and answers in milliseconds, so the state the shell draws without
+    // a report would be gone before a reader saw it. The page's own first request is held at
+    // the socket instead: nothing sleeps, and the test releases the answer once it has read
+    // what is on screen.
+    let releaseFirst!: () => void
+    const held = new Promise<void>((resolve) => {
+      releaseFirst = resolve
+    })
+    // Every answer fails until the case is ready for one to succeed: a state that only lasts
+    // until the next poll would be read on a timer, not by this test.
+    let answer: 'held' | 'failing' | 'through' = 'held'
+    await page.route('**/api/v1/health', async (route) => {
+      if (answer === 'held') {
+        await held
+      }
+      if (answer === 'through') {
+        await route.continue()
+        return
+      }
+      await route.fulfill({ status: 500, contentType: 'application/json', body: '{}' })
+    })
+
+    const pill = page.locator('.shell__status')
+    const waiting = page.getByText('Waiting for the first report…')
+    await page.goto(`${base}/`)
+
+    // Nothing has answered: the pill is the word for that, without the warn class, and the
+    // shell says what it is waiting for.
+    await expect(pill).toHaveText('connecting')
+    await expect(pill).not.toHaveClass(/pill--warn/)
+    await expect(waiting).toBeVisible()
+
+    answer = 'failing'
+    releaseFirst()
+
+    // The refresh failed and there is still no report: the reason takes the waiting line's
+    // place, the banner carries no suffix because there is no report to keep, and the pill is
+    // still waiting for a first answer rather than naming one.
+    await expect(page.getByText('Refresh failed: /api/v1/health returned 500', { exact: true })).toBeVisible()
+    await expect(waiting).toHaveCount(0)
+    await expect(pill).toHaveText('connecting')
+
+    // One poll is let through, and the status the pill then names is the one that answer
+    // carried.
+    answer = 'through'
+    const response = await page.waitForResponse(
+      (candidate) => candidate.url().includes('/api/v1/health') && candidate.ok(),
+    )
+    const report = (await response.json()) as HealthReport
+    await expect(pill).toHaveText(report.status)
+    await expect(pill).not.toHaveClass(/pill--warn/)
+    await expect(waiting).toHaveCount(0)
   })
 
   test('the supervisor ratios read singular for a lone worker and plural for a pool', async ({ page }) => {
