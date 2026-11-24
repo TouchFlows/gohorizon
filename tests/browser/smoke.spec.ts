@@ -37,9 +37,18 @@ import { expect, test, type Page } from '@playwright/test'
 // below are then read against payloads this file wrote rather than phrases the page carries.
 // The models those banners are drawn from are read in web/src/view.test.ts, and the poll loop
 // in web/src/useHealth.test.ts under fake timers, which is where its 5 s re-arm and the abort
-// that ends it on unmount can be timed. What is left unread is only what a state this suite
-// cannot produce would reach: a branch added for a broken store belongs in this paragraph,
-// stated, before it belongs in a case that cannot reach it.
+// that ends it on unmount can be timed.
+//
+// The gaps left are named rather than implied, including the ones this technique could reach:
+//
+//   - the four history banners — `Could not read job history: <reason>`, `Job history is
+//     unavailable`, `Could not read history: <reason>` and `History is unavailable` — drawn by
+//     the Jobs and Metrics screens. A working metrics database answers none of them, but none
+//     of them needs a broken store to be read: an answer to /api/v1/jobs or /api/v1/metrics can
+//     be dressed the way the health answers below are, and none is dressed yet.
+//
+// A branch added for a state no case here reaches belongs in this list, stated, before it
+// belongs in a case that cannot reach it.
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..')
 const fixture = path.join(root, 'tests', 'fixtures', 'laravel-app')
@@ -433,7 +442,9 @@ test.describe('the dashboard against the real binary', () => {
     await page.getByRole('link', { name: 'All queues' }).click()
     await expect(page.getByRole('heading', { name: 'Queues', exact: true })).toBeVisible()
     await expect(page.getByText(`Queue inspection failed: ${inspection}`)).toBeVisible()
-    await expect(page.getByText('Ingestion is failing: ingestion is failing right now')).toHaveCount(0)
+    // The prefix, not the wording it carried on Overview: a line drawn here with any reason at
+    // all is a line this screen should not have.
+    await expect(page.getByText('Ingestion is failing:')).toHaveCount(0)
 
     // A healthy answer again drops the banner instead of leaving it stuck on the screen.
     answer = 'recovered'
