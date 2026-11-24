@@ -31,21 +31,21 @@ import { expect, test, type Page, type Route } from '@playwright/test'
 // or structure instead, which is why most elements carry no hook at all.
 //
 // Coverage. This is not a checklist of every branch, and the cases below should not be read as
-// though the suite drew all of them. A state that needs the store itself to break cannot be
-// produced against a working Redis, so the failures the pages render are dressed in the
-// browser instead: a health answer is rewritten on its way through, and the pills and banners
-// below are then read against payloads this file wrote rather than phrases the page carries.
-// The models those banners are drawn from are read in web/src/view.test.ts, and the poll loop
-// in web/src/useHealth.test.ts under fake timers, which is where its 5 s re-arm and the abort
-// that ends it on unmount can be timed.
-// The history banners are dressed the same way, through /api/v1/jobs and /api/v1/metrics, and
-// the lines the two screens draw while a read is in flight are held at the socket until they
-// can be read, so no branch this suite knows of is left unread.
+// though the suite drew all of them. Nothing here claims the suite is complete: it has claimed
+// that three times and been wrong each time — the paragraph said nothing was left unread while
+// the waiting lines on the Jobs and Metrics screens were drawn by the pages and read by nobody.
+// What follows is where the work lives, not where it ends.
 //
-// That is a claim about the branches known today, not a proof of exhaustiveness: a branch added
-// for a state no case here reaches belongs in this paragraph, named, before it belongs in a case
-// that cannot reach it. The list is empty for now, and an empty list is only worth having if it
-// stays honest.
+// A state that needs the store itself to break is dressed in the browser: a health answer is
+// rewritten on its way through, /api/v1/jobs and /api/v1/metrics are answered on the way
+// through, and the answers the two history screens wait on are held at the socket until the
+// line they stand in for has been read. The pills, banners and waiting lines below are read
+// against payloads this file wrote rather than phrases the page carries. The models behind them
+// are read in web/src/view.test.ts, and the poll loop in web/src/useHealth.test.ts under fake
+// timers, where its 5 s re-arm and the abort that ends it on unmount can be timed.
+//
+// What that leaves is a rule rather than a list: a branch the pages draw and no case reaches
+// belongs in this paragraph, named, because staying unnamed is how it goes unread.
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..')
 const fixture = path.join(root, 'tests', 'fixtures', 'laravel-app')
