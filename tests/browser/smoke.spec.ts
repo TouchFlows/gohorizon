@@ -38,8 +38,9 @@ import { expect, test, type Page, type Route } from '@playwright/test'
 // The models those banners are drawn from are read in web/src/view.test.ts, and the poll loop
 // in web/src/useHealth.test.ts under fake timers, which is where its 5 s re-arm and the abort
 // that ends it on unmount can be timed.
-// The history banners are dressed the same way, through /api/v1/jobs and /api/v1/metrics, so no
-// branch this suite knows of is left unread.
+// The history banners are dressed the same way, through /api/v1/jobs and /api/v1/metrics, and
+// the lines the two screens draw while a read is in flight are held at the socket until they
+// can be read, so no branch this suite knows of is left unread.
 //
 // That is a claim about the branches known today, not a proof of exhaustiveness: a branch added
 // for a state no case here reaches belongs in this paragraph, named, before it belongs in a case
@@ -512,6 +513,91 @@ test.describe('the dashboard against the real binary', () => {
     await page.getByRole('link', { name: 'Jobs', exact: true }).click()
     await expect(jobUnavailable).toHaveCount(0)
     await expect(jobFailure).toHaveCount(0)
+  })
+
+  test('the jobs and metrics screens say they are still reading', async ({ page }) => {
+    // A local service answers in milliseconds, so the line each screen draws while its read is
+    // in flight would be gone before a reader saw it. Both answers are held at the socket and
+    // released once the line has been read: nothing sleeps, and the line is read on the test's
+    // terms rather than a timer's.
+    // One screen at a time: leaving a screen aborts the read it had in flight, so a held answer
+    // is released while the page that asked for it is still there to receive it.
+    let releaseJobs!: () => void
+    const jobsHeld = new Promise<void>((resolve) => {
+      releaseJobs = resolve
+    })
+    await page.route('**/api/v1/jobs*', async (route) => {
+      await jobsHeld
+      await route.continue()
+    })
+
+    const readingJobs = page.getByText('Reading job history…')
+
+    // Nothing has answered the jobs screen: it says what it is waiting for, and no table is
+    // drawn empty in the meantime.
+    await page.goto(`${base}/#/jobs`)
+    await expect(readingJobs).toBeVisible()
+
+    // The answer is let through, and the line gives way to the screen it was standing in for.
+    const jobsAnswered = page.waitForResponse(
+      (candidate) => candidate.url().includes('/api/v1/jobs') && candidate.ok(),
+    )
+    releaseJobs()
+    await jobsAnswered
+    await expect(readingJobs).toHaveCount(0)
+    await page.unroute('**/api/v1/jobs*')
+
+    // The metrics screen holds the same kind of line for its own read.
+    let releaseHistory!: () => void
+    const historyHeld = new Promise<void>((resolve) => {
+      releaseHistory = resolve
+    })
+    await page.route('**/api/v1/metrics*', async (route) => {
+      await historyHeld
+      await route.continue()
+    })
+
+    const readingHistory = page.getByText('Reading history…')
+    await page.getByRole('link', { name: 'Metrics', exact: true }).click()
+    await expect(readingHistory).toBeVisible()
+
+    const historyAnswered = page.waitForResponse(
+      (candidate) => candidate.url().includes('/api/v1/metrics') && candidate.ok(),
+    )
+    releaseHistory()
+    await historyAnswered
+    await expect(readingHistory).toHaveCount(0)
+    await expect(page.getByText(/^Outcomes per minute for /)).toBeVisible()
+  })
+
+  test('the metrics screen says when no queue has been sampled', async ({ page }) => {
+    // The service samples the queues it is configured with, so a store with none is dressed:
+    // every health answer comes back with an empty depth list, which is what the screen reads
+    // to decide it has nothing to chart. The lines it draws then are its own.
+    await readHealth(page, `${base}/#/metrics`)
+    await page.route('**/api/v1/health', async (route) => {
+      const response = await route.fetch()
+      const body = (await response.json()) as HealthReport
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({ ...body, queues: { ...body.queues, depths: [] } }),
+      })
+    })
+
+    const nothingYet = page.getByText('No queue has been sampled yet, so there is no history to chart.')
+    const queueChoice = page.getByLabel('Queue')
+
+    // The next poll carries the dressed answer: the screen says there is nothing to chart and
+    // offers no queue to choose, rather than charting an empty window for a queue nobody named.
+    await expect(nothingYet).toBeVisible()
+    await expect(queueChoice).toBeDisabled()
+    await expect(queueChoice.locator('option:checked')).toHaveText('none sampled')
+
+    // A real answer again puts the queues back, and the line goes with the state it described.
+    await page.unroute('**/api/v1/health')
+    await expect(nothingYet).toHaveCount(0)
+    await expect(queueChoice).toBeEnabled()
   })
 
   test('the supervisor ratios read singular for a lone worker and plural for a pool', async ({ page }) => {
