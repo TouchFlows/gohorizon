@@ -30,22 +30,16 @@ import { expect, test, type Page } from '@playwright/test'
 // control, a field's label beside its value — the element is found by role, accessible name
 // or structure instead, which is why most elements carry no hook at all.
 //
-// Coverage gaps. This list is not exhaustive, and the cases below should not be read as though
-// the suite drew every branch: a branch that needs a broken service or a failing inspector
-// cannot be produced against a working store. The branches known to be out of reach are named
-// here so the gap is stated rather than implied:
-//
-//   - the telemetry failure banner. Overview draws `Ingestion is failing: <reason>` only when
-//     ingestion reports failing, which a run against a working Redis cannot produce.
-//     view.test.ts asserts the model's `telemetryFailure` instead, which is what the banner
-//     is drawn from.
-//   - the queue inspection banner, `Queue inspection failed: <reason>`, which Overview and
-//     Queues both draw. view.test.ts covers `queueError` and the model's `queueError`; the
-//     banner itself is reached only when the inspector fails, which this Redis does not.
-//
-// Every other branch of the shell is read somewhere. The poll loop is read in
-// web/src/useHealth.test.ts on fake timers, where both the 5 s re-arm and the abort that ends
-// the loop on unmount can be timed, neither of which a browser here would wait around for.
+// Coverage. This is not a checklist of every branch, and the cases below should not be read as
+// though the suite drew all of them. A state that needs the store itself to break cannot be
+// produced against a working Redis, so the failures the pages render are dressed in the
+// browser instead: a health answer is rewritten on its way through, and the pills and banners
+// below are then read against payloads this file wrote rather than phrases the page carries.
+// The models those banners are drawn from are read in web/src/view.test.ts, and the poll loop
+// in web/src/useHealth.test.ts under fake timers, which is where its 5 s re-arm and the abort
+// that ends it on unmount can be timed. What is left unread is only what a state this suite
+// cannot produce would reach: a branch added for a broken store belongs in this paragraph,
+// stated, before it belongs in a case that cannot reach it.
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..')
 const fixture = path.join(root, 'tests', 'fixtures', 'laravel-app')
@@ -217,8 +211,8 @@ test.describe('the dashboard against the real binary', () => {
     }
 
     // The counters are the ingestion tallies from that same payload, one row per label the
-    // page words. The failure banner beside them is drawn only when ingestion is failing,
-    // which this run is not, so that branch stays unit-only.
+    // page words. The failure banner beside them is read in `the overview and queues screens
+    // name what could not report` below, from an answer that reports ingestion failing.
     const counters = page
       .locator('section', { has: page.getByRole('heading', { name: 'Telemetry', exact: true }) })
       .locator('li')
@@ -376,6 +370,78 @@ test.describe('the dashboard against the real binary', () => {
     await expect(pill).toHaveText(report.status)
     await expect(pill).not.toHaveClass(/pill--warn/)
     await expect(waiting).toHaveCount(0)
+  })
+
+  test('the overview and queues screens name what could not report', async ({ page }) => {
+    await readHealth(page, `${base}/`)
+
+    // Both reasons are written into the answer the page is given below, so the banners are
+    // read against this file's words rather than a phrase the page carries.
+    const ingestion = 'redis is down'
+    const inspection = 'goHorizon:inspect failed'
+
+    // Nothing in the report this run just rendered has failed, so neither line is drawn, not
+    // even with an empty reason: what appears below appears because the payload changed.
+    await expect(page.getByText('Ingestion is failing:')).toHaveCount(0)
+    await expect(page.getByText('Queue inspection failed:')).toHaveCount(0)
+
+    // The service is healthy for every other case, so the failure is dressed in the browser:
+    // each poll is forwarded and its own report comes back with ingestion failing and with the
+    // inspector reporting an error, in the shape the API sends them. The rest of the report is
+    // left as the service wrote it, so only these two lines change on screen.
+    let answer: 'failing' | 'unexplained' | 'recovered' = 'failing'
+    await page.route('**/api/v1/health', async (route) => {
+      const response = await route.fetch()
+      if (answer === 'recovered') {
+        await route.fulfill({ response })
+        return
+      }
+      const body = (await response.json()) as HealthReport
+      const telemetry =
+        answer === 'failing'
+          ? { ...body.telemetry, failing: true, last_error: ingestion }
+          : { ...body.telemetry, failing: true }
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({ ...body, telemetry, queues: { ...body.queues, error: inspection } }),
+      })
+    })
+
+    const telemetryPanel = page.locator('section', {
+      has: page.getByRole('heading', { name: 'Telemetry', exact: true }),
+    })
+    const queuesPanel = page.locator('section', {
+      has: page.getByRole('heading', { name: 'Queues', exact: true }),
+    })
+
+    // The next poll brings both lines, each under the panel it belongs to and each naming the
+    // reason the payload carried.
+    await expect(telemetryPanel.getByText(`Ingestion is failing: ${ingestion}`)).toBeVisible()
+    await expect(queuesPanel.getByText(`Queue inspection failed: ${inspection}`)).toBeVisible()
+
+    // A failing ingestion with no reason in it has its own wording, rather than an empty line
+    // where the reason would have been.
+    answer = 'unexplained'
+    await expect(
+      telemetryPanel.getByText('Ingestion is failing: ingestion is failing right now'),
+    ).toBeVisible()
+
+    // Queues draws the inspection banner from the same report, so the screen that lists the
+    // queues says why it could not inspect them, and the ingestion line stays on Overview,
+    // which is the only page with a telemetry panel.
+    await page.getByRole('link', { name: 'All queues' }).click()
+    await expect(page.getByRole('heading', { name: 'Queues', exact: true })).toBeVisible()
+    await expect(page.getByText(`Queue inspection failed: ${inspection}`)).toBeVisible()
+    await expect(page.getByText('Ingestion is failing: ingestion is failing right now')).toHaveCount(0)
+
+    // A healthy answer again drops the banner instead of leaving it stuck on the screen.
+    answer = 'recovered'
+    await expect(page.getByText(`Queue inspection failed: ${inspection}`)).toHaveCount(0)
+
+    await page.getByRole('link', { name: 'Overview', exact: true }).click()
+    await expect(page.getByRole('heading', { name: 'Overview', exact: true })).toBeVisible()
+    await expect(page.getByText('Ingestion is failing: ingestion is failing right now')).toHaveCount(0)
   })
 
   test('the supervisor ratios read singular for a lone worker and plural for a pool', async ({ page }) => {
@@ -899,7 +965,14 @@ interface History {
 // in the shape the API sends it; the pages convert it, and so does this file.
 interface HealthReport {
   status: string
-  telemetry: { events: number; duplicates: number; invalid: number; errors: number }
+  telemetry: {
+    events: number
+    duplicates: number
+    invalid: number
+    errors: number
+    failing: boolean
+    last_error?: string
+  }
   queues: { connection?: string; error?: string; depths: QueueDepth[] | null }
   supervisors?: SupervisorReport[] | null
 }
