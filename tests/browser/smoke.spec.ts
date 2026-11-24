@@ -47,11 +47,11 @@ import { expect, test, type Page } from '@playwright/test'
 //   - the queue inspection banner, `Queue inspection failed: <reason>`, which Overview and
 //     Queues both draw. view.test.ts covers `queueError` and the model's `queueError`; the
 //     banner itself is reached only when the inspector fails, which this Redis does not.
-//   - the shell's refresh failure banner, `Refresh failed: <reason>`, drawn when a poll fails,
-//     with the `Waiting for the first report…` line and `connecting` pill before the first
-//     answer. useHealth's decision is a pure applyHealth, covered by useHealth.test.ts for a
-//     first load, a failed poll and the recovery after one; still uncovered at any level are
-//     the banner itself, the poll timer and the abort that ends it.
+//   - the shell's poll timer and the abort that ends it, and the `Waiting for the first
+//     report…` line and `connecting` pill drawn before any answer arrives. A failed poll is
+//     no longer a gap: the case below injects a 500 into the page's own next poll, which a
+//     healthy store cannot produce by itself, and reads the banner, the report it keeps and
+//     the next answer that clears it.
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..')
 const fixture = path.join(root, 'tests', 'fixtures', 'laravel-app')
@@ -242,6 +242,44 @@ test.describe('the dashboard against the real binary', () => {
       await expect(row).toHaveCount(1)
       await expect(row.getByText(String(value), { exact: true })).toBeVisible()
     }
+  })
+
+  test('a failed refresh keeps the last report and says why it is old', async ({ page }) => {
+    const report = await readHealth(page, `${base}/`)
+    const depths = report.queues.depths ?? []
+    if (depths.length === 0) {
+      throw new Error('the health report listed no queues for the failed poll to keep on screen')
+    }
+    await expect(page.locator('.shell__status')).toHaveText(report.status)
+
+    // The service is healthy for every other case, so the poll is broken from the browser
+    // side: the page's next health request answers 500 once, and the polls after it go
+    // through. Intercepting the request the page itself makes is the only way to fail one
+    // without breaking the store for the cases that follow.
+    let broken = false
+    await page.route('**/api/v1/health', async (route) => {
+      if (broken) {
+        await route.continue()
+        return
+      }
+      broken = true
+      await route.fulfill({ status: 500, contentType: 'application/json', body: '{}' })
+    })
+
+    // The reason is the page's own wording for a status it will not read, and what stays on
+    // screen is the report whose numbers were just read: a blip may not blank the page.
+    const banner = page.getByText('Refresh failed: /api/v1/health returned 500')
+    await expect(banner).toBeVisible()
+    await expect(banner).toContainText('Showing the last report.')
+    await expect(page.locator('.shell__status')).toHaveText(report.status)
+    const kept = page
+      .locator('section', { has: page.getByRole('heading', { name: 'Queues', exact: true }) })
+      .getByRole('row')
+      .filter({ has: page.getByRole('cell', { name: depths[0].queue, exact: true }) })
+    await expect(kept).toHaveCount(1)
+
+    // The banner describes the refresh, not the report, so the next answer ends it.
+    await expect(banner).toHaveCount(0)
   })
 
   test('the supervisor ratios read singular for a lone worker and plural for a pool', async ({ page }) => {
