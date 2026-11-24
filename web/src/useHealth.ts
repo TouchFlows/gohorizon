@@ -21,6 +21,10 @@ type HealthEvent =
   | { kind: 'report'; report: HealthReport; degraded: boolean }
   | { kind: 'failure'; message: string }
 
+// HealthFetcher is the one request the loop makes. It is a parameter rather than the import,
+// so the loop can be run without a service.
+type HealthFetcher = (signal: AbortSignal) => Promise<{ report: HealthReport; degraded: boolean }>
+
 // applyHealth is the hook's state decision, kept out of React so both outcomes can be read
 // without a DOM: an answer replaces the report, a failure only records why it is stale.
 export function applyHealth(current: HealthState, event: HealthEvent): HealthState {
@@ -30,34 +34,45 @@ export function applyHealth(current: HealthState, event: HealthEvent): HealthSta
   return { ...current, error: event.message }
 }
 
+// pollHealth asks once, reports what came back, and asks again on the interval until it is
+// stopped, which is what the effect's cleanup does on unmount. Stopping aborts the request in
+// flight, so a late failure cannot be reported for a screen nobody is watching any more, and
+// clears the timer, so nothing is asked afterwards. Both are read in useHealth.test.ts on
+// fake timers, since neither can be timed from a browser.
+export function pollHealth(fetcher: HealthFetcher, onChange: (event: HealthEvent) => void): () => void {
+  const controller = new AbortController()
+  let timer: ReturnType<typeof setTimeout> | undefined
+
+  const load = async () => {
+    try {
+      const { report, degraded } = await fetcher(controller.signal)
+      onChange({ kind: 'report', report, degraded })
+    } catch (failure) {
+      if (controller.signal.aborted) {
+        return
+      }
+      const message = failure instanceof Error ? failure.message : String(failure)
+      onChange({ kind: 'failure', message })
+    }
+    if (!controller.signal.aborted) {
+      timer = setTimeout(load, pollInterval)
+    }
+  }
+
+  void load()
+  return () => {
+    controller.abort()
+    clearTimeout(timer)
+  }
+}
+
 export function useHealth(): HealthState {
   const [state, setState] = useState<HealthState>({ report: null, degraded: false, error: null })
 
   useEffect(() => {
-    const controller = new AbortController()
-    let timer: number | undefined
-
-    const load = async () => {
-      try {
-        const { report, degraded } = await fetchHealth(controller.signal)
-        setState((current) => applyHealth(current, { kind: 'report', report, degraded }))
-      } catch (failure) {
-        if (controller.signal.aborted) {
-          return
-        }
-        const message = failure instanceof Error ? failure.message : String(failure)
-        setState((current) => applyHealth(current, { kind: 'failure', message }))
-      }
-      if (!controller.signal.aborted) {
-        timer = window.setTimeout(load, pollInterval)
-      }
-    }
-
-    void load()
-    return () => {
-      controller.abort()
-      window.clearTimeout(timer)
-    }
+    return pollHealth(fetchHealth, (event) => {
+      setState((current) => applyHealth(current, event))
+    })
   }, [])
 
   return state

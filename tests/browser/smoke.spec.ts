@@ -42,10 +42,10 @@ import { expect, test, type Page } from '@playwright/test'
 //   - the queue inspection banner, `Queue inspection failed: <reason>`, which Overview and
 //     Queues both draw. view.test.ts covers `queueError` and the model's `queueError`; the
 //     banner itself is reached only when the inspector fails, which this Redis does not.
-//   - the abort that ends the poll on unmount, which has no reader at all. Every other branch
-//     of the shell is read somewhere, though the 5 s interval itself is never asserted: the
-//     failed-poll case below can only reach its banner on a second poll and only clear it on
-//     a third, so a timer that stopped would fail it.
+//
+// Every other branch of the shell is read somewhere. The poll loop is read in
+// web/src/useHealth.test.ts on fake timers, where both the 5 s re-arm and the abort that ends
+// the loop on unmount can be timed, neither of which a browser here would wait around for.
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..')
 const fixture = path.join(root, 'tests', 'fixtures', 'laravel-app')
