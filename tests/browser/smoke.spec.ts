@@ -489,11 +489,10 @@ test.describe('the dashboard against the real binary', () => {
     await page.goto(`${base}/#/jobs`)
     await expect(readingJobs).toBeVisible()
 
-    // An answer that was not really held lands in milliseconds and takes the line with it, so
-    // a line that is still up after the page's next health poll, five seconds later, was drawn
-    // while the read was genuinely outstanding. The wait is on the page's own request, so this
-    // is still a poll and not a sleep.
-    await page.waitForResponse((candidate) => candidate.url().includes('/api/v1/health'))
+    // A request is parked at the gate, so the answer this line waits for has provably not been
+    // sent: the line is read against an outstanding read rather than against the milliseconds
+    // a local service leaves. A case that lost its hold cannot park, and fails here.
+    await expect.poll(() => jobsRead.parked()).toBe(true)
     await expect(readingJobs).toBeVisible()
 
     // The answer is let through, and the line gives way to the screen it was standing in for.
@@ -516,8 +515,8 @@ test.describe('the dashboard against the real binary', () => {
     await page.getByRole('link', { name: 'Metrics', exact: true }).click()
     await expect(readingHistory).toBeVisible()
 
-    // Held for a poll interval here too: the same line would be gone if the answer had landed.
-    await page.waitForResponse((candidate) => candidate.url().includes('/api/v1/health'))
+    // Parked here too, so the same claim holds on this screen.
+    await expect.poll(() => historyRead.parked()).toBe(true)
     await expect(readingHistory).toBeVisible()
 
     const historyAnswered = page.waitForResponse(
@@ -527,6 +526,53 @@ test.describe('the dashboard against the real binary', () => {
     await historyAnswered
     await expect(readingHistory).toHaveCount(0)
     await expect(page.getByText(/^Outcomes per minute for /)).toBeVisible()
+  })
+
+  test('leaving a screen mid-read leaves no error on the page', async ({ page }) => {
+    // A screen aborts its read when it unmounts, and an aborted read is this file's question
+    // withdrawn, not the service refusing to answer. A held answer is the only way to reach
+    // that state on purpose: the read is parked, the screen goes away beneath it, and the
+    // answer is released into a request the page has already given up on.
+    let release!: () => void
+    const held = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    const jobs = await dress(page, '**/api/v1/jobs*')
+    jobs.answer({ kind: 'through', until: held })
+
+    const readingJobs = page.getByText('Reading job history…')
+    const jobError = page.getByText('Could not read job history:')
+
+    await page.goto(`${base}/#/jobs`)
+    await expect.poll(() => jobs.parked()).toBe(true)
+    await expect(readingJobs).toBeVisible()
+
+    // Away while the read is outstanding: the jobs screen unmounts and aborts its request.
+    const withdrawn = page.waitForEvent('requestfailed', {
+      predicate: (request) => request.url().includes('/api/v1/jobs'),
+      timeout: 10_000,
+    })
+    await page.getByRole('link', { name: 'Metrics', exact: true }).click()
+    await expect(page.getByRole('heading', { name: 'Metrics', exact: true })).toBeVisible()
+
+    // The read really was withdrawn rather than merely left outstanding: the page aborted it,
+    // which is the only reason the answer released below has nobody left to reach.
+    expect((await withdrawn).failure()?.errorText).toContain('ABORTED')
+    release()
+
+    // Nothing about the aborted read is reported on the screen the reader moved to, and the
+    // read that screen makes for itself is asked and answered as usual.
+    await expect(page.getByText(/^Outcomes per minute for /)).toBeVisible()
+    await expect(jobError).toHaveCount(0)
+
+    // Back on the jobs screen the abandoned read left nothing behind: no failure line, no
+    // unavailable line, and a read of its own drawn in their place.
+    await page.getByRole('link', { name: 'Jobs', exact: true }).click()
+    await expect(page.getByRole('heading', { name: 'Jobs', exact: true })).toBeVisible()
+    await expect(page.locator('tbody tr').first()).toBeVisible()
+    await expect(jobError).toHaveCount(0)
+    await expect(page.getByText('Job history is unavailable:')).toHaveCount(0)
+    await expect(readingJobs).toHaveCount(0)
   })
 
   test('the metrics screen says when no queue has been sampled', async ({ page }) => {
@@ -1191,7 +1237,8 @@ async function readHistory(page: Page, url: string, queueName: string): Promise<
 //             status is the answer's, not the body's.
 // until holds any of them at the socket, because some states only last while a read is in
 // flight. A held request must be released while the page that asked for it is still mounted:
-// leaving a screen aborts its read.
+// leaving a screen aborts its read. While a request is parked the helper says so, which is how
+// a case knows its waiting line is drawn against an outstanding read rather than a slow one.
 type Gate = { until?: Promise<void> }
 type Answer =
   | (Gate & { kind: 'through' })
@@ -1203,13 +1250,22 @@ type Answer =
 // is over does not depend on a poll landing while an assertion is reading.
 async function dress(page: Page, ...endpoints: string[]) {
   let answer: Answer = { kind: 'through' }
+  // How many requests are waiting at the gate right now. A waiting line is only evidence of an
+  // outstanding read while something is actually parked, so cases read this rather than assume
+  // the answer has not come back yet.
+  let waiting = 0
   for (const endpoint of endpoints) {
     await page.route(endpoint, async (route: Route) => {
       // The gate is read first and the answer after it: a case that holds a request switches
       // the knob and then releases, so the released request gets the answer it turned to.
       const gate = answer.until
       if (gate !== undefined) {
-        await gate
+        waiting++
+        try {
+          await gate
+        } finally {
+          waiting--
+        }
       }
       const answering = answer
       if (answering.kind === 'through') {
@@ -1237,6 +1293,11 @@ async function dress(page: Page, ...endpoints: string[]) {
   return {
     answer(next: Answer) {
       answer = next
+    },
+    // A parked request has not been answered, so anything the page draws while this is true was
+    // drawn against a read that is genuinely outstanding.
+    parked() {
+      return waiting > 0
     },
   }
 }
