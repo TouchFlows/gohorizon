@@ -66,6 +66,96 @@ export interface Worker {
   crash_looping: boolean
 }
 
+// Unauthorized is the 401 the API answers when the request carried no session, or one that
+// has ended: a sign-out, an expiry, or a user the configuration no longer has. It is not a
+// failed read, so it is its own error: the shell can tell it apart from a blip and ask for a
+// sign-in instead of reporting a failure the operator cannot do anything about.
+export class Unauthorized extends Error {
+  constructor() {
+    super('authentication required')
+    this.name = 'Unauthorized'
+  }
+}
+
+// Session is who the service says this browser is.
+export interface Session {
+  user: string
+  expires_at: string
+}
+
+// SessionLookup is what /api/v1/session answers before the dashboard draws anything. 'open'
+// is a service started without users: there is nobody to sign in as, and the pages are drawn
+// exactly as they were before authentication existed.
+export type SessionLookup =
+  | { kind: 'signed-in'; user: string }
+  | { kind: 'signed-out' }
+  | { kind: 'open' }
+
+export async function readSession(signal?: AbortSignal): Promise<SessionLookup> {
+  const response = await fetch('/api/v1/session', {
+    signal,
+    headers: { Accept: 'application/json' },
+    cache: 'no-store',
+  })
+  if (response.status === 401) {
+    return { kind: 'signed-out' }
+  }
+  if (response.status === 404) {
+    return { kind: 'open' }
+  }
+  if (response.status !== 200) {
+    throw new Error(`/api/v1/session returned ${response.status}`)
+  }
+  const payload: unknown = await response.json()
+  if (!isSession(payload)) {
+    throw new Error('/api/v1/session did not return a session')
+  }
+  return { kind: 'signed-in', user: payload.user }
+}
+
+// startSession exchanges a name and password for a session cookie. The refusals carry the
+// wording the form shows; the service does not say whether the name or the password was
+// wrong, so neither does this.
+export async function startSession(name: string, password: string): Promise<Session> {
+  const response = await fetch('/api/v1/session', {
+    method: 'POST',
+    headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name, password }),
+  })
+  if (response.status === 401) {
+    throw new Error('That name and password do not match.')
+  }
+  if (response.status === 429) {
+    throw new Error('Too many attempts. Wait a minute and try again.')
+  }
+  if (response.status !== 200) {
+    throw new Error(`/api/v1/session returned ${response.status}`)
+  }
+  const payload: unknown = await response.json()
+  if (!isSession(payload)) {
+    throw new Error('/api/v1/session did not return a session')
+  }
+  return payload
+}
+
+// endSession clears the cookie and revokes the token it carried. A failure is swallowed by
+// the caller's next session read, which is what decides where the browser goes next.
+export async function endSession(): Promise<void> {
+  await fetch('/api/v1/session', { method: 'DELETE', headers: { Accept: 'application/json' } })
+}
+
+export function isSession(value: unknown): value is Session {
+  if (typeof value !== 'object' || value === null) {
+    return false
+  }
+  const session = value as Partial<Session>
+  return (
+    typeof session.user === 'string' &&
+    session.user !== '' &&
+    typeof session.expires_at === 'string'
+  )
+}
+
 // fetchHealth reads one report. A 503 is not an error: the service answers 503 when its
 // lock is degraded and the body still says why, which is exactly the state the dashboard
 // exists to show.
@@ -76,6 +166,9 @@ export async function fetchHealth(
     signal,
     headers: { Accept: 'application/json' },
   })
+  if (response.status === 401) {
+    throw new Unauthorized()
+  }
   if (response.status !== 200 && response.status !== 503) {
     throw new Error(`/api/v1/health returned ${response.status}`)
   }
@@ -121,6 +214,9 @@ export async function fetchHistory(query: string, signal?: AbortSignal): Promise
     signal,
     headers: { Accept: 'application/json' },
   })
+  if (response.status === 401) {
+    throw new Unauthorized()
+  }
   if (response.status === 503) {
     throw new HistoryUnavailable()
   }
@@ -196,6 +292,9 @@ export async function fetchJobs(query: string, signal?: AbortSignal): Promise<Jo
     signal,
     headers: { Accept: 'application/json' },
   })
+  if (response.status === 401) {
+    throw new Unauthorized()
+  }
   if (response.status === 503) {
     throw new HistoryUnavailable()
   }

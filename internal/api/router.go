@@ -72,6 +72,15 @@ func NewRouter(provider Provider, log *slog.Logger, opts ...Option) http.Handler
 			r.Post("/session", signIn(store, log))
 			r.Get("/session", currentSession(store))
 			r.Delete("/session", signOut(store))
+		} else {
+			// The dashboard asks who it is talking to before it draws a page, and an open
+			// service has nobody to be. Answering in JSON says that plainly, so the bundle
+			// can tell "authentication is off" from "you are not signed in" — the shell
+			// would answer a missing route, and a page cannot read that as an answer.
+			r.Get("/session", func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Cache-Control", "no-store")
+				writeError(w, http.StatusNotFound, "authentication is not configured")
+			})
 		}
 
 		r.Group(func(r chi.Router) {
@@ -221,7 +230,13 @@ func signIn(store *auth.Store, log *slog.Logger) http.HandlerFunc {
 
 		// The body and the cookie both name a session, so neither may be cached by a proxy.
 		w.Header().Set("Cache-Control", "no-store")
-		store.Start(w, r, identity)
+		if err := store.Start(w, r, identity); err != nil {
+			// The store no longer answers the request itself, so this is the only status
+			// line written: a session the server could not sign is a failed sign-in.
+			log.Error("start session", "user", identity.Name, "error", err)
+			writeError(w, http.StatusInternalServerError, "could not start a session")
+			return
+		}
 		writeJSON(w, http.StatusOK, identity)
 	}
 }

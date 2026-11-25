@@ -46,6 +46,12 @@ import { expect, test, type Page, type Route } from '@playwright/test'
 // read in web/src/view.test.ts, and the poll loop in web/src/useHealth.test.ts under fake timers,
 // where its 5 s re-arm and the abort that ends it on unmount can be timed.
 //
+// Sign-in is the one state the whole suite needs rather than one case reaching for it: the API
+// answers 401 without a session cookie, so every case is signed in from `beforeEach` and the
+// one case that starts where an operator starts clears its own cookies. The credential is a
+// password written here that the binary's own `passwd` hashes in `beforeAll`; no hash and no
+// session key belongs in this file.
+//
 // What that leaves is a rule rather than a list: a branch the pages draw and no case reaches
 // belongs in this paragraph, named, because staying unnamed is how it goes unread.
 
@@ -66,6 +72,15 @@ const extraQueue = 'gohorizon-smoke-extra'
 const crashy = 'crashy'
 const crashyQueue = 'gohorizon-smoke-crashy'
 const pollMs = 30_000
+
+// The operator the smoke signs in as. The password is hashed by the binary itself before the
+// service starts, and the key that signs the session cookie is an environment variable like
+// the deployment's own; neither a hash nor a key is written into this file.
+const smokeUser = 'smoke'
+const smokePassword = 'smoke-password'
+const sessionCookie = 'gohorizon_session'
+// At least 32 bytes, which is the length the service refuses to start below.
+const sessionKey = 'gohorizon-smoke-session-key-0123456789abcdef'
 
 // The service and the fixture read the same environment: the worker it launches is the
 // Laravel application, so both sides must agree on the connection and the queue.
@@ -106,6 +121,9 @@ const skipReason =
 let dir = ''
 let base = ''
 let service: ChildProcess | undefined
+// session is the token the suite's direct calls to the API carry. The browser gets its own
+// cookie of the same shape, set on its context before each case.
+let session = ''
 // failedAt is when the failing attempt finished, which is the minute the chart must draw it
 // in: read from the API rather than from the clock the browser happens to see.
 let failedAt = ''
@@ -127,7 +145,10 @@ test.describe('the dashboard against the real binary', () => {
     const port = await freePort()
     base = `http://127.0.0.1:${port}`
     const configPath = path.join(dir, 'gohorizon.yaml')
-    fs.writeFileSync(configPath, configYAML(port, dir, php))
+    const passwordHash = execFileSync(binary, ['passwd', '-password', smokePassword], {
+      encoding: 'utf8',
+    }).trim()
+    fs.writeFileSync(configPath, configYAML(port, dir, php, passwordHash))
 
     const log = fs.openSync(path.join(dir, 'gohorizon.log'), 'a')
     service = spawn(binary, ['run', '-config', configPath], {
@@ -135,9 +156,16 @@ test.describe('the dashboard against the real binary', () => {
       // Its own group, so afterAll can end the worker the supervisor started as well.
       detached: true,
       stdio: ['ignore', log, log],
-      env: { ...process.env, ...fixtureEnv },
+      env: { ...process.env, ...fixtureEnv, GOHORIZON_SMOKE_SESSION_KEY: sessionKey },
     })
     fs.closeSync(log)
+
+    // The listener is up before anything can be read, and every read below needs a session, so
+    // the sign-in is what the first wait is for: it retries until the service answers it.
+    await waitFor('accept a sign-in', async () => {
+      session = await signIn()
+      return true
+    })
 
     await waitFor('report a queue depth', async () => {
       const report = (await getJSON(`${base}/api/v1/health`)) as { queues?: { depths?: unknown[] } }
@@ -184,6 +212,58 @@ test.describe('the dashboard against the real binary', () => {
     }
     stopService()
     fs.rmSync(dir, { recursive: true, force: true })
+  })
+
+  // Every case runs signed in, which is what the pages need from the API they read. A fresh
+  // session per case is also what keeps the case that signs out from signing the rest out:
+  // signing out revokes the token itself, not only the browser's copy of it.
+  test.beforeEach(async ({ context }) => {
+    if (skipReason !== null) {
+      return
+    }
+    session = await signIn()
+    await context.addCookies([{ name: sessionCookie, value: session, url: base }])
+  })
+
+  test('a dashboard with no session asks for a sign-in and takes one', async ({ page, context }) => {
+    // Every other case is signed in by the hook above; this one starts where an operator with
+    // no cookie starts, which is the screen the service's 401s lead to.
+    await context.clearCookies()
+
+    await page.goto(`${base}/`)
+    await expect(page.getByRole('heading', { name: 'Sign in', exact: true })).toBeVisible()
+    // Nothing of the dashboard is drawn behind the form: its navigation and its status pill
+    // are what a signed-out browser must not be given.
+    await expect(page.getByRole('navigation')).toHaveCount(0)
+    await expect(page.locator('.shell__status')).toHaveCount(0)
+
+    // A wrong password is refused with the service's own answer, and the form stays where it
+    // was rather than claiming a session it did not get.
+    await page.getByLabel('Name').fill(smokeUser)
+    await page.getByLabel('Password').fill('not-the-password')
+    await page.getByRole('button', { name: 'Sign in', exact: true }).click()
+    await expect(page.getByText('That name and password do not match.')).toBeVisible()
+    await expect(page.getByRole('heading', { name: 'Sign in', exact: true })).toBeVisible()
+    expect((await page.request.get(`${base}/api/v1/health`)).status()).toBe(401)
+
+    // The right one opens the dashboard on the report the service hands the page after it.
+    await expect(page.getByLabel('Password')).toHaveValue('')
+    await page.getByLabel('Password').fill(smokePassword)
+    const [health] = await Promise.all([
+      page.waitForResponse((candidate) => candidate.url().includes('/api/v1/health') && candidate.ok()),
+      page.getByRole('button', { name: 'Sign in', exact: true }).click(),
+    ])
+    const report = (await health.json()) as HealthReport
+
+    await expect(page.getByRole('heading', { name: 'Overview', exact: true })).toBeVisible()
+    await expect(page.locator('.shell__status')).toHaveText(report.status)
+    expect((await page.request.get(`${base}/api/v1/health`)).status()).toBe(200)
+
+    // Signing out ends it on both sides: the pages give way to the form again, and the token
+    // that was in the browser's jar no longer answers anything even if it is presented again.
+    await page.getByRole('button', { name: /^Sign out/ }).click()
+    await expect(page.getByRole('heading', { name: 'Sign in', exact: true })).toBeVisible()
+    expect((await page.request.get(`${base}/api/v1/health`)).status()).toBe(401)
   })
 
   test('the overview renders the service, its queues and its telemetry', async ({ page }) => {
@@ -1183,11 +1263,17 @@ function commandOnPath(name: string): string | null {
   }
 }
 
-function configYAML(port: number, dir: string, php: string): string {
+function configYAML(port: number, dir: string, php: string, passwordHash: string): string {
   return `version: 1
 
 server:
   listen: "127.0.0.1:${port}"
+  auth:
+    session_key_env: GOHORIZON_SMOKE_SESSION_KEY
+    session_hours: 1
+    users:
+      - name: ${smokeUser}
+        password_hash: ${JSON.stringify(passwordHash)}
 
 storage:
   driver: sqlite
@@ -1269,8 +1355,34 @@ function freePort(): Promise<number> {
   })
 }
 
+// signIn asks the service for a session and returns the token its cookie carries, which is
+// what both the browser and the direct calls below present.
+async function signIn(): Promise<string> {
+  const response = await fetch(`${base}/api/v1/session`, {
+    method: 'POST',
+    headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name: smokeUser, password: smokePassword }),
+    signal: AbortSignal.timeout(3_000),
+  })
+  if (!response.ok) {
+    throw new Error(`sign-in returned ${response.status}`)
+  }
+  const cookie = response.headers
+    .getSetCookie()
+    .find((header) => header.startsWith(`${sessionCookie}=`))
+  if (cookie === undefined) {
+    throw new Error('sign-in answered without the session cookie')
+  }
+  return cookie.slice(sessionCookie.length + 1).split(';')[0]
+}
+
+// getJSON reads the API the way the pages do, cookie and all: every endpoint below the session
+// routes answers 401 without one.
 async function getJSON(url: string): Promise<unknown> {
-  const response = await fetch(url, { signal: AbortSignal.timeout(3_000) })
+  const response = await fetch(url, {
+    signal: AbortSignal.timeout(3_000),
+    headers: { Cookie: `${sessionCookie}=${session}` },
+  })
   if (!response.ok) {
     throw new Error(`${url} returned ${response.status}`)
   }

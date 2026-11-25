@@ -2,6 +2,8 @@ import { useEffect, useState } from 'react'
 import type { Route } from './routes'
 import { parseRoute, routeHref, routeLabel } from './routes'
 import { useHealth } from './useHealth'
+import { useSession } from './useSession'
+import SignIn from './components/SignIn'
 import Overview from './pages/Overview'
 import Queues from './pages/Queues'
 import Workers from './pages/Workers'
@@ -24,7 +26,43 @@ function useRoute(): Route {
 
 export default function App() {
   const route = useRoute()
-  const health = useHealth()
+  const session = useSession()
+
+  // The session is read before a page is drawn. A service that wants a cookie answers 401 to
+  // every read, and rendering those as read failures would describe a sign-in as a fault.
+  if (session.status === 'checking') {
+    return (
+      <main className="shell__main">
+        <p className="muted">Checking your session…</p>
+      </main>
+    )
+  }
+  if (session.status === 'signed-out') {
+    return <SignIn onSignedIn={session.signIn} />
+  }
+  return (
+    <Dashboard
+      route={route}
+      user={session.user}
+      onSignOut={session.signOut}
+      onExpired={session.expire}
+    />
+  )
+}
+
+interface DashboardProps {
+  route: Route
+  // user is the signed-in operator, and null on a service started without users, where
+  // there is nobody to sign out.
+  user: string | null
+  onSignOut: () => void
+  // onExpired drops to the sign-in screen: the health poll answers 401 when the session
+  // ended, and a stale report is worse than asking again.
+  onExpired: () => void
+}
+
+function Dashboard({ route, user, onSignOut, onExpired }: DashboardProps) {
+  const health = useHealth(onExpired)
   const report = health.report
   const warn = report !== null && (health.degraded || report.status !== 'ok')
 
@@ -43,6 +81,11 @@ export default function App() {
             </a>
           ))}
         </nav>
+        {user !== null && (
+          <button className="shell__signout" type="button" onClick={() => void onSignOut()}>
+            Sign out ({user})
+          </button>
+        )}
         <span className={warn ? 'shell__status pill pill--warn' : 'shell__status pill'}>
           {report === null ? 'connecting' : report.status}
         </span>

@@ -31,21 +31,38 @@ authentication, rate limiting and three roles (viewer, operator, administrator).
    expiry and a random id, HMAC-SHA256 signed with a key read from the environment named by
    `auth.session_key_env` (at least 32 bytes). Stateless means a service restart does not
    sign every operator out, which matters because the service is restarted to deploy.
-   Cookies are `HttpOnly`, `SameSite=Lax`, `Path=/`, and `Secure` whenever the request
-   arrived over TLS.
+   Cookies are `HttpOnly`, `SameSite=Lax`, `Path=/`, and `Secure` whenever the browser
+   reached the service over TLS: either the request itself carries a TLS connection, or a
+   proxy terminated it and said so in `X-Forwarded-Proto`. The second half is the normal
+   deployment, and without it every session cookie behind a proxy would be issued without
+   `Secure`. A forged header can only make the flag stricter than the transport, and a
+   browser drops a `Secure` cookie that arrives over plain HTTP, so the cost of a lie is a
+   sign-in that does not stick for the liar — never a cookie sent in the clear.
 4. **Sign-out revokes the token in memory.** A signed token cannot be un-signed, so the
    store keeps a revocation list of ids until their expiry. It is memory: a restart loses
    it, and a copied token would work again until it expires. That is why the TTL is short
    (12 h default, `auth.session_hours`) and why signing out is not a credential rotation.
-5. **Failed sign-ins are limited per address**: five failures in a minute lock that
+5. **A session names a user, and the user still has to exist.** The configuration is the
+   source of truth for who may sign in, so a token whose subject is no longer in
+   `server.auth.users` is refused at the next request. Removing an operator ends their
+   access immediately instead of when the signature expires, and it does not depend on the
+   in-memory revocation list, which a restart would have lost.
+6. **Failed sign-ins are limited per address**: five failures in a minute lock that
    address for the rest of the window, whether or not the next password is correct. The
    answer for a wrong password and an unknown user is byte-identical, and an unknown name
    still costs one hash verification, so names cannot be timed or read apart.
-6. **The gate covers the operational API only.** Everything under `/api/v1` except the
+7. **The gate covers the operational API only.** Everything under `/api/v1` except the
    session routes requires a session. `/metrics` stays open because Prometheus scrapes it
    without one, and the dashboard shell stays open because it is a bundle with no data:
-   its fetches are what need the cookie.
-7. **No roles yet.** The handoff's three roles arrive with the endpoints that need them
+   its fetches are what need the cookie. `GET /api/v1/session` is registered even with no
+   users, answering 404 in the API's JSON envelope, so the bundle can tell an open service
+   from a signed-out browser instead of guessing from a missing route.
+8. **The dashboard asks for the session before it draws a page.** A signed-out browser gets
+   the sign-in screen and nothing else; a 401 on the health poll (an expiry, a sign-out in
+   another tab, a removed user) drops back to it rather than being reported as a failed
+   read. An open service answers "no authentication is configured" and the pages are drawn
+   exactly as they were before this ADR, with no sign-out control.
+9. **No roles yet.** The handoff's three roles arrive with the endpoints that need them
    (worker restart, failed-job retry/delete); a role field no endpoint reads would be
    configuration that looks like a control. CSRF tokens are deferred the same way: the
    only state-changing calls today are sign-in and sign-out, both protected by
@@ -54,9 +71,11 @@ authentication, rate limiting and three roles (viewer, operator, administrator).
 
 ## Consequences
 
-- **The dashboard has no sign-in screen yet.** That is the next slice: with auth enabled
-  today, the pages' fetches answer 401 and the UI shows its read failures. Nothing is
-  silently open, and nothing claims to work that does not.
+- A deployment with users is now usable by a person: the bundle signs in, keeps the cookie
+  the service set, and offers a sign-out that both clears the cookie and revokes the token.
+- Removing a user from the configuration is an access control, not only a tidy-up: their
+  existing sessions stop at the next request. Rotating the signing key remains the lever for
+  a suspected session leak.
 - Role-based authorisation, audit logs and CSRF tokens are unbuilt; the gate is
   authentication only.
 - Sessions are per instance. v1 runs one instance behind the ownership lock, so there is

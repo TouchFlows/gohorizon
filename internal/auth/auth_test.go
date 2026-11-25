@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"crypto/tls"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -119,6 +120,84 @@ func TestAuthenticateStartsASessionTheRequestCarriesBack(t *testing.T) {
 	}
 	if current.Name != "alice" {
 		t.Fatalf("current = %+v, want alice", current)
+	}
+}
+
+func TestCookieIsSecureWhateverTerminatedTLS(t *testing.T) {
+	store := newTestStore(t, nil)
+	identity, err := store.Authenticate(signInRequest(), "alice", "s3cret")
+	if err != nil {
+		t.Fatalf("Authenticate: %v", err)
+	}
+
+	// The proxy case is the one that matters: the browser speaks HTTPS to a proxy that
+	// forwards plain HTTP, so the request carries no TLS state and only the header says the
+	// cookie will travel over TLS.
+	cases := []struct {
+		name  string
+		tls   bool
+		proto string
+		want  bool
+	}{
+		{name: "plain http", want: false},
+		{name: "direct tls", tls: true, want: true},
+		{name: "proxy terminated tls", proto: "https", want: true},
+		{name: "chain of proxies", proto: "https, http", want: true},
+		{name: "mixed case and spaces", proto: " HTTPS ", want: true},
+		{name: "proxy forwarded plain http", proto: "http", want: false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			r := httptest.NewRequest(http.MethodPost, "/api/v1/session", nil)
+			if tc.tls {
+				r.TLS = &tls.ConnectionState{}
+			}
+			if tc.proto != "" {
+				r.Header.Set("X-Forwarded-Proto", tc.proto)
+			}
+			recorder := httptest.NewRecorder()
+			if err := store.Start(recorder, r, identity); err != nil {
+				t.Fatalf("Start: %v", err)
+			}
+			cookies := recorder.Result().Cookies()
+			if len(cookies) != 1 {
+				t.Fatalf("cookies = %v, want one", cookies)
+			}
+			if cookies[0].Secure != tc.want {
+				t.Errorf("Secure = %v, want %v", cookies[0].Secure, tc.want)
+			}
+		})
+	}
+}
+
+func TestRemovingAUserEndsTheirSession(t *testing.T) {
+	store := newTestStore(t, nil)
+	identity, err := store.Authenticate(signInRequest(), "alice", "s3cret")
+	if err != nil {
+		t.Fatalf("Authenticate: %v", err)
+	}
+	recorder := httptest.NewRecorder()
+	if err := store.Start(recorder, httptest.NewRequest(http.MethodPost, "/api/v1/session", nil), identity); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	r := httptest.NewRequest(http.MethodGet, "/api/v1/health", nil)
+	r.AddCookie(recorder.Result().Cookies()[0])
+	if _, ok := store.Current(r); !ok {
+		t.Fatal("the session was not accepted before the user was removed")
+	}
+
+	// The same signing key and the same token, but a configuration that no longer has alice:
+	// removing an operator has to end their access on the next request rather than when the
+	// signature happens to expire.
+	remaining, err := New(Options{
+		Users: map[string]string{"bob": mustHash(t, "s3cret")},
+		Key:   []byte("0123456789abcdef0123456789abcdef"),
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if _, ok := remaining.Current(r); ok {
+		t.Fatal("a token naming a user the configuration dropped still authenticated")
 	}
 }
 

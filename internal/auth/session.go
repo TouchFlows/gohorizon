@@ -145,14 +145,15 @@ func (s *Store) Authenticate(r *http.Request, name, password string) (Identity, 
 }
 
 // Start writes the session cookie for identity. The token carries the name, the expiry
-// and an id, and is signed so the server can trust it without storing it.
-func (s *Store) Start(w http.ResponseWriter, r *http.Request, identity Identity) {
+// and an id, and is signed so the server can trust it without storing it. A failure to sign
+// is returned rather than written: the handler owns the one answer to the request, and a
+// store that answered here too would write a second status line into the same response.
+func (s *Store) Start(w http.ResponseWriter, r *http.Request, identity Identity) error {
 	token, err := s.sign(identity)
 	if err != nil {
 		// A failed sign is a failure to sign in: refuse rather than hand out a session
 		// the server would not accept back.
-		http.Error(w, "could not start session", http.StatusInternalServerError)
-		return
+		return fmt.Errorf("sign session: %w", err)
 	}
 	http.SetCookie(w, &http.Cookie{
 		Name:     SessionCookie,
@@ -163,6 +164,7 @@ func (s *Store) Start(w http.ResponseWriter, r *http.Request, identity Identity)
 		SameSite: http.SameSiteLaxMode,
 		MaxAge:   int(s.ttl.Seconds()),
 	})
+	return nil
 }
 
 // End revokes the session the request carries and clears the cookie. Revoking keeps the
@@ -195,6 +197,13 @@ func (s *Store) Current(r *http.Request) (Identity, bool) {
 	}
 	claims, err := s.open(token)
 	if err != nil {
+		return Identity{}, false
+	}
+	// A token outlives the account it names: the configuration can drop a user while their
+	// session is still signed. Refusing a name that is no longer configured is what makes
+	// removing someone end their access at the next request, without waiting out the
+	// signature or clearing a revocation list a restart would have lost anyway.
+	if _, known := s.users[claims.Subject]; !known {
 		return Identity{}, false
 	}
 	if _, gone := s.revoked[claims.ID]; gone {
@@ -280,13 +289,26 @@ func (s *Store) prune() {
 	}
 }
 
-// cookieSecure marks the cookie Secure when the request itself arrived over TLS. A Secure
-// cookie is silently dropped over plain HTTP, so the flag follows the transport instead of
-// a setting an operator can get wrong in either direction; behind a TLS-terminating proxy
-// the browser reaches the proxy over HTTPS and the proxy sets X-Forwarded-Proto, which the
-// Secure flag does not depend on because the cookie belongs to the browser's origin.
+// cookieSecure marks the cookie Secure when the browser reached the service over TLS: either
+// the request itself carries a TLS connection, or a proxy terminated TLS and said so in
+// X-Forwarded-Proto. The second half is the case that matters, because a proxy in front of
+// the service is the normal deployment and without it every session cookie would be issued
+// without Secure and could be sent back over plain HTTP.
+//
+// A forged header can only make the flag stricter than the transport, and a Secure cookie
+// arriving over plain HTTP is dropped by the browser: the cost of a lie here is a sign-in
+// that does not stick for the liar, never a cookie sent in the clear.
 func cookieSecure(r *http.Request) bool {
-	return r.TLS != nil
+	if r.TLS != nil {
+		return true
+	}
+	// A chain of proxies appends to the header; the leftmost value is the one the browser
+	// spoke TLS to.
+	proto := r.Header.Get("X-Forwarded-Proto")
+	if comma := strings.IndexByte(proto, ','); comma >= 0 {
+		proto = proto[:comma]
+	}
+	return strings.EqualFold(strings.TrimSpace(proto), "https")
 }
 
 func clientAddress(r *http.Request) string {

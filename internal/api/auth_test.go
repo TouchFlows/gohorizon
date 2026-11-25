@@ -154,6 +154,49 @@ func TestSignInIsRateLimited(t *testing.T) {
 	}
 }
 
+// countingWriter counts the status lines a handler wrote. A handler that answers twice is
+// invisible in the recorder: the second WriteHeader is dropped and logged, so the status and
+// the body both still look like one answer.
+type countingWriter struct {
+	*httptest.ResponseRecorder
+	writes int
+}
+
+func (w *countingWriter) WriteHeader(status int) {
+	w.writes++
+	w.ResponseRecorder.WriteHeader(status)
+}
+
+func TestSignInAnswersOnce(t *testing.T) {
+	handler, _ := authedRouter(t)
+
+	// The accepted and the refused answer alike: one status line, so nothing is written into
+	// a response that has already been answered.
+	cases := []struct {
+		name   string
+		body   string
+		status int
+	}{
+		{name: "accepted", body: `{"name":"alice","password":"s3cret"}`, status: http.StatusOK},
+		{name: "refused", body: `{"name":"alice","password":"nope"}`, status: http.StatusUnauthorized},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			request := httptest.NewRequest(http.MethodPost, "/api/v1/session", strings.NewReader(tc.body))
+			request.RemoteAddr = "192.0.2.10:5555"
+			recorder := &countingWriter{ResponseRecorder: httptest.NewRecorder()}
+			handler.ServeHTTP(recorder, request)
+
+			if recorder.Code != tc.status {
+				t.Errorf("status = %d, want %d", recorder.Code, tc.status)
+			}
+			if recorder.writes != 1 {
+				t.Errorf("the handler wrote %d status lines, want 1", recorder.writes)
+			}
+		})
+	}
+}
+
 func TestWithoutUsersTheApiStaysOpen(t *testing.T) {
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 	provider := &stubProvider{report: health.Report{Status: "ok"}}
@@ -162,8 +205,13 @@ func TestWithoutUsersTheApiStaysOpen(t *testing.T) {
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200 without auth configured", recorder.Code)
 	}
-	// There is no session route to call when no users exist.
-	if recorder := serve(NewRouter(provider, log), http.MethodGet, "/api/v1/session", ""); recorder.Code == http.StatusOK {
-		t.Fatal("a session was answered with no users configured")
+	// The dashboard has to tell an open service from a signed-out one, so the route exists
+	// and says which it is, in the same JSON envelope as the rest of the API.
+	recorder = serve(NewRouter(provider, log), http.MethodGet, "/api/v1/session", "")
+	if recorder.Code != http.StatusNotFound {
+		t.Fatalf("session with no users: status = %d, want 404", recorder.Code)
+	}
+	if got := recorder.Header().Get("Content-Type"); got != "application/json" {
+		t.Errorf("session with no users: Content-Type = %q, want application/json", got)
 	}
 }

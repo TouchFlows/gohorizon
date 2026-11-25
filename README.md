@@ -70,10 +70,11 @@ Milestones 1 and 2 implemented:
 - Sign-in (Milestone 3, docs/adr/0009): `server.auth.users` turns authentication on, with
   PBKDF2 password hashes minted by `gohorizon passwd` and a session cookie signed with the
   key named by `server.auth.session_key_env`. `/api/v1/*` then requires a session (the
-  session routes and the Prometheus scrape do not), sign-out revokes the token, and five
-  failed sign-ins lock an address for a minute. Without users the API stays open, as
-  before. The dashboard's sign-in screen is the next slice, so enabling auth today makes
-  the pages' reads answer 401.
+  session routes and the Prometheus scrape do not), sign-out revokes the token, a session
+  naming a user the configuration no longer has is refused, and five failed sign-ins lock
+  an address for a minute. Behind a TLS-terminating proxy the cookie is `Secure` when
+  `X-Forwarded-Proto` says the browser is on HTTPS. The dashboard opens on a sign-in screen
+  and offers a sign-out; without users it stays open, as before.
 
 `GET /api/v1/metrics?queue=default[&resolution=minute|hourly|daily][&from=…&to=…]`
 returns one queue's persisted buckets as `{queue, resolution, from, to, buckets: [{start,
@@ -102,11 +103,11 @@ database path.
 `gohorizon_workers{supervisor,state}` and `gohorizon_crash_looping_workers{supervisor}`.
 The `error` result counts Redis failures that were retried, not failed jobs. A count the
 driver could not report has no sample rather than a zero, and label values are escaped as
-the format requires. Both `/metrics` and `/api/v1/health` are unauthenticated
-like the rest of the API today: keep them behind the reverse proxy until Milestone 3 adds
-authentication.
+the format requires. `/metrics` stays unauthenticated, because Prometheus scrapes it without
+a session; keep it behind the reverse proxy. `/api/v1/health` is behind the gate like the
+rest of the API once `server.auth.users` is configured.
 
-Not implemented yet: the dashboard's sign-in screen, roles and authorisation, audit logs,
+Not implemented yet: roles and authorisation, audit logs, CSRF tokens for mutations,
 balancing, failed-job administration.
 
 ## Layout

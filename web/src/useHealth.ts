@@ -1,5 +1,5 @@
-import { useEffect, useState } from 'react'
-import { fetchHealth } from './api'
+import { useEffect, useRef, useState } from 'react'
+import { fetchHealth, Unauthorized } from './api'
 import type { HealthReport } from './api'
 
 // pollInterval is how often the dashboard asks again. Five seconds keeps a queue depth
@@ -39,7 +39,14 @@ export function applyHealth(current: HealthState, event: HealthEvent): HealthSta
 // flight, so a late failure cannot be reported for a screen nobody is watching any more, and
 // clears the timer, so nothing is asked afterwards. Both are read in useHealth.test.ts on
 // fake timers, since neither can be timed from a browser.
-export function pollHealth(fetcher: HealthFetcher, onChange: (event: HealthEvent) => void): () => void {
+// onUnauthorized, when given, is told that the session ended rather than the read failing. It
+// is the one failure that is not reported as one: a stale report on a screen nobody is signed
+// in for describes a sign-in as a fault.
+export function pollHealth(
+  fetcher: HealthFetcher,
+  onChange: (event: HealthEvent) => void,
+  onUnauthorized?: () => void,
+): () => void {
   const controller = new AbortController()
   let timer: ReturnType<typeof setTimeout> | undefined
 
@@ -49,6 +56,10 @@ export function pollHealth(fetcher: HealthFetcher, onChange: (event: HealthEvent
       onChange({ kind: 'report', report, degraded })
     } catch (failure) {
       if (controller.signal.aborted) {
+        return
+      }
+      if (failure instanceof Unauthorized) {
+        onUnauthorized?.()
         return
       }
       const message = failure instanceof Error ? failure.message : String(failure)
@@ -66,13 +77,22 @@ export function pollHealth(fetcher: HealthFetcher, onChange: (event: HealthEvent
   }
 }
 
-export function useHealth(): HealthState {
+export function useHealth(onUnauthorized?: () => void): HealthState {
   const [state, setState] = useState<HealthState>({ report: null, degraded: false, error: null })
 
+  // Held in a ref so the loop keeps one identity: a callback rebuilt on every render would
+  // otherwise restart the poll, and its 5 s timer with it.
+  const expired = useRef(onUnauthorized)
+  expired.current = onUnauthorized
+
   useEffect(() => {
-    return pollHealth(fetchHealth, (event) => {
-      setState((current) => applyHealth(current, event))
-    })
+    return pollHealth(
+      fetchHealth,
+      (event) => {
+        setState((current) => applyHealth(current, event))
+      },
+      () => expired.current?.(),
+    )
   }, [])
 
   return state

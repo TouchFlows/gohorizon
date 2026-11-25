@@ -120,6 +120,90 @@ a {
   font-weight: 600;
 }
 
+.shell__signout {
+  padding: 0.25rem 0.6rem;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--muted);
+  font: inherit;
+  font-size: 0.8125rem;
+  cursor: pointer;
+}
+
+.shell__signout:hover {
+  color: var(--ink);
+  border-color: var(--ink);
+}
+
+.signin {
+  display: flex;
+  justify-content: center;
+  padding: 4rem 1.5rem;
+}
+
+.signin__form {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  width: 100%;
+  max-width: 22rem;
+  padding: 1.5rem;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--raised);
+}
+
+.signin__title {
+  margin: 0;
+  font-size: 1.25rem;
+  font-weight: 600;
+}
+
+.signin__intro {
+  margin: 0 0 0.75rem;
+  font-size: 0.875rem;
+}
+
+.signin__label {
+  margin-top: 0.5rem;
+  font-size: 0.75rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--muted);
+}
+
+.signin__input {
+  padding: 0.45rem 0.6rem;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--ink);
+  font: inherit;
+}
+
+.signin__error {
+  margin: 0.75rem 0 0;
+  font-size: 0.875rem;
+}
+
+.signin__submit {
+  margin-top: 1rem;
+  padding: 0.5rem 0.9rem;
+  border: 1px solid var(--accent);
+  border-radius: 6px;
+  background: var(--accent);
+  color: #ffffff;
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.signin__submit:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
 .panel {
   margin-top: 1.75rem;
 }
