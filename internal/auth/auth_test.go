@@ -76,7 +76,7 @@ func TestValidateHashRejectsMalformedHashes(t *testing.T) {
 func newTestStore(t *testing.T, now func() time.Time) *Store {
 	t.Helper()
 	store, err := New(Options{
-		Users: map[string]string{"alice": mustHash(t, "s3cret")},
+		Users: map[string]User{"alice": {PasswordHash: mustHash(t, "s3cret")}},
 		Key:   []byte("0123456789abcdef0123456789abcdef"),
 		Now:   now,
 	})
@@ -206,7 +206,7 @@ func TestRemovingAUserEndsTheirSession(t *testing.T) {
 	// removing an operator has to end their access on the next request rather than when the
 	// signature happens to expire.
 	remaining, err := New(Options{
-		Users: map[string]string{"bob": mustHash(t, "s3cret")},
+		Users: map[string]User{"bob": {PasswordHash: mustHash(t, "s3cret")}},
 		Key:   []byte("0123456789abcdef0123456789abcdef"),
 	})
 	if err != nil {
@@ -275,7 +275,7 @@ func TestTamperedTokenIsRefused(t *testing.T) {
 	// A token signed with a different key is refused too, which is what makes rotating
 	// the key sign everyone out.
 	stranger, err := New(Options{
-		Users: map[string]string{"alice": mustHash(t, "s3cret")},
+		Users: map[string]User{"alice": {PasswordHash: mustHash(t, "s3cret")}},
 		Key:   []byte("ffffffffffffffffffffffffffffffff"),
 	})
 	if err != nil {
@@ -352,7 +352,7 @@ func TestSignInIsRateLimitedPerAddress(t *testing.T) {
 func proxyStore(t *testing.T, now func() time.Time) *Store {
 	t.Helper()
 	store, err := New(Options{
-		Users:          map[string]string{"alice": mustHash(t, "s3cret")},
+		Users:          map[string]User{"alice": {PasswordHash: mustHash(t, "s3cret")}},
 		Key:            []byte("0123456789abcdef0123456789abcdef"),
 		Now:            now,
 		TrustedProxies: []netip.Prefix{netip.MustParsePrefix("10.0.0.0/8")},
@@ -393,7 +393,7 @@ func TestClientAddressIsWhereTheGuessCameFrom(t *testing.T) {
 			if tc.also != "" {
 				r.Header.Add("X-Forwarded-For", tc.also)
 			}
-			if got := store.clientAddress(r); got != tc.want {
+			if got := store.ClientAddress(r); got != tc.want {
 				t.Errorf("clientAddress = %q, want %q", got, tc.want)
 			}
 		})
@@ -452,9 +452,77 @@ func TestForwardedForFromAnUntrustedPeerDoesNotResetTheLimit(t *testing.T) {
 	}
 }
 
+func TestSessionCarriesTheRoleTheUserWasGiven(t *testing.T) {
+	store, err := New(Options{
+		Users: map[string]User{"alice": {PasswordHash: mustHash(t, "s3cret"), Role: RoleAdministrator}},
+		Key:   []byte("0123456789abcdef0123456789abcdef"),
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	identity, err := store.Authenticate(signInRequest(), "alice", "s3cret")
+	if err != nil {
+		t.Fatalf("Authenticate: %v", err)
+	}
+	if identity.Role != RoleAdministrator {
+		t.Fatalf("identity role = %q, want %q", identity.Role, RoleAdministrator)
+	}
+
+	// The role travels inside the signed token, so reading it back costs no lookup and a
+	// client cannot edit it.
+	recorder := httptest.NewRecorder()
+	if err := store.Start(recorder, httptest.NewRequest(http.MethodPost, "/api/v1/session", nil), identity); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	r := httptest.NewRequest(http.MethodGet, "/api/v1/health", nil)
+	r.AddCookie(recorder.Result().Cookies()[0])
+	current, ok := store.Current(r)
+	if !ok || current.Role != RoleAdministrator {
+		t.Fatalf("current = %+v (ok = %v), want role %q", current, ok, RoleAdministrator)
+	}
+}
+
+func TestRoleDefaultsToViewerAndAnUnknownRoleIsRefused(t *testing.T) {
+	store := newTestStore(t, nil)
+	identity, err := store.Authenticate(signInRequest(), "alice", "s3cret")
+	if err != nil {
+		t.Fatalf("Authenticate: %v", err)
+	}
+	if identity.Role != RoleViewer {
+		t.Fatalf("role = %q, want the least privileged %q", identity.Role, RoleViewer)
+	}
+
+	_, err = New(Options{
+		Users: map[string]User{"alice": {PasswordHash: mustHash(t, "s3cret"), Role: "admin"}},
+		Key:   []byte("0123456789abcdef0123456789abcdef"),
+	})
+	if err == nil {
+		t.Fatal("a role this service does not know was accepted")
+	}
+}
+
+func TestATokenWithoutARoleIsReadAsTheLeastPrivileged(t *testing.T) {
+	store := newTestStore(t, nil)
+	// A session signed before roles existed: the token is valid and simply has no role in it.
+	token, err := store.sign(Identity{Name: "alice", ExpiresAt: time.Now().Add(time.Hour)})
+	if err != nil {
+		t.Fatalf("sign: %v", err)
+	}
+	r := httptest.NewRequest(http.MethodGet, "/api/v1/health", nil)
+	r.AddCookie(&http.Cookie{Name: SessionCookie, Value: token})
+	current, ok := store.Current(r)
+	if !ok {
+		t.Fatal("a token signed without a role was refused")
+	}
+	if current.Role != RoleViewer {
+		t.Fatalf("role = %q, want %q", current.Role, RoleViewer)
+	}
+}
+
 func TestNewRefusesAKeyTooShortToSignWith(t *testing.T) {
 	_, err := New(Options{
-		Users: map[string]string{"alice": mustHash(t, "s3cret")},
+		Users: map[string]User{"alice": {PasswordHash: mustHash(t, "s3cret")}},
 		Key:   []byte("short"),
 	})
 	if err == nil {
@@ -464,7 +532,7 @@ func TestNewRefusesAKeyTooShortToSignWith(t *testing.T) {
 
 func TestNewRefusesAMalformedUserHash(t *testing.T) {
 	_, err := New(Options{
-		Users: map[string]string{"alice": "not-a-hash"},
+		Users: map[string]User{"alice": {PasswordHash: "not-a-hash"}},
 		Key:   []byte("0123456789abcdef0123456789abcdef"),
 	})
 	if err == nil {

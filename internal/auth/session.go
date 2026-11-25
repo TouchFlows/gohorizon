@@ -49,9 +49,37 @@ func (e *RateLimitedError) Error() string {
 	return fmt.Sprintf("too many sign-in attempts; retry in %s", e.RetryAfter)
 }
 
-// Identity is a signed-in user and when that session expires.
+// Roles an operator can hold (handoff §13). Nothing is restricted by them yet: every endpoint
+// today reports state, which the least of the three may read. They exist because the audit
+// record has to say what the actor was, and because the first mutating endpoint will check
+// them; keeping the role in the signed session means that check costs no lookup.
+const (
+	RoleViewer        = "viewer"
+	RoleOperator      = "operator"
+	RoleAdministrator = "administrator"
+)
+
+// ValidRole reports whether role is one this service knows.
+func ValidRole(role string) bool {
+	switch role {
+	case RoleViewer, RoleOperator, RoleAdministrator:
+		return true
+	}
+	return false
+}
+
+// User is one operator: the hash their password is verified against, and the role a session
+// started for them carries.
+type User struct {
+	PasswordHash string
+	// Role is one of the Role constants; empty means RoleViewer.
+	Role string
+}
+
+// Identity is a signed-in user, their role, and when that session expires.
 type Identity struct {
 	Name      string    `json:"user"`
+	Role      string    `json:"role"`
 	ExpiresAt time.Time `json:"expires_at"`
 }
 
@@ -59,7 +87,7 @@ type Identity struct {
 // revocation list, so a restart costs a re-sign-in only for users who signed out and
 // whose tokens had not yet expired.
 type Store struct {
-	users   map[string]string
+	users   map[string]User
 	dummy   string // a real hash verified against for unknown names, to equalise timing
 	key     []byte
 	ttl     time.Duration
@@ -69,9 +97,9 @@ type Store struct {
 	trusted []netip.Prefix // peers whose X-Forwarded-For is believed
 }
 
-// Options configures a Store. Users maps a name to its encoded password hash.
+// Options configures a Store. Users maps a name to its encoded password hash and role.
 type Options struct {
-	Users map[string]string
+	Users map[string]User
 	// Key signs session tokens. It comes from the environment, never from the file.
 	Key []byte
 	// TTL is how long a session lives; zero means DefaultTTL.
@@ -99,18 +127,26 @@ func New(opts Options) (*Store, error) {
 	if ttl <= 0 {
 		ttl = DefaultTTL
 	}
-	for name, hash := range opts.Users {
-		if err := ValidateHash(hash); err != nil {
+	for name, user := range opts.Users {
+		if err := ValidateHash(user.PasswordHash); err != nil {
 			return nil, fmt.Errorf("auth: user %q: %w", name, err)
+		}
+		if user.Role != "" && !ValidRole(user.Role) {
+			return nil, fmt.Errorf("auth: user %q: %q is not a role (supported: %s, %s, %s)",
+				name, user.Role, RoleViewer, RoleOperator, RoleAdministrator)
 		}
 	}
 	dummy, err := HashPassword("this password is never correct")
 	if err != nil {
 		return nil, err
 	}
-	users := make(map[string]string, len(opts.Users))
-	for name, hash := range opts.Users {
-		users[name] = hash
+	users := make(map[string]User, len(opts.Users))
+	for name, user := range opts.Users {
+		if user.Role == "" {
+			// Least privilege for a user whose role nobody configured.
+			user.Role = RoleViewer
+		}
+		users[name] = user
 	}
 	return &Store{
 		users:   users,
@@ -128,12 +164,12 @@ func New(opts Options) (*Store, error) {
 // wrong password and for an unknown name, and a *RateLimitedError once that address has
 // failed too often inside the window.
 func (s *Store) Authenticate(r *http.Request, name, password string) (Identity, error) {
-	address := s.clientAddress(r)
+	address := s.ClientAddress(r)
 	if wait, ok := s.limiter.blocked(address); !ok {
 		return Identity{}, &RateLimitedError{RetryAfter: wait}
 	}
 
-	hash, known := s.users[name]
+	user, known := s.users[name]
 	if !known {
 		// Verify against a real hash anyway, so an unknown name costs the same as a wrong
 		// password and cannot be timed apart.
@@ -141,14 +177,14 @@ func (s *Store) Authenticate(r *http.Request, name, password string) (Identity, 
 		s.limiter.failed(address)
 		return Identity{}, ErrInvalidCredentials
 	}
-	if !VerifyPassword(hash, password) {
+	if !VerifyPassword(user.PasswordHash, password) {
 		s.limiter.failed(address)
 		return Identity{}, ErrInvalidCredentials
 	}
 
 	s.limiter.signedIn(address)
 	expires := s.now().Add(s.ttl)
-	return Identity{Name: name, ExpiresAt: expires.UTC()}, nil
+	return Identity{Name: name, Role: user.Role, ExpiresAt: expires.UTC()}, nil
 }
 
 // Start writes the session cookie for identity. The token carries the name, the expiry
@@ -219,11 +255,12 @@ func (s *Store) Current(r *http.Request) (Identity, bool) {
 	if !s.now().Before(claims.expiry()) {
 		return Identity{}, false
 	}
-	return Identity{Name: claims.Subject, ExpiresAt: claims.expiry().UTC()}, true
+	return Identity{Name: claims.Subject, Role: claims.Role, ExpiresAt: claims.expiry().UTC()}, true
 }
 
 type claims struct {
 	Subject string `json:"sub"`
+	Role    string `json:"role"`
 	Expires int64  `json:"exp"`
 	ID      string `json:"jti"`
 }
@@ -237,6 +274,7 @@ func (s *Store) sign(identity Identity) (string, error) {
 	}
 	payload, err := json.Marshal(claims{
 		Subject: identity.Name,
+		Role:    identity.Role,
 		Expires: identity.ExpiresAt.Unix(),
 		ID:      hex.EncodeToString(nonce),
 	})
@@ -266,6 +304,11 @@ func (s *Store) open(token string) (claims, error) {
 	}
 	if c.Subject == "" || c.ID == "" {
 		return claims{}, errors.New("incomplete session token")
+	}
+	if c.Role == "" {
+		// A token signed before roles existed is the least a session may be, which is also
+		// what a deployment upgrading in place should get rather than a signed-out user.
+		c.Role = RoleViewer
 	}
 	return c, nil
 }
@@ -323,12 +366,13 @@ func (s *Store) cookieSecure(r *http.Request) bool {
 	return strings.EqualFold(strings.TrimSpace(proto), "https")
 }
 
-// clientAddress is the address the sign-in limiter counts: the peer that connected, unless
+// ClientAddress is the address the sign-in limiter counts and the audit record names: the
+// peer that connected, unless
 // that peer is a proxy this deployment trusts, in which case it is the client the proxy
 // forwarded for. A deployment behind a reverse proxy sees every request from the proxy, so
 // keying on the peer alone would let five bad guesses from one person lock out everyone
 // behind it.
-func (s *Store) clientAddress(r *http.Request) string {
+func (s *Store) ClientAddress(r *http.Request) string {
 	remote, peer, ok := peerAddress(r)
 	if !ok || !s.trusts(peer) {
 		// Whatever a client that is not a trusted proxy claims in the header, it is counted

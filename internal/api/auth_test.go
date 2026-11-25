@@ -1,6 +1,7 @@
 package api
 
 import (
+	"bytes"
 	"encoding/json"
 	"io"
 	"log/slog"
@@ -20,7 +21,7 @@ func authedRouter(t *testing.T) (http.Handler, *auth.Store) {
 		t.Fatalf("HashPassword: %v", err)
 	}
 	store, err := auth.New(auth.Options{
-		Users: map[string]string{"alice": hash},
+		Users: map[string]auth.User{"alice": {PasswordHash: hash}},
 		Key:   []byte("0123456789abcdef0123456789abcdef"),
 	})
 	if err != nil {
@@ -55,6 +56,109 @@ func sessionCookie(t *testing.T, recorder *httptest.ResponseRecorder) *http.Cook
 	}
 	t.Fatalf("no %s cookie in %v", auth.SessionCookie, recorder.Result().Cookies())
 	return nil
+}
+
+// authedRouterWithLog is authedRouter with the service log kept, because an audit record is a
+// line in that log rather than a second store (docs/adr/0010).
+func authedRouterWithLog(t *testing.T) (http.Handler, *bytes.Buffer) {
+	t.Helper()
+	hash, err := auth.HashPassword("s3cret")
+	if err != nil {
+		t.Fatalf("HashPassword: %v", err)
+	}
+	store, err := auth.New(auth.Options{
+		Users: map[string]auth.User{"alice": {PasswordHash: hash, Role: auth.RoleOperator}},
+		Key:   []byte("0123456789abcdef0123456789abcdef"),
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	records := &bytes.Buffer{}
+	log := slog.New(slog.NewJSONHandler(records, nil))
+	provider := &stubProvider{report: health.Report{Status: "ok"}}
+	return NewRouter(provider, log, WithAuth(store)), records
+}
+
+// auditRecords reads the audit lines out of everything the service logged.
+func auditRecords(t *testing.T, records *bytes.Buffer) []map[string]any {
+	t.Helper()
+	var events []map[string]any
+	for _, line := range strings.Split(strings.TrimSpace(records.String()), "\n") {
+		if line == "" {
+			continue
+		}
+		var record map[string]any
+		if err := json.Unmarshal([]byte(line), &record); err != nil {
+			t.Fatalf("log line %q is not JSON: %v", line, err)
+		}
+		if record["msg"] == "audit" {
+			events = append(events, record)
+		}
+	}
+	return events
+}
+
+func TestSessionActionsAreAuditedWithTheirActor(t *testing.T) {
+	handler, records := authedRouterWithLog(t)
+
+	signedIn := serve(handler, http.MethodPost, "/api/v1/session", `{"name":"alice","password":"s3cret"}`)
+	if signedIn.Code != http.StatusOK {
+		t.Fatalf("sign-in: status = %d", signedIn.Code)
+	}
+	cookie := sessionCookie(t, signedIn)
+	if recorder := serve(handler, http.MethodDelete, "/api/v1/session", "", cookie); recorder.Code != http.StatusNoContent {
+		t.Fatalf("sign-out: status = %d", recorder.Code)
+	}
+
+	// Five failures then the limiter's answer: every outcome the record can carry is written
+	// by the same handlers that refuse the request.
+	for i := 0; i < 5; i++ {
+		if recorder := serve(handler, http.MethodPost, "/api/v1/session", `{"name":"alice","password":"nope"}`); recorder.Code != http.StatusUnauthorized {
+			t.Fatalf("failure %d: status = %d, want 401", i+1, recorder.Code)
+		}
+	}
+	if recorder := serve(handler, http.MethodPost, "/api/v1/session", `{"name":"alice","password":"nope"}`); recorder.Code != http.StatusTooManyRequests {
+		t.Fatalf("after five failures: status = %d, want 429", recorder.Code)
+	}
+
+	events := auditRecords(t, records)
+	outcomes := make([]string, len(events))
+	for i, event := range events {
+		outcomes[i] = event["outcome"].(string)
+	}
+	want := []string{"allowed", "allowed", "refused", "refused", "refused", "refused", "refused", "limited"}
+	if len(outcomes) != len(want) {
+		t.Fatalf("outcomes = %v (%d records), want %v", outcomes, len(events), want)
+	}
+	for i := range want {
+		if outcomes[i] != want[i] {
+			t.Fatalf("outcomes = %v, want %v", outcomes, want)
+		}
+	}
+
+	// Every record names the client the limiter counts, which is the address an operator
+	// would look for after a lockout.
+	for i, event := range events {
+		if event["address"] != "192.0.2.10" {
+			t.Errorf("record %d address = %v, want the client address", i, event["address"])
+		}
+	}
+
+	// The actor and their role are on the records where there is an actor. A refused sign-in
+	// names only the name that was claimed, so it carries no role: guessing one would put a
+	// privilege the service never established into the record.
+	if events[0]["action"] != "sign-in" || events[0]["user"] != "alice" || events[0]["role"] != "operator" {
+		t.Errorf("sign-in record = %v, want alice as operator", events[0])
+	}
+	if events[1]["action"] != "sign-out" || events[1]["user"] != "alice" || events[1]["role"] != "operator" {
+		t.Errorf("sign-out record = %v, want alice as operator", events[1])
+	}
+	if events[2]["user"] != "alice" {
+		t.Errorf("refused record = %v, want the name that was claimed", events[2])
+	}
+	if _, ok := events[2]["role"]; ok {
+		t.Errorf("refused record carries a role it never established: %v", events[2])
+	}
 }
 
 func TestOperationalEndpointsRequireASession(t *testing.T) {

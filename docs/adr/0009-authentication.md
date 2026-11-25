@@ -75,7 +75,8 @@ authentication, rate limiting and three roles (viewer, operator, administrator).
    exactly as they were before this ADR, with no sign-out control.
 9. **No roles yet.** The handoff's three roles arrive with the endpoints that need them
    (worker restart, failed-job retry/delete); a role field no endpoint reads would be
-   configuration that looks like a control. CSRF tokens are deferred the same way: the
+   configuration that looks like a control. docs/adr/0010 adds the role as per-user
+   configuration and audit data and keeps enforcement with that first endpoint. CSRF tokens are deferred the same way: the
    only state-changing calls today are sign-in and sign-out, both protected by
    `SameSite=Lax` plus the same-origin dashboard, and the double-submit token lands with
    the first administrative mutation.

@@ -159,6 +159,12 @@ func (a *Auth) validate(errs *ValidationError) {
 		if err := auth.ValidateHash(user.PasswordHash); err != nil {
 			errs.add("%s.password_hash: %v", label, err)
 		}
+		// Normalise gives every user a role, so this only catches a role written by hand in
+		// a Config that skipped Parse.
+		if user.Role != "" && !auth.ValidRole(user.Role) {
+			errs.add("%s.role: %q is not a role (supported: %s, %s, %s)", label, user.Role,
+				auth.RoleViewer, auth.RoleOperator, auth.RoleAdministrator)
+		}
 	}
 }
 

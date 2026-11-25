@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/gohorizon/gohorizon/internal/audit"
 	"github.com/gohorizon/gohorizon/internal/auth"
 	"github.com/gohorizon/gohorizon/internal/health"
 	"github.com/gohorizon/gohorizon/internal/metrics"
@@ -61,6 +62,10 @@ func NewRouter(provider Provider, log *slog.Logger, opts ...Option) http.Handler
 	r := chi.NewRouter()
 	r.Use(recoverer(log))
 
+	// One record per session action. It is written through the same logger the service
+	// already runs, so it ships and rotates with everything else (docs/adr/0010).
+	auditor := audit.New(log)
+
 	// The scrape path is the conventional one, outside the versioned API: a Prometheus
 	// configuration names it, not a client written against this service.
 	r.Get("/metrics", metricsExposition(provider))
@@ -69,9 +74,9 @@ func NewRouter(provider Provider, log *slog.Logger, opts ...Option) http.Handler
 		if store := options.auth; store != nil {
 			// The session routes are the way in, so they answer without one. Everything
 			// else that reports operational state sits behind the gate below.
-			r.Post("/session", signIn(store, log))
+			r.Post("/session", signIn(store, log, auditor))
 			r.Get("/session", currentSession(store))
-			r.Delete("/session", signOut(store))
+			r.Delete("/session", signOut(store, auditor))
 		} else {
 			// The dashboard asks who it is talking to before it draws a page, and an open
 			// service has nobody to be. Answering in JSON says that plainly, so the bundle
@@ -202,7 +207,7 @@ func requireSession(store *auth.Store) func(http.Handler) http.Handler {
 
 // signIn exchanges a name and password for a session cookie. An unknown name and a wrong
 // password get the same answer, and a caller that keeps failing waits out the limiter.
-func signIn(store *auth.Store, log *slog.Logger) http.HandlerFunc {
+func signIn(store *auth.Store, log *slog.Logger, auditor *audit.Logger) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var body struct {
 			Name     string `json:"name"`
@@ -216,20 +221,46 @@ func signIn(store *auth.Store, log *slog.Logger) http.HandlerFunc {
 
 		identity, err := store.Authenticate(r, body.Name, body.Password)
 		if err != nil {
+			address := store.ClientAddress(r)
 			var limited *auth.RateLimitedError
 			if errors.As(err, &limited) {
+				// The limiter answered before the password was checked, so the record says it
+				// was held back rather than refused: those are different questions.
+				auditor.Record(r, audit.Event{
+					Action:  audit.ActionSignIn,
+					Outcome: audit.OutcomeLimited,
+					User:    body.Name,
+					Address: address,
+					Detail:  "too many attempts from this address",
+				})
 				seconds := int(math.Ceil(limited.RetryAfter.Seconds()))
 				w.Header().Set("Retry-After", strconv.Itoa(seconds))
 				writeError(w, http.StatusTooManyRequests, "too many sign-in attempts; try again later")
 				return
 			}
-			log.Warn("sign-in refused", "user", body.Name, "address", r.RemoteAddr)
+			auditor.Record(r, audit.Event{
+				Action:  audit.ActionSignIn,
+				Outcome: audit.OutcomeRefused,
+				User:    body.Name,
+				Address: address,
+				Detail:  "invalid credentials",
+			})
+			log.Warn("sign-in refused", "user", body.Name, "address", address)
 			writeError(w, http.StatusUnauthorized, "invalid credentials")
 			return
 		}
 
 		// The body and the cookie both name a session, so neither may be cached by a proxy.
 		w.Header().Set("Cache-Control", "no-store")
+		// The record is written before the cookie, so a session that exists in a browser
+		// always has a line that says it was started, and by whom.
+		auditor.Record(r, audit.Event{
+			Action:  audit.ActionSignIn,
+			Outcome: audit.OutcomeAllowed,
+			User:    identity.Name,
+			Role:    identity.Role,
+			Address: store.ClientAddress(r),
+		})
 		if err := store.Start(w, r, identity); err != nil {
 			// The store no longer answers the request itself, so this is the only status
 			// line written: a session the server could not sign is a failed sign-in.
@@ -255,8 +286,19 @@ func currentSession(store *auth.Store) http.HandlerFunc {
 	}
 }
 
-func signOut(store *auth.Store) http.HandlerFunc {
+func signOut(store *auth.Store, auditor *audit.Logger) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		// Who ended the session is read before it is ended: afterwards there is nothing left
+		// to name. A sign-out with no valid session has no actor, and records nothing.
+		if identity, ok := store.Current(r); ok {
+			auditor.Record(r, audit.Event{
+				Action:  audit.ActionSignOut,
+				Outcome: audit.OutcomeAllowed,
+				User:    identity.Name,
+				Role:    identity.Role,
+				Address: store.ClientAddress(r),
+			})
+		}
 		store.End(w, r)
 		w.Header().Set("Cache-Control", "no-store")
 		w.WriteHeader(http.StatusNoContent)

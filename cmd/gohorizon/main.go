@@ -172,9 +172,9 @@ func newAuthStore(cfg *config.Config) (*auth.Store, error) {
 	if key == "" {
 		return nil, fmt.Errorf("server.auth.session_key_env: %s is unset or empty", cfg.Server.Auth.SessionKeyEnv)
 	}
-	users := make(map[string]string, len(cfg.Server.Auth.Users))
+	users := make(map[string]auth.User, len(cfg.Server.Auth.Users))
 	for _, user := range cfg.Server.Auth.Users {
-		users[user.Name] = user.PasswordHash
+		users[user.Name] = auth.User{PasswordHash: user.PasswordHash, Role: user.Role}
 	}
 	proxies, err := cfg.Server.ProxyPrefixes()
 	if err != nil {

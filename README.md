@@ -76,7 +76,12 @@ Milestones 1 and 2 implemented:
   `Secure` when its `X-Forwarded-Proto` says the browser is on HTTPS and the limiter counts
   the client it forwards for rather than the proxy itself; one list decides both, so a
   forwarded header is never trusted more than its sender. The dashboard opens on a sign-in
-  screen and offers a sign-out; without users it stays open, as before.
+  screen and offers a sign-out; without users it stays open, as before. A user carries a
+  role (`viewer`, `operator`, `administrator`; the default is `viewer`) inside the signed
+  session, and every session action — sign-in allowed, refused or limited, and sign-out — is
+  written to the service log as a `msg=audit` record naming the actor, their role and the
+  client address (docs/adr/0010). Roles are not enforced yet: every endpoint today reports
+  state, which the least of them may read.
 
 `GET /api/v1/metrics?queue=default[&resolution=minute|hourly|daily][&from=…&to=…]`
 returns one queue's persisted buckets as `{queue, resolution, from, to, buckets: [{start,
@@ -109,8 +114,8 @@ the format requires. `/metrics` stays unauthenticated, because Prometheus scrape
 a session; keep it behind the reverse proxy. `/api/v1/health` is behind the gate like the
 rest of the API once `server.auth.users` is configured.
 
-Not implemented yet: roles and authorisation, audit logs, CSRF tokens for mutations,
-balancing, failed-job administration.
+Not implemented yet: authorisation by role (it lands with the first mutating endpoint),
+queryable audit history, CSRF tokens for mutations, balancing, failed-job administration.
 
 ## Layout
 

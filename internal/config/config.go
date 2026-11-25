@@ -20,6 +20,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/gohorizon/gohorizon/internal/auth"
+
 	"github.com/go-viper/mapstructure/v2"
 	"github.com/knadh/koanf/parsers/yaml"
 	"github.com/knadh/koanf/providers/rawbytes"
@@ -97,6 +99,9 @@ func (a Auth) Enabled() bool { return len(a.Users) > 0 }
 type User struct {
 	Name         string `yaml:"name"`
 	PasswordHash string `yaml:"password_hash"`
+	// Role is viewer, operator or administrator. Empty means viewer, the least a session may
+	// be, so a user added without one is never more privileged than intended (docs/adr/0010).
+	Role string `yaml:"role"`
 }
 
 type Storage struct {
@@ -250,6 +255,11 @@ func (c *Config) normalize() {
 
 	if c.Server.Auth.Enabled() && c.Server.Auth.SessionHours == 0 {
 		c.Server.Auth.SessionHours = DefaultSessionHours
+	}
+	for i := range c.Server.Auth.Users {
+		if c.Server.Auth.Users[i].Role == "" {
+			c.Server.Auth.Users[i].Role = auth.RoleViewer
+		}
 	}
 
 	for ai := range c.Applications {

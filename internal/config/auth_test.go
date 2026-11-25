@@ -47,6 +47,32 @@ func TestParseReadsUsersAndDefaultsTheSessionLength(t *testing.T) {
 	}
 }
 
+func TestParseDefaultsAndReadsTheUserRole(t *testing.T) {
+	hash := mustPasswordHash(t)
+	block := "  auth:\n" +
+		"    session_key_env: GOHORIZON_SESSION_KEY\n" +
+		"    users:\n" +
+		"      - name: alice\n" +
+		"        password_hash: '" + hash + "'\n" +
+		"      - name: bob\n" +
+		"        password_hash: '" + hash + "'\n" +
+		"        role: operator\n"
+
+	cfg, err := Parse([]byte(withAuth(t, block)))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("Validate: %v", err)
+	}
+	if got := cfg.Server.Auth.Users[0].Role; got != auth.RoleViewer {
+		t.Errorf("alice's role = %q, want the default %q", got, auth.RoleViewer)
+	}
+	if got := cfg.Server.Auth.Users[1].Role; got != auth.RoleOperator {
+		t.Errorf("bob's role = %q, want %q", got, auth.RoleOperator)
+	}
+}
+
 func TestValidateRejectsBrokenAuthConfiguration(t *testing.T) {
 	hash := mustPasswordHash(t)
 	block := func(lines ...string) string {
@@ -93,6 +119,12 @@ func TestValidateRejectsBrokenAuthConfiguration(t *testing.T) {
 			block: block(append([]string{"    session_key_env: GOHORIZON_SESSION_KEY"},
 				user("Alice", hash)...)...),
 			want: "must be lowercase",
+		},
+		{
+			name: "role this service does not know",
+			block: block(append([]string{"    session_key_env: GOHORIZON_SESSION_KEY"},
+				"    users:", "      - name: alice", "        password_hash: '"+hash+"'", "        role: admin")...),
+			want: "role",
 		},
 		{
 			name: "session length out of range",

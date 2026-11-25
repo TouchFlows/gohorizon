@@ -19,7 +19,9 @@ server:
   #   gohorizon passwd            # prints a hash; the plaintext is never stored
   #
   # then name the environment variable that holds the session signing key (at least 32
-  # bytes) and add one entry per operator:
+  # bytes) and add one entry per operator. The role is viewer, operator or administrator,
+  # and defaults to viewer; every session action is written to the log as an audit record
+  # (docs/adr/0010):
   #
   # auth:
   #   session_key_env: GOHORIZON_SESSION_KEY
@@ -27,6 +29,7 @@ server:
   #   users:
   #     - name: alice
   #       password_hash: 'pbkdf2-sha256$210000$...$...'
+  #       role: administrator
 
 storage:
   driver: sqlite
