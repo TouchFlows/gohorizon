@@ -35,6 +35,9 @@ type Provider interface {
 	// RetryFailedJob asks the application to push one failed job back onto its queue through
 	// its own `queue:retry` command (docs/adr/0012).
 	RetryFailedJob(ctx context.Context, id string) error
+	// ForgetFailedJob asks the application to delete one failed job through its own
+	// `queue:forget` command (docs/adr/0012).
+	ForgetFailedJob(ctx context.Context, id string) error
 }
 
 // defaultHistoryWindows is the range the metrics endpoint answers when no `from` is
@@ -115,6 +118,10 @@ func NewRouter(provider Provider, log *slog.Logger, opts ...Option) http.Handler
 					requireRole(store, auth.RoleOperator, audit.ActionFailedJobRetry, auditor),
 					requireCSRF(store, audit.ActionFailedJobRetry, auditor),
 				).Post("/failed/{job}/retry", retryFailedJob(provider, store, log, auditor))
+				r.With(
+					requireRole(store, auth.RoleOperator, audit.ActionFailedJobDelete, auditor),
+					requireCSRF(store, audit.ActionFailedJobDelete, auditor),
+				).Delete("/failed/{job}", deleteFailedJob(provider, store, log, auditor))
 			})
 		}
 
@@ -343,75 +350,125 @@ func restartWorker(provider Provider, store *auth.Store, log *slog.Logger, audit
 	}
 }
 
-// retryFailedJob pushes one failed job back onto its queue. Laravel owns the failed record and
-// the payload, so the adapter runs the application's own `queue:retry` command rather than
-// GoHorizon writing a queue key (handoff §13, docs/adr/0001). The identity is looked up in
-// history before anything is asked of the application: an id no attempt is known by is a 404,
-// and an attempt whose newest outcome is not `failed` is a 409, so the endpoint cannot be used
-// to push a payload a caller invented.
+// failedJobFor resolves one failed job from history and writes the refusal itself when the
+// identity is not something this group may act on. Laravel owns the failed record and its
+// payload, so nothing is asked of the application until an attempt that actually failed is
+// known: an id no history has is a 404, an attempt whose newest outcome is not `failed` is a
+// 409, and one that carries no uuid has nothing the application could be asked about
+// (docs/adr/0012). The bool says whether the caller still has work to do.
+func failedJobFor(w http.ResponseWriter, r *http.Request, provider Provider, store *auth.Store, log *slog.Logger, auditor *audit.Logger, action string) (metrics.Job, bool) {
+	identity := chi.URLParam(r, "job")
+
+	job, err := provider.Job(r.Context(), identity)
+	if err != nil {
+		switch {
+		case errors.Is(err, metrics.ErrJobNotFound):
+			refuseFailedJobAction(w, r, store, auditor, action, http.StatusNotFound, "no job with id "+identity, "job not found")
+		case errors.Is(err, metrics.ErrDisabled):
+			refuseFailedJobAction(w, r, store, auditor, action, http.StatusServiceUnavailable, "job history is unavailable", "could not read job history")
+		default:
+			log.Error("read job history", "job", identity, "error", err)
+			refuseFailedJobAction(w, r, store, auditor, action, http.StatusInternalServerError, "job history could not be read", "could not read job history")
+		}
+		return metrics.Job{}, false
+	}
+	if job.Outcome != "failed" {
+		// An attempt that was processed, released or timed out has nothing the application
+		// could act on: a failed record either never existed for it or is already gone.
+		refuseFailedJobAction(w, r, store, auditor, action, http.StatusConflict, "outcome "+job.Outcome, "only a failed attempt can be acted on")
+		return metrics.Job{}, false
+	}
+	if job.UUID == "" {
+		refuseFailedJobAction(w, r, store, auditor, action, http.StatusConflict, "the attempt carries no uuid", "this attempt has nothing the application can act on")
+		return metrics.Job{}, false
+	}
+	return job, true
+}
+
+// failedJobCommandError maps a refused or failed application command onto its answer, so retry
+// and delete report the same thing in the same words. The application is the only place that
+// knows whether it still stores the job.
+func failedJobCommandError(w http.ResponseWriter, r *http.Request, store *auth.Store, log *slog.Logger, auditor *audit.Logger, action string, job metrics.Job, verb string, err error) {
+	if errors.Is(err, adapter.ErrFailedJobNotFound) {
+		// The record was retried or forgotten between the history read and the command, so the
+		// command had nothing to do rather than failing.
+		refuseFailedJobAction(w, r, store, auditor, action, http.StatusNotFound,
+			"the application no longer stores "+job.UUID, "failed job not found")
+		return
+	}
+	log.Warn("failed job "+verb, "job", job.UUID, "error", err)
+	message := "the application could not " + verb + " the job"
+	refuseFailedJobAction(w, r, store, auditor, action, http.StatusServiceUnavailable, message, message)
+}
+
+// refuseFailedJobAction records a refused failed-job action and answers with its reason, so
+// every path in this group leaves one shape of record (docs/adr/0010).
+func refuseFailedJobAction(w http.ResponseWriter, r *http.Request, store *auth.Store, auditor *audit.Logger, action string, status int, detail, message string) {
+	me, _ := store.Current(r)
+	auditor.Record(r, audit.Event{
+		Action:  action,
+		Outcome: audit.OutcomeRefused,
+		User:    me.Name,
+		Role:    me.Role,
+		Address: store.ClientAddress(r),
+		Detail:  detail,
+	})
+	w.Header().Set("Cache-Control", "no-store")
+	writeError(w, status, message)
+}
+
+// allowFailedJobAction records an action that happened, naming the queue the job belongs to so
+// the record says where the work landed rather than only which id was touched.
+func allowFailedJobAction(w http.ResponseWriter, r *http.Request, store *auth.Store, auditor *audit.Logger, action string, job metrics.Job) {
+	me, _ := store.Current(r)
+	auditor.Record(r, audit.Event{
+		Action:  action,
+		Outcome: audit.OutcomeAllowed,
+		User:    me.Name,
+		Role:    me.Role,
+		Address: store.ClientAddress(r),
+		Detail:  "queue " + job.Queue,
+	})
+	w.Header().Set("Cache-Control", "no-store")
+}
+
+// retryFailedJob pushes one failed job back onto its queue through the application's own
+// `queue:retry`, so GoHorizon still writes no queue key (handoff §13, docs/adr/0012). The work
+// is queued rather than done, which is why the answer is 202.
 func retryFailedJob(provider Provider, store *auth.Store, log *slog.Logger, auditor *audit.Logger) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		identity := chi.URLParam(r, "job")
-		me, _ := store.Current(r)
-		refuse := func(status int, detail, message string) {
-			auditor.Record(r, audit.Event{
-				Action:  audit.ActionFailedJobRetry,
-				Outcome: audit.OutcomeRefused,
-				User:    me.Name,
-				Role:    me.Role,
-				Address: store.ClientAddress(r),
-				Detail:  detail,
-			})
-			w.Header().Set("Cache-Control", "no-store")
-			writeError(w, status, message)
-		}
-
-		job, err := provider.Job(r.Context(), identity)
-		if err != nil {
-			switch {
-			case errors.Is(err, metrics.ErrJobNotFound):
-				refuse(http.StatusNotFound, "no job with id "+identity, "job not found")
-			case errors.Is(err, metrics.ErrDisabled):
-				refuse(http.StatusServiceUnavailable, "job history is unavailable", "could not read job history")
-			default:
-				log.Error("read job history", "job", identity, "error", err)
-				refuse(http.StatusInternalServerError, "job history could not be read", "could not read job history")
-			}
-			return
-		}
-		if job.Outcome != "failed" {
-			// An attempt that was processed, released or timed out has nothing the application
-			// could retry: a failed record either never existed for it or is already gone.
-			refuse(http.StatusConflict, "outcome "+job.Outcome, "only a failed attempt can be retried")
-			return
-		}
-		if job.UUID == "" {
-			refuse(http.StatusConflict, "the attempt carries no uuid", "this attempt has nothing the application can retry")
+		job, ok := failedJobFor(w, r, provider, store, log, auditor, audit.ActionFailedJobRetry)
+		if !ok {
 			return
 		}
 
 		if err := provider.RetryFailedJob(r.Context(), job.UUID); err != nil {
-			if errors.Is(err, adapter.ErrFailedJobNotFound) {
-				// The retry is a no-op the application reports instead of performing: the record
-				// was retried or forgotten between the history read and the command.
-				refuse(http.StatusNotFound, "the application no longer stores "+job.UUID, "failed job not found")
-				return
-			}
-			log.Warn("retry failed job", "job", job.UUID, "error", err)
-			refuse(http.StatusServiceUnavailable, "the application could not retry the job", "the application could not retry the job")
+			failedJobCommandError(w, r, store, log, auditor, audit.ActionFailedJobRetry, job, "retry", err)
 			return
 		}
 
-		auditor.Record(r, audit.Event{
-			Action:  audit.ActionFailedJobRetry,
-			Outcome: audit.OutcomeAllowed,
-			User:    me.Name,
-			Role:    me.Role,
-			Address: store.ClientAddress(r),
-			Detail:  "queue " + job.Queue,
-		})
-		w.Header().Set("Cache-Control", "no-store")
+		allowFailedJobAction(w, r, store, auditor, audit.ActionFailedJobRetry, job)
 		writeJSON(w, http.StatusAccepted, map[string]string{"job": job.UUID, "queue": job.Queue})
+	}
+}
+
+// deleteFailedJob removes one failed job through the application's own `queue:forget`
+// (docs/adr/0012). The record is gone when the application answers, so this is a 200 rather
+// than the 202 a retry gets: there is no queued work left to wait for.
+func deleteFailedJob(provider Provider, store *auth.Store, log *slog.Logger, auditor *audit.Logger) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		job, ok := failedJobFor(w, r, provider, store, log, auditor, audit.ActionFailedJobDelete)
+		if !ok {
+			return
+		}
+
+		if err := provider.ForgetFailedJob(r.Context(), job.UUID); err != nil {
+			failedJobCommandError(w, r, store, log, auditor, audit.ActionFailedJobDelete, job, "delete", err)
+			return
+		}
+
+		allowFailedJobAction(w, r, store, auditor, audit.ActionFailedJobDelete, job)
+		writeJSON(w, http.StatusOK, map[string]string{"job": job.UUID, "queue": job.Queue})
 	}
 }
 

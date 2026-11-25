@@ -39,9 +39,11 @@ type stubProvider struct {
 	restarted  []string
 	restartErr error
 
-	// The failed jobs a handler asked to retry, and what the retry answered.
-	retried  []string
-	retryErr error
+	// The failed jobs a handler asked to retry or delete, and what those answers were.
+	retried   []string
+	retryErr  error
+	forgotten []string
+	forgetErr error
 }
 
 func (s *stubProvider) Report() health.Report { return s.report }
@@ -69,6 +71,11 @@ func (s *stubProvider) RestartWorker(uuid string) error {
 func (s *stubProvider) RetryFailedJob(_ context.Context, id string) error {
 	s.retried = append(s.retried, id)
 	return s.retryErr
+}
+
+func (s *stubProvider) ForgetFailedJob(_ context.Context, id string) error {
+	s.forgotten = append(s.forgotten, id)
+	return s.forgetErr
 }
 
 func get(t *testing.T, provider Provider, target string) *httptest.ResponseRecorder {

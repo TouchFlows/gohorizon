@@ -901,13 +901,20 @@ func TestLockSilenceFencesTheService(t *testing.T) {
 // decision — ask the adapter, log what happened, pass the application's answer through — can
 // be read without a Laravel application.
 type stubFailer struct {
-	ids []string
-	err error
+	ids       []string
+	forgotten []string
+	err       error
+	forgetErr error
 }
 
 func (s *stubFailer) RetryFailedJob(_ context.Context, id string) error {
 	s.ids = append(s.ids, id)
 	return s.err
+}
+
+func (s *stubFailer) ForgetFailedJob(_ context.Context, id string) error {
+	s.forgotten = append(s.forgotten, id)
+	return s.forgetErr
 }
 
 func TestServiceRetryFailedJobAsksTheApplication(t *testing.T) {
@@ -933,6 +940,33 @@ func TestServiceRetryFailedJobPassesAMissingRecordThrough(t *testing.T) {
 	service := &Service{log: slog.New(slog.NewTextHandler(io.Discard, nil)), failer: failer}
 
 	if err := service.RetryFailedJob(context.Background(), "job-1"); !errors.Is(err, adapter.ErrFailedJobNotFound) {
+		t.Fatalf("error = %v, want the adapter's not-found passed through", err)
+	}
+}
+
+func TestServiceForgetFailedJobAsksTheApplication(t *testing.T) {
+	failer := &stubFailer{}
+	logs := &bytes.Buffer{}
+	service := &Service{log: slog.New(slog.NewJSONHandler(logs, nil)), failer: failer}
+
+	if err := service.ForgetFailedJob(context.Background(), "job-1"); err != nil {
+		t.Fatalf("ForgetFailedJob: %v", err)
+	}
+	if len(failer.forgotten) != 1 || failer.forgotten[0] != "job-1" {
+		t.Fatalf("adapter was asked to forget %v, want [job-1]", failer.forgotten)
+	}
+	if !strings.Contains(logs.String(), "failed job delete requested") {
+		t.Errorf("log = %q, want the deletion to be recorded", logs.String())
+	}
+}
+
+func TestServiceForgetFailedJobPassesAMissingRecordThrough(t *testing.T) {
+	// A job the application already forgot is its answer to give, so the endpoint's 404 comes
+	// from the adapter rather than from a decision made here.
+	failer := &stubFailer{forgetErr: adapter.ErrFailedJobNotFound}
+	service := &Service{log: slog.New(slog.NewTextHandler(io.Discard, nil)), failer: failer}
+
+	if err := service.ForgetFailedJob(context.Background(), "job-1"); !errors.Is(err, adapter.ErrFailedJobNotFound) {
 		t.Fatalf("error = %v, want the adapter's not-found passed through", err)
 	}
 }

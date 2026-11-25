@@ -90,3 +90,55 @@ func TestRetryFailedJobRefusesAnIdThatIsNotAnArgument(t *testing.T) {
 		}
 	}
 }
+
+func TestForgetFailedJobRunsQueueForgetForTheId(t *testing.T) {
+	probe := retryProbe(t)
+	t.Setenv("GOHORIZON_TEST_RETRY_EXIT", "1")
+	t.Setenv("GOHORIZON_TEST_RETRY_OUTPUT", "artisan could not start\n")
+
+	err := probe.ForgetFailedJob(context.Background(), "job-1")
+	if !errors.Is(err, errUnavailable) {
+		t.Fatalf("error = %v, want errUnavailable", err)
+	}
+	// The subcommand and the id are in the error because the fake echoed its arguments: this
+	// is what proves the adapter built `queue:forget <id>` and not something else.
+	for _, want := range []string{"queue:forget", "job-1", "artisan could not start"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error = %q, want it to name %q", err, want)
+		}
+	}
+}
+
+func TestForgetFailedJobAcceptsTheApplicationAnswer(t *testing.T) {
+	probe := retryProbe(t)
+	t.Setenv("GOHORIZON_TEST_RETRY_OUTPUT", "Failed job [job-1] deleted successfully.\n")
+
+	if err := probe.ForgetFailedJob(context.Background(), "job-1"); err != nil {
+		t.Fatalf("ForgetFailedJob: %v", err)
+	}
+}
+
+func TestForgetFailedJobReportsAnIdTheApplicationCannotFind(t *testing.T) {
+	// `queue:forget` answers a missing id with a failed status and this phrase, so the phrase
+	// has to be read before the status is turned into "the application is unavailable".
+	for _, status := range []string{"1", ""} {
+		probe := retryProbe(t)
+		t.Setenv("GOHORIZON_TEST_RETRY_EXIT", status)
+		t.Setenv("GOHORIZON_TEST_RETRY_OUTPUT", "  ERROR  No failed job matches the ID [job-1].\n")
+
+		err := probe.ForgetFailedJob(context.Background(), "job-1")
+		if !errors.Is(err, ErrFailedJobNotFound) {
+			t.Errorf("exit %q: error = %v, want ErrFailedJobNotFound", status, err)
+		}
+	}
+}
+
+func TestForgetFailedJobRefusesAnIdThatIsNotAnArgument(t *testing.T) {
+	probe := retryProbe(t)
+
+	for _, id := range []string{"", "   ", "--queue=all"} {
+		if err := probe.ForgetFailedJob(context.Background(), id); err == nil {
+			t.Errorf("ForgetFailedJob(%q) = nil, want a refusal", id)
+		}
+	}
+}

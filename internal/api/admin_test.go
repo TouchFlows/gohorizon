@@ -549,3 +549,207 @@ func TestAnOpenServiceHasNoFailedJobRetry(t *testing.T) {
 		t.Fatalf("an open service retried %v", provider.retried)
 	}
 }
+
+// deleteJob asks for one failed job's deletion, with the cookies a browser holds and, when
+// token is not empty, the header it echoes.
+func deleteJob(handler http.Handler, id string, token string, cookies ...*http.Cookie) *httptest.ResponseRecorder {
+	request := httptest.NewRequest(http.MethodDelete, "/api/v1/failed/"+id, nil)
+	request.RemoteAddr = "192.0.2.10:5555"
+	for _, cookie := range cookies {
+		request.AddCookie(cookie)
+	}
+	if token != "" {
+		request.Header.Set(auth.CSRFHeader, token)
+	}
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, request)
+	return recorder
+}
+
+func TestDeleteNeedsTheTokenAndAnOperatorRole(t *testing.T) {
+	cases := []struct {
+		name string
+		role string
+		// token picks the header: "cookie" echoes the issued token, "wrong" sends another,
+		// "" sends none.
+		token string
+		want  int
+	}{
+		{name: "a viewer with the token", role: auth.RoleViewer, token: "cookie", want: http.StatusForbidden},
+		{name: "an operator with no token", role: auth.RoleOperator, token: "", want: http.StatusForbidden},
+		{name: "an operator with the wrong token", role: auth.RoleOperator, token: "wrong", want: http.StatusForbidden},
+		{name: "an operator with the token", role: auth.RoleOperator, token: "cookie", want: http.StatusOK},
+		{name: "an administrator with the token", role: auth.RoleAdministrator, token: "cookie", want: http.StatusOK},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			handler, provider, _ := adminRouter(t, tc.role)
+			provider.job = failedJob()
+			session, csrf := signInForAdmin(t, handler)
+
+			token := ""
+			switch tc.token {
+			case "cookie":
+				token = csrf.Value
+			case "wrong":
+				token = "not-the-issued-token"
+			}
+			recorder := deleteJob(handler, testJobUUID, token, session, csrf)
+
+			if recorder.Code != tc.want {
+				t.Fatalf("status = %d, want %d (body %s)", recorder.Code, tc.want, recorder.Body)
+			}
+			// Nothing is asked of the application unless both checks passed, so a refused call
+			// is proved by no deletion ever reaching the adapter.
+			wantDeletes := 0
+			if tc.want == http.StatusOK {
+				wantDeletes = 1
+			}
+			if len(provider.forgotten) != wantDeletes {
+				t.Errorf("forgotten = %v, want %d deletion(s)", provider.forgotten, wantDeletes)
+			}
+			if wantDeletes == 1 && (len(provider.forgotten) != 1 || provider.forgotten[0] != testJobUUID) {
+				t.Errorf("forgot %v, want [%s]", provider.forgotten, testJobUUID)
+			}
+			if got := recorder.Header().Get("Cache-Control"); got != "no-store" {
+				t.Errorf("Cache-Control = %q, want no-store", got)
+			}
+		})
+	}
+}
+
+func TestDeleteWithoutASessionIsUnauthorized(t *testing.T) {
+	handler, provider, _ := adminRouter(t, auth.RoleAdministrator)
+	provider.job = failedJob()
+
+	if recorder := deleteJob(handler, testJobUUID, "anything"); recorder.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401", recorder.Code)
+	}
+	if len(provider.forgotten) != 0 {
+		t.Fatalf("a session-less call deleted %v", provider.forgotten)
+	}
+}
+
+func TestDeleteIsAuditedWithTheQueueItWasRemovedFrom(t *testing.T) {
+	handler, provider, records := adminRouter(t, auth.RoleOperator)
+	provider.job = failedJob()
+	session, csrf := signInForAdmin(t, handler)
+
+	recorder := deleteJob(handler, testJobUUID, csrf.Value, session, csrf)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (body %s)", recorder.Code, recorder.Body)
+	}
+	// The record is gone when the answer is written, which is what separates this from the 202
+	// a retry gets; the body still names the identity and its queue for the log a client keeps.
+	var answer map[string]string
+	if err := json.Unmarshal(recorder.Body.Bytes(), &answer); err != nil {
+		t.Fatalf("decode answer: %v", err)
+	}
+	if answer["job"] != testJobUUID || answer["queue"] != "default" {
+		t.Errorf("answer = %v, want the uuid and its queue", answer)
+	}
+	if len(provider.forgotten) != 1 || provider.forgotten[0] != testJobUUID {
+		t.Fatalf("forgotten = %v, want [%s]", provider.forgotten, testJobUUID)
+	}
+
+	events := auditRecords(t, records)
+	allowed := events[len(events)-1]
+	if allowed["action"] != "failed-job-delete" || allowed["outcome"] != "allowed" {
+		t.Fatalf("record = %v, want an allowed failed-job-delete", allowed)
+	}
+	if allowed["user"] != "alice" || allowed["role"] != auth.RoleOperator {
+		t.Errorf("record = %v, want alice as operator", allowed)
+	}
+	if allowed["detail"] != "queue default" {
+		t.Errorf("detail = %v, want the queue the job belonged to", allowed["detail"])
+	}
+	if allowed["address"] != "192.0.2.10" {
+		t.Errorf("address = %v, want the client address", allowed["address"])
+	}
+}
+
+func TestDeleteOfAnUnknownJobIsANotFound(t *testing.T) {
+	handler, provider, records := adminRouter(t, auth.RoleOperator)
+	provider.jobErr = metrics.ErrJobNotFound
+	session, csrf := signInForAdmin(t, handler)
+
+	if recorder := deleteJob(handler, testJobUUID, csrf.Value, session, csrf); recorder.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404 (body %s)", recorder.Code, recorder.Body)
+	}
+	if len(provider.forgotten) != 0 {
+		t.Fatalf("an unknown job was deleted: %v", provider.forgotten)
+	}
+
+	events := auditRecords(t, records)
+	refused := events[len(events)-1]
+	if refused["action"] != "failed-job-delete" || refused["outcome"] != "refused" {
+		t.Fatalf("record = %v, want a refused failed-job-delete", refused)
+	}
+	if refused["detail"] != "no job with id "+testJobUUID {
+		t.Errorf("detail = %v, want the id that was looked up", refused["detail"])
+	}
+}
+
+func TestDeleteOfAnAttemptThatDidNotFailIsAConflict(t *testing.T) {
+	handler, provider, records := adminRouter(t, auth.RoleOperator)
+	job := failedJob()
+	job.Outcome = "processed"
+	provider.job = job
+	session, csrf := signInForAdmin(t, handler)
+
+	if recorder := deleteJob(handler, testJobUUID, csrf.Value, session, csrf); recorder.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want 409 (body %s)", recorder.Code, recorder.Body)
+	}
+	if len(provider.forgotten) != 0 {
+		t.Fatalf("an attempt that succeeded was deleted: %v", provider.forgotten)
+	}
+
+	events := auditRecords(t, records)
+	refused := events[len(events)-1]
+	if refused["outcome"] != "refused" || refused["detail"] != "outcome processed" {
+		t.Fatalf("record = %v, want a refusal naming the outcome", refused)
+	}
+}
+
+func TestDeleteOfAFailedJobTheApplicationNoLongerStoresIsANotFound(t *testing.T) {
+	handler, provider, records := adminRouter(t, auth.RoleOperator)
+	provider.job = failedJob()
+	provider.forgetErr = adapter.ErrFailedJobNotFound
+	session, csrf := signInForAdmin(t, handler)
+
+	if recorder := deleteJob(handler, testJobUUID, csrf.Value, session, csrf); recorder.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404 (body %s)", recorder.Code, recorder.Body)
+	}
+
+	events := auditRecords(t, records)
+	refused := events[len(events)-1]
+	if refused["outcome"] != "refused" || refused["detail"] != "the application no longer stores "+testJobUUID {
+		t.Fatalf("record = %v, want a refusal naming the missing record", refused)
+	}
+}
+
+func TestDeleteWhenTheApplicationCannotAnswerIsAServiceUnavailable(t *testing.T) {
+	handler, provider, _ := adminRouter(t, auth.RoleOperator)
+	provider.job = failedJob()
+	provider.forgetErr = &stubRestartError{}
+	session, csrf := signInForAdmin(t, handler)
+
+	// The command failed for a reason that is not "no such failed job", so the endpoint says
+	// the application is unhealthy instead of claiming a deletion happened.
+	if recorder := deleteJob(handler, testJobUUID, csrf.Value, session, csrf); recorder.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want 503 (body %s)", recorder.Code, recorder.Body)
+	}
+}
+
+func TestAnOpenServiceHasNoFailedJobDelete(t *testing.T) {
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	provider := &stubProvider{report: health.Report{Status: "ok"}, job: failedJob()}
+	recorder := deleteJob(NewRouter(provider, log), testJobUUID, "anything")
+
+	if recorder.Code == http.StatusOK {
+		t.Fatal("an open service accepted a failed-job delete")
+	}
+	if len(provider.forgotten) != 0 {
+		t.Fatalf("an open service deleted %v", provider.forgotten)
+	}
+}

@@ -68,11 +68,12 @@ type queueInspector interface {
 	Queues(ctx context.Context, connection string, queues []string) (adapter.Inspection, error)
 }
 
-// failedJobRetrier is the adapter surface an administrative retry goes through, so a failed job
-// is re-published by the application, never by GoHorizon writing a queue key (docs/adr/0012).
-// adapter.Probe implements it.
-type failedJobRetrier interface {
+// failedJobAdmin is the adapter surface the failed-job actions go through, so a failed job is
+// re-published or deleted by the application, never by GoHorizon writing a queue key
+// (docs/adr/0012). adapter.Probe implements it.
+type failedJobAdmin interface {
 	RetryFailedJob(ctx context.Context, id string) error
+	ForgetFailedJob(ctx context.Context, id string) error
 }
 
 type Service struct {
@@ -84,7 +85,7 @@ type Service struct {
 	managers []*process.Manager
 
 	inspector     queueInspector
-	failer        failedJobRetrier
+	failer        failedJobAdmin
 	queues        []string
 	queueInterval time.Duration
 	pruneInterval time.Duration
@@ -294,6 +295,19 @@ func (s *Service) RetryFailedJob(ctx context.Context, id string) error {
 		return err
 	}
 	s.log.Info("failed job retry requested", "job", id)
+	return nil
+}
+
+// ForgetFailedJob asks the application to delete one failed job, through the same adapter as a
+// retry: the failed record belongs to the application (docs/adr/0012).
+func (s *Service) ForgetFailedJob(ctx context.Context, id string) error {
+	if s.failer == nil {
+		return errors.New("the application adapter is unavailable")
+	}
+	if err := s.failer.ForgetFailedJob(ctx, id); err != nil {
+		return err
+	}
+	s.log.Info("failed job delete requested", "job", id)
 	return nil
 }
 

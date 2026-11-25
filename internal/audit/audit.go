@@ -23,10 +23,11 @@ import (
 // Actions a record can carry. They are dotted names with a stable spelling, because an
 // operator's alerting matches on them.
 const (
-	ActionSignIn         = "sign-in"
-	ActionSignOut        = "sign-out"
-	ActionWorkerRestart  = "worker-restart"
-	ActionFailedJobRetry = "failed-job-retry"
+	ActionSignIn          = "sign-in"
+	ActionSignOut         = "sign-out"
+	ActionWorkerRestart   = "worker-restart"
+	ActionFailedJobRetry  = "failed-job-retry"
+	ActionFailedJobDelete = "failed-job-delete"
 )
 
 // Outcomes a record can carry: the action happened, it was refused, or the caller was held
