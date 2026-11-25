@@ -4,6 +4,21 @@ server:
   listen: "127.0.0.1:8090"
   metrics: true
 
+  # Sign-in for the dashboard and the API (docs/adr/0009). Without users the service
+  # stays open, which is the localhost default. To turn it on:
+  #
+  #   gohorizon passwd            # prints a hash; the plaintext is never stored
+  #
+  # then name the environment variable that holds the session signing key (at least 32
+  # bytes) and add one entry per operator:
+  #
+  # auth:
+  #   session_key_env: GOHORIZON_SESSION_KEY
+  #   session_hours: 12
+  #   users:
+  #     - name: alice
+  #       password_hash: 'pbkdf2-sha256$210000$...$...'
+
 storage:
   driver: sqlite
   path: /var/lib/gohorizon/gohorizon.db

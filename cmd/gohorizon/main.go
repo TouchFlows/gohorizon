@@ -6,6 +6,7 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"errors"
 	"flag"
@@ -15,10 +16,12 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
 	"github.com/gohorizon/gohorizon/internal/api"
+	"github.com/gohorizon/gohorizon/internal/auth"
 	"github.com/gohorizon/gohorizon/internal/config"
 	"github.com/gohorizon/gohorizon/internal/supervisor"
 	"github.com/gohorizon/gohorizon/internal/version"
@@ -38,6 +41,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet(command, flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	configPath := fs.String("config", "/etc/gohorizon/gohorizon.yaml", "path to gohorizon.yaml")
+	password := fs.String("password", "", "for passwd: the password to hash (omit to read a line from standard input)")
 	if err := fs.Parse(args[1:]); err != nil {
 		return 2
 	}
@@ -57,6 +61,23 @@ func run(args []string, stdout, stderr io.Writer) int {
 			return 1
 		}
 		fmt.Fprintf(stdout, "configuration OK: %s (%s)\n", *configPath, cfg.Application().ID)
+		return 0
+	case "passwd":
+		secret := *password
+		if secret == "" {
+			line, err := bufio.NewReader(os.Stdin).ReadString('\n')
+			if err != nil && !errors.Is(err, io.EOF) {
+				fmt.Fprintln(stderr, err)
+				return 1
+			}
+			secret = strings.TrimRight(line, "\r\n")
+		}
+		hash, err := auth.HashPassword(secret)
+		if err != nil {
+			fmt.Fprintln(stderr, err)
+			return 1
+		}
+		fmt.Fprintln(stdout, hash)
 		return 0
 	case "run":
 		return runService(*configPath, stdout, stderr)
@@ -79,6 +100,14 @@ func runService(path string, stdout, stderr io.Writer) int {
 		return 1
 	}
 
+	store, err := newAuthStore(cfg)
+	if err != nil {
+		// Authentication is a security control: a configured deployment that cannot
+		// authenticate refuses to start rather than serving the API open.
+		log.Error("authentication is not usable", "error", err)
+		return 1
+	}
+
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
@@ -89,9 +118,13 @@ func runService(path string, stdout, stderr io.Writer) int {
 	}
 	defer service.Close()
 
+	handler := api.NewRouter(service, log)
+	if store != nil {
+		handler = api.NewRouter(service, log, api.WithAuth(store))
+	}
 	server := &http.Server{
 		Addr:              cfg.Server.Listen,
-		Handler:           api.NewRouter(service, log),
+		Handler:           handler,
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       15 * time.Second,
 		WriteTimeout:      15 * time.Second,
@@ -128,6 +161,29 @@ func runService(path string, stdout, stderr io.Writer) int {
 	return 0
 }
 
+// newAuthStore builds the session store when the configuration has users. The signing key
+// is read from the named environment variable, never from the file, and a key shorter
+// than auth.MinKeyBytes is refused because a forgeable session is worse than none.
+func newAuthStore(cfg *config.Config) (*auth.Store, error) {
+	if !cfg.Server.Auth.Enabled() {
+		return nil, nil
+	}
+	key := os.Getenv(cfg.Server.Auth.SessionKeyEnv)
+	if key == "" {
+		return nil, fmt.Errorf("server.auth.session_key_env: %s is unset or empty", cfg.Server.Auth.SessionKeyEnv)
+	}
+	users := make(map[string]string, len(cfg.Server.Auth.Users))
+	for _, user := range cfg.Server.Auth.Users {
+		users[user.Name] = user.PasswordHash
+	}
+	return auth.New(auth.Options{
+		Users: users,
+		Key:   []byte(key),
+		TTL:   time.Duration(cfg.Server.Auth.SessionHours) * time.Hour,
+	})
+}
+
 func usage(w io.Writer) {
-	fmt.Fprintln(w, "usage: gohorizon <run|validate|version> [-config path]")
+	fmt.Fprintln(w, "usage: gohorizon <run|validate|passwd|version> [-config path]")
+	fmt.Fprintln(w, "       gohorizon passwd [-password value]   (hash a dashboard password; reads stdin when -password is omitted)")
 }

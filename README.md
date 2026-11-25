@@ -67,6 +67,13 @@ Milestones 1 and 2 implemented:
   (docs/adr/0008).
 - `gohorizon/laravel` package: configuration, job lifecycle telemetry to a Redis Stream,
   `gohorizon:capabilities`, `gohorizon:inspect`.
+- Sign-in (Milestone 3, docs/adr/0009): `server.auth.users` turns authentication on, with
+  PBKDF2 password hashes minted by `gohorizon passwd` and a session cookie signed with the
+  key named by `server.auth.session_key_env`. `/api/v1/*` then requires a session (the
+  session routes and the Prometheus scrape do not), sign-out revokes the token, and five
+  failed sign-ins lock an address for a minute. Without users the API stays open, as
+  before. The dashboard's sign-in screen is the next slice, so enabling auth today makes
+  the pages' reads answer 401.
 
 `GET /api/v1/metrics?queue=default[&resolution=minute|hourly|daily][&from=…&to=…]`
 returns one queue's persisted buckets as `{queue, resolution, from, to, buckets: [{start,
@@ -99,7 +106,8 @@ the format requires. Both `/metrics` and `/api/v1/health` are unauthenticated
 like the rest of the API today: keep them behind the reverse proxy until Milestone 3 adds
 authentication.
 
-Not implemented yet: authentication, balancing, failed-job administration.
+Not implemented yet: the dashboard's sign-in screen, roles and authorisation, audit logs,
+balancing, failed-job administration.
 
 ## Layout
 

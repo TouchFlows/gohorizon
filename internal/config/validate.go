@@ -7,6 +7,8 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+
+	"github.com/gohorizon/gohorizon/internal/auth"
 )
 
 // ValidationError aggregates every problem found in a configuration so the operator
@@ -27,10 +29,11 @@ func (e *ValidationError) add(format string, args ...any) {
 }
 
 var (
-	slugRE    = regexp.MustCompile(`^[a-z0-9][a-z0-9-]*$`)
-	queueRE   = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:-]*$`)
-	artisanRE = regexp.MustCompile(`^[A-Za-z0-9._=:-]+$`)
-	listenRE  = regexp.MustCompile(`^[A-Za-z0-9._-]+:\d{1,5}$`)
+	slugRE     = regexp.MustCompile(`^[a-z0-9][a-z0-9-]*$`)
+	usernameRE = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,63}$`)
+	queueRE    = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:-]*$`)
+	artisanRE  = regexp.MustCompile(`^[A-Za-z0-9._=:-]+$`)
+	listenRE   = regexp.MustCompile(`^[A-Za-z0-9._-]+:\d{1,5}$`)
 )
 
 // Validate checks every configuration invariant that does not need filesystem or
@@ -49,6 +52,8 @@ func (c *Config) Validate() error {
 	} else if _, _, err := net.SplitHostPort(c.Server.Listen); err != nil {
 		errs.add("server.listen: %v", err)
 	}
+
+	c.Server.Auth.validate(errs)
 
 	switch c.Storage.Driver {
 	case "sqlite":
@@ -117,6 +122,40 @@ func (c *Config) Validate() error {
 		return errs
 	}
 	return nil
+}
+
+// validate checks the sign-in configuration. An empty block leaves the API open, which is
+// how it runs on localhost; anything half-configured is an error rather than a silently
+// unprotected service.
+func (a *Auth) validate(errs *ValidationError) {
+	if !a.Enabled() {
+		if a.SessionKeyEnv != "" || a.SessionHours != 0 {
+			errs.add("server.auth: session_key_env/session_hours are set but no users are configured; add a user (gohorizon passwd) or remove the block")
+		}
+		return
+	}
+
+	if a.SessionKeyEnv == "" {
+		errs.add("server.auth.session_key_env: required; it names the environment variable holding the session signing key")
+	}
+	if a.SessionHours <= 0 || a.SessionHours > 720 {
+		errs.add("server.auth.session_hours: must be between 1 and 720, got %d", a.SessionHours)
+	}
+
+	seen := map[string]bool{}
+	for i, user := range a.Users {
+		label := fmt.Sprintf("server.auth.users[%d]", i)
+		if !usernameRE.MatchString(user.Name) {
+			errs.add("%s.name: %q must be lowercase letters, digits, dot, dash or underscore", label, user.Name)
+		} else if seen[user.Name] {
+			errs.add("%s.name: %q is listed twice", label, user.Name)
+		} else {
+			seen[user.Name] = true
+		}
+		if err := auth.ValidateHash(user.PasswordHash); err != nil {
+			errs.add("%s.password_hash: %v", label, err)
+		}
+	}
 }
 
 func (a *Application) validate(errs *ValidationError, seenSupervisors map[string]string) {

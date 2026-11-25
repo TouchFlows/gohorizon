@@ -41,6 +41,29 @@ type Config struct {
 type Server struct {
 	Listen  string `yaml:"listen"`
 	Metrics bool   `yaml:"metrics"`
+	Auth    Auth   `yaml:"auth"`
+}
+
+// Auth configures sign-in for the dashboard and the operational API (handoff §13).
+// Without users the service stays open, which is the localhost default; a deployment that
+// is reachable for anyone else configures users and a signing key.
+type Auth struct {
+	// SessionKeyEnv names the environment variable holding the HMAC key that signs
+	// session cookies. The key itself never appears in this file.
+	SessionKeyEnv string `yaml:"session_key_env"`
+	// SessionHours is how long a sign-in lasts. Zero takes DefaultSessionHours.
+	SessionHours int    `yaml:"session_hours"`
+	Users        []User `yaml:"users"`
+}
+
+// Enabled reports whether authentication is configured at all.
+func (a Auth) Enabled() bool { return len(a.Users) > 0 }
+
+// User is one operator. The password is stored as a hash produced by `gohorizon passwd`;
+// the plaintext is never written here.
+type User struct {
+	Name         string `yaml:"name"`
+	PasswordHash string `yaml:"password_hash"`
 }
 
 type Storage struct {
@@ -120,6 +143,9 @@ const (
 	DefaultShutdownGrace  = 120
 	DefaultRestartBackoff = 5
 
+	// DefaultSessionHours bounds a sign-in for a day when the configuration is silent.
+	DefaultSessionHours = 12
+
 	// Metrics retention (handoff §9): the upper end of the raw window, then 7 days of
 	// minute buckets, 30 days of hours and 12 months of days.
 	DefaultRawRetentionHours   = 72
@@ -187,6 +213,10 @@ func (c *Config) normalize() {
 	}
 	if retention.DailyDays == 0 {
 		retention.DailyDays = DefaultDailyRetentionDays
+	}
+
+	if c.Server.Auth.Enabled() && c.Server.Auth.SessionHours == 0 {
+		c.Server.Auth.SessionHours = DefaultSessionHours
 	}
 
 	for ai := range c.Applications {
