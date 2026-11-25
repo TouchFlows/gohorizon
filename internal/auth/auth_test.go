@@ -452,34 +452,52 @@ func TestForwardedForFromAnUntrustedPeerDoesNotResetTheLimit(t *testing.T) {
 	}
 }
 
-func TestSessionCarriesTheRoleTheUserWasGiven(t *testing.T) {
-	store, err := New(Options{
-		Users: map[string]User{"alice": {PasswordHash: mustHash(t, "s3cret"), Role: RoleAdministrator}},
-		Key:   []byte("0123456789abcdef0123456789abcdef"),
-	})
-	if err != nil {
-		t.Fatalf("New: %v", err)
+func TestARoleChangeTakesEffectAtTheNextRequest(t *testing.T) {
+	now := time.Date(2026, 11, 25, 12, 0, 0, 0, time.UTC)
+	key := []byte("0123456789abcdef0123456789abcdef")
+	storeWith := func(role string) *Store {
+		t.Helper()
+		store, err := New(Options{
+			Users: map[string]User{"alice": {PasswordHash: mustHash(t, "s3cret"), Role: role}},
+			Key:   key,
+			Now:   func() time.Time { return now },
+		})
+		if err != nil {
+			t.Fatalf("New: %v", err)
+		}
+		return store
 	}
 
-	identity, err := store.Authenticate(signInRequest(), "alice", "s3cret")
+	// A session started while alice was an administrator.
+	administrator := storeWith(RoleAdministrator)
+	identity, err := administrator.Authenticate(signInRequest(), "alice", "s3cret")
 	if err != nil {
 		t.Fatalf("Authenticate: %v", err)
 	}
 	if identity.Role != RoleAdministrator {
 		t.Fatalf("identity role = %q, want %q", identity.Role, RoleAdministrator)
 	}
-
-	// The role travels inside the signed token, so reading it back costs no lookup and a
-	// client cannot edit it.
 	recorder := httptest.NewRecorder()
-	if err := store.Start(recorder, httptest.NewRequest(http.MethodPost, "/api/v1/session", nil), identity); err != nil {
+	if err := administrator.Start(recorder, httptest.NewRequest(http.MethodPost, "/api/v1/session", nil), identity); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 	r := httptest.NewRequest(http.MethodGet, "/api/v1/health", nil)
 	r.AddCookie(recorder.Result().Cookies()[0])
-	current, ok := store.Current(r)
-	if !ok || current.Role != RoleAdministrator {
+	if current, ok := administrator.Current(r); !ok || current.Role != RoleAdministrator {
 		t.Fatalf("current = %+v (ok = %v), want role %q", current, ok, RoleAdministrator)
+	}
+
+	// The same key and the same unexpired token, against a service whose configuration has
+	// alice demoted: the role is read from the configuration on each request, so the demotion
+	// holds on the very next one instead of when the session happens to expire.
+	if current, ok := storeWith(RoleViewer).Current(r); !ok || current.Role != RoleViewer {
+		t.Fatalf("after the demotion: current = %+v (ok = %v), want role %q", current, ok, RoleViewer)
+	}
+
+	// A promotion is read the same way, so a role is never stuck at whatever it was when the
+	// operator signed in.
+	if current, ok := storeWith(RoleOperator).Current(r); !ok || current.Role != RoleOperator {
+		t.Fatalf("after the promotion: current = %+v (ok = %v), want role %q", current, ok, RoleOperator)
 	}
 }
 
@@ -499,24 +517,6 @@ func TestRoleDefaultsToViewerAndAnUnknownRoleIsRefused(t *testing.T) {
 	})
 	if err == nil {
 		t.Fatal("a role this service does not know was accepted")
-	}
-}
-
-func TestATokenWithoutARoleIsReadAsTheLeastPrivileged(t *testing.T) {
-	store := newTestStore(t, nil)
-	// A session signed before roles existed: the token is valid and simply has no role in it.
-	token, err := store.sign(Identity{Name: "alice", ExpiresAt: time.Now().Add(time.Hour)})
-	if err != nil {
-		t.Fatalf("sign: %v", err)
-	}
-	r := httptest.NewRequest(http.MethodGet, "/api/v1/health", nil)
-	r.AddCookie(&http.Cookie{Name: SessionCookie, Value: token})
-	current, ok := store.Current(r)
-	if !ok {
-		t.Fatal("a token signed without a role was refused")
-	}
-	if current.Role != RoleViewer {
-		t.Fatalf("role = %q, want %q", current.Role, RoleViewer)
 	}
 }
 

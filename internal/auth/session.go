@@ -52,7 +52,9 @@ func (e *RateLimitedError) Error() string {
 // Roles an operator can hold (handoff §13). Nothing is restricted by them yet: every endpoint
 // today reports state, which the least of the three may read. They exist because the audit
 // record has to say what the actor was, and because the first mutating endpoint will check
-// them; keeping the role in the signed session means that check costs no lookup.
+// them. The role is configuration, not a claim: it is read from the configured users on every
+// request, so promoting or demoting someone takes effect at their next request rather than
+// when their session happens to expire.
 const (
 	RoleViewer        = "viewer"
 	RoleOperator      = "operator"
@@ -242,11 +244,13 @@ func (s *Store) Current(r *http.Request) (Identity, bool) {
 	if err != nil {
 		return Identity{}, false
 	}
-	// A token outlives the account it names: the configuration can drop a user while their
-	// session is still signed. Refusing a name that is no longer configured is what makes
-	// removing someone end their access at the next request, without waiting out the
-	// signature or clearing a revocation list a restart would have lost anyway.
-	if _, known := s.users[claims.Subject]; !known {
+	// A token outlives the account it names: the configuration can drop a user, or change
+	// their role, while their session is still signed. Both are read from the configured
+	// users here, so removing someone ends their access at the next request and a demotion
+	// takes effect then too — neither has to wait for the signature to expire, and neither
+	// depends on a revocation list a restart would have lost.
+	user, known := s.users[claims.Subject]
+	if !known {
 		return Identity{}, false
 	}
 	if _, gone := s.revoked[claims.ID]; gone {
@@ -255,12 +259,14 @@ func (s *Store) Current(r *http.Request) (Identity, bool) {
 	if !s.now().Before(claims.expiry()) {
 		return Identity{}, false
 	}
-	return Identity{Name: claims.Subject, Role: claims.Role, ExpiresAt: claims.expiry().UTC()}, true
+	return Identity{Name: claims.Subject, Role: user.Role, ExpiresAt: claims.expiry().UTC()}, true
 }
 
+// claims is what the token says: who it is for and how long it lives. It deliberately says
+// nothing about the role, because a signed claim would freeze what the configuration is the
+// source of truth for, and two answers to one question eventually disagree.
 type claims struct {
 	Subject string `json:"sub"`
-	Role    string `json:"role"`
 	Expires int64  `json:"exp"`
 	ID      string `json:"jti"`
 }
@@ -274,7 +280,6 @@ func (s *Store) sign(identity Identity) (string, error) {
 	}
 	payload, err := json.Marshal(claims{
 		Subject: identity.Name,
-		Role:    identity.Role,
 		Expires: identity.ExpiresAt.Unix(),
 		ID:      hex.EncodeToString(nonce),
 	})
@@ -304,11 +309,6 @@ func (s *Store) open(token string) (claims, error) {
 	}
 	if c.Subject == "" || c.ID == "" {
 		return claims{}, errors.New("incomplete session token")
-	}
-	if c.Role == "" {
-		// A token signed before roles existed is the least a session may be, which is also
-		// what a deployment upgrading in place should get rather than a signed-out user.
-		c.Role = RoleViewer
 	}
 	return c, nil
 }

@@ -77,11 +77,13 @@ Milestones 1 and 2 implemented:
   the client it forwards for rather than the proxy itself; one list decides both, so a
   forwarded header is never trusted more than its sender. The dashboard opens on a sign-in
   screen and offers a sign-out; without users it stays open, as before. A user carries a
-  role (`viewer`, `operator`, `administrator`; the default is `viewer`) inside the signed
-  session, and every session action — sign-in allowed, refused or limited, and sign-out — is
-  written to the service log as a `msg=audit` record naming the actor, their role and the
-  client address (docs/adr/0010). Roles are not enforced yet: every endpoint today reports
-  state, which the least of them may read.
+  role (`viewer`, `operator`, `administrator`; the default is `viewer`) which is read from
+  the configuration on every request, so changing it takes effect at the operator's next
+  request rather than when their session expires, and every session action — sign-in
+  allowed, refused or limited, and sign-out — is written to the service log as a
+  `msg=audit` record naming the actor, their role and the client address
+  (docs/adr/0010). Roles are not enforced yet: every endpoint today reports state, which the
+  least of them may read.
 
 `GET /api/v1/metrics?queue=default[&resolution=minute|hourly|daily][&from=…&to=…]`
 returns one queue's persisted buckets as `{queue, resolution, from, to, buckets: [{start,

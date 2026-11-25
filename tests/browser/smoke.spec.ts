@@ -48,10 +48,12 @@ import { expect, test, type Page, type Route } from '@playwright/test'
 //
 // Sign-in is the one state the whole suite needs rather than one case reaching for it: the API
 // answers 401 without a session cookie, so every case is signed in from `beforeEach` and the
-// one case that starts where an operator starts clears its own cookies, and one ends its
-// session under a loaded page to read the drop back to the form. The credential is a password
-// written here that the binary's own `passwd` hashes in `beforeAll`; no hash and no session
-// key belongs in this file.
+// one case that starts where an operator starts clears its own cookies, one ends its session
+// under a loaded page to read the drop back to the form, and one reads the audit records a
+// sign-out and a sign-in leave in the service log — the one durable trace of a session action
+// that until now only the Go tests had read. The credential is a password written here that
+// the binary's own `passwd` hashes in `beforeAll`; no hash and no session key belongs in this
+// file.
 //
 // What that leaves is a rule rather than a list: a branch the pages draw and no case reaches
 // belongs in this paragraph, named, because staying unnamed is how it goes unread.
@@ -300,6 +302,48 @@ test.describe('the dashboard against the real binary', () => {
     await page.getByRole('button', { name: 'Sign in', exact: true }).click()
     await expect(page.getByRole('heading', { name: 'Overview', exact: true })).toBeVisible()
     await expect(page.getByRole('navigation')).toBeVisible()
+  })
+
+  test('signing out and back in leaves an audit record of each', async ({ page }) => {
+    // The record is the only durable trace a session action leaves, so this reads it where an
+    // operator would: the service log. Both actions go through the page, because the record
+    // being checked is the one an operator's own action left rather than one a direct call in
+    // this file made.
+    await readHealth(page, `${base}/`)
+    const before = auditLines().length
+
+    await page.getByRole('button', { name: /^Sign out/ }).click()
+    await expect(page.getByRole('heading', { name: 'Sign in', exact: true })).toBeVisible()
+
+    await page.getByLabel('Name').fill(smokeUser)
+    await page.getByLabel('Password').fill(smokePassword)
+    await page.getByRole('button', { name: 'Sign in', exact: true }).click()
+    await expect(page.getByRole('heading', { name: 'Overview', exact: true })).toBeVisible()
+
+    // The service writes the record before it answers, so both are in the file by now; the
+    // wait covers reading a file another process writes, not a missing write.
+    await waitFor('write both audit records', async () => auditLines().length >= before + 2)
+
+    const written = auditLines().slice(before)
+    const signOut = written[written.length - 2]
+    const signIn = written[written.length - 1]
+
+    // The role is the one the configuration gives this user, read at the moment of the action
+    // rather than remembered from whenever the session started.
+    expect(signOut).toMatchObject({
+      action: 'sign-out',
+      outcome: 'allowed',
+      user: smokeUser,
+      role: 'operator',
+    })
+    expect(signIn).toMatchObject({
+      action: 'sign-in',
+      outcome: 'allowed',
+      user: smokeUser,
+      role: 'operator',
+    })
+    // The address is the client the service resolves, which on loopback is the browser itself.
+    expect(signIn.address).toBe('127.0.0.1')
   })
 
   test('the overview renders the service, its queues and its telemetry', async ({ page }) => {
@@ -1310,6 +1354,7 @@ server:
     users:
       - name: ${smokeUser}
         password_hash: ${JSON.stringify(passwordHash)}
+        role: operator
 
 storage:
   driver: sqlite
@@ -1754,6 +1799,45 @@ async function waitForJob(
 async function recordedJobs(query: string): Promise<RecordedJob[]> {
   const page = (await getJSON(`${base}/api/v1/jobs?${query}&limit=10`)) as { jobs?: RecordedJob[] }
   return page.jobs ?? []
+}
+
+// AuditRecord is the part of an audit line this file reads, in the shape the service writes
+// it: one JSON object per line under msg=audit (docs/adr/0010).
+interface AuditRecord {
+  msg?: string
+  action?: string
+  outcome?: string
+  user?: string
+  role?: string
+  address?: string
+  detail?: string
+}
+
+// auditLines reads the audit records the service has written so far. The file is the one the
+// service's own stderr was redirected to, so it also holds ordinary log lines and a line that
+// is still being written: neither parses as a record, and both are skipped.
+function auditLines(): AuditRecord[] {
+  let text = ''
+  try {
+    text = fs.readFileSync(path.join(dir, 'gohorizon.log'), 'utf8')
+  } catch {
+    return []
+  }
+  const records: AuditRecord[] = []
+  for (const line of text.split('\n')) {
+    if (line.trim() === '') {
+      continue
+    }
+    try {
+      const record = JSON.parse(line) as AuditRecord
+      if (record.msg === 'audit') {
+        records.push(record)
+      }
+    } catch {
+      // Not a line this file wrote.
+    }
+  }
+  return records
 }
 
 function readLog(): string {
