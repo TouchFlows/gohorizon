@@ -23,11 +23,12 @@ failed job — which is the first thing worth restricting and the first thing wo
    until that session expired — and two answers to one question eventually disagree. Reading
    it live means a changed role takes effect at the operator's next request, the same way a
    removed user already stops being accepted at the next request.
-3. **Nothing is enforced yet, and that is stated rather than implied.** Every endpoint today
-   reports operational state, which the least of the three roles may read, so there is nothing
-   for a check to refuse. The role is audit data and a value the API reports; the middleware
-   that refuses a `viewer` arrives with the first mutating endpoint, in the same commit as the
-   endpoint, because a check with nothing to protect is a control nobody verifies.
+3. **Nothing is enforced in this slice, and that is stated rather than implied.** Every
+   endpoint here reports operational state, which the least of the three roles may read, so
+   there was nothing for a check to refuse: the role is audit data and a value the API reports.
+   The middleware that refuses a `viewer` arrived with the first mutating endpoint, in the same
+   commit as the endpoint, because a check with nothing to protect is a control nobody verifies
+   (docs/adr/0011).
 4. **An audit record is one line in the service log**, written under the message `audit` with
    stable field names: `action`, `outcome`, `user`, `role`, `address`, and `detail` when it
    says something. Actions are dotted names (`sign-in`, `sign-out`); outcomes are `allowed`,
@@ -50,6 +51,7 @@ failed job — which is the first thing worth restricting and the first thing wo
   dashboard can show it later; nothing in the bundle branches on it yet.
 - Every request reads the user table for the role, which is a map lookup and not a store
   round trip; there is no cached identity to invalidate when the configuration changes.
-- Deferred with their owners: the authorisation middleware and the endpoints it guards, a
-  queryable audit history (and the store it would need), and audit records for actions other
-  than sessions — those arrive with the actions.
+- Once deferred here, delivered elsewhere: the authorisation middleware and the first endpoint
+  it guards are docs/adr/0011. Still deferred with their owners: a queryable audit history (and
+  the store it would need), and audit records for actions other than sessions and the worker
+  restart — those arrive with the actions.

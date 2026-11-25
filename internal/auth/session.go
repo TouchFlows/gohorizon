@@ -49,17 +49,30 @@ func (e *RateLimitedError) Error() string {
 	return fmt.Sprintf("too many sign-in attempts; retry in %s", e.RetryAfter)
 }
 
-// Roles an operator can hold (handoff §13). Nothing is restricted by them yet: every endpoint
-// today reports state, which the least of the three may read. They exist because the audit
-// record has to say what the actor was, and because the first mutating endpoint will check
-// them. The role is configuration, not a claim: it is read from the configured users on every
-// request, so promoting or demoting someone takes effect at their next request rather than
-// when their session happens to expire.
+// Roles an operator can hold (handoff §13). A viewer reads, an operator acts on the work the
+// pool is running (restarting a worker), and an administrator will own what changes the
+// deployment rather than its work. The role is configuration, not a claim: it is read from the
+// configured users on every request, so promoting or demoting someone takes effect at their
+// next request rather than when their session happens to expire.
 const (
 	RoleViewer        = "viewer"
 	RoleOperator      = "operator"
 	RoleAdministrator = "administrator"
 )
+
+// Rank orders the roles from least to most privileged. A check names the least role that may
+// pass, and every role above it passes too, so a new role has to be placed here rather than
+// slipping past an equality test. A role this service does not know ranks below every named
+// threshold, so an unrecognised value fails closed.
+func Rank(role string) int {
+	switch role {
+	case RoleOperator:
+		return 1
+	case RoleAdministrator:
+		return 2
+	}
+	return 0
+}
 
 // ValidRole reports whether role is one this service knows.
 func ValidRole(role string) bool {

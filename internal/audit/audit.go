@@ -1,12 +1,13 @@
 // Package audit records who did what, as one line per action, under a message an operator can
 // select on: `{"msg":"audit", "action":"sign-in", "outcome":"allowed", ...}`.
 //
-// Milestone 3 starts the record with the events that exist today — a session started, a
-// session ended, a sign-in refused — because they are the ones an operator asks about after
-// a lockout or a suspected leak, and because they are the ones with an actor already. The
-// administrative actions that come next (restarting a worker, retrying a job) inherit the
-// same shape and the same logger; a queryable audit history is a store away from that, and is
-// deliberately not promised here.
+// Milestone 3 starts the record with the session events, because they are the ones an operator
+// asks about after a lockout or a suspected leak, and because they were the ones with an actor
+// already. Restarting a worker is the first action that changes the pool, and it records both
+// that it happened and that it was refused — by role or by a missing token — so the line says
+// who tried, not only who succeeded. Further administrative actions inherit the same shape and
+// the same logger; a queryable audit history is a store away from that, and is deliberately
+// not promised here.
 //
 // A record is written to the service log rather than to a database: it is one line, it is
 // append-only, and the log already has rotation, shipping and retention an operator chose.
@@ -22,8 +23,9 @@ import (
 // Actions a record can carry. They are dotted names with a stable spelling, because an
 // operator's alerting matches on them.
 const (
-	ActionSignIn  = "sign-in"
-	ActionSignOut = "sign-out"
+	ActionSignIn        = "sign-in"
+	ActionSignOut       = "sign-out"
+	ActionWorkerRestart = "worker-restart"
 )
 
 // Outcomes a record can carry: the action happened, it was refused, or the caller was held

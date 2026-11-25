@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
@@ -32,6 +33,10 @@ func (idleProvider) Jobs(context.Context, metrics.JobQuery) ([]metrics.Job, erro
 
 func (idleProvider) Job(context.Context, string) (metrics.Job, error) {
 	return metrics.Job{}, nil
+}
+
+func (idleProvider) RestartWorker(string) error {
+	return errors.New("this test computes nothing")
 }
 
 // TestTrustedProxyCarriesTheClientAndTheTLS is the proxy path with nothing replaced: the

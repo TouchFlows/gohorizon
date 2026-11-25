@@ -34,6 +34,10 @@ type stubProvider struct {
 	jobErr   error
 	jobQuery metrics.JobQuery
 	jobID    string
+
+	// The workers a handler asked to restart, and what the restart answered.
+	restarted  []string
+	restartErr error
 }
 
 func (s *stubProvider) Report() health.Report { return s.report }
@@ -51,6 +55,11 @@ func (s *stubProvider) Jobs(_ context.Context, query metrics.JobQuery) ([]metric
 func (s *stubProvider) Job(_ context.Context, jobID string) (metrics.Job, error) {
 	s.jobID = jobID
 	return s.job, s.jobErr
+}
+
+func (s *stubProvider) RestartWorker(uuid string) error {
+	s.restarted = append(s.restarted, uuid)
+	return s.restartErr
 }
 
 func get(t *testing.T, provider Provider, target string) *httptest.ResponseRecorder {

@@ -255,6 +255,23 @@ func (s *Service) Job(ctx context.Context, jobID string) (metrics.Job, error) {
 	return s.store.Job(ctx, jobID)
 }
 
+// RestartWorker stops one worker gracefully. The supervisor's next reconcile starts its
+// replacement in the same slot, so the job in flight finishes instead of being killed — which
+// is what "restart" has to mean for a queue worker (docs/adr/0002). A UUID no supervisor runs
+// is reported so the caller can answer 404 rather than pretend something happened.
+func (s *Service) RestartWorker(uuid string) error {
+	if uuid == "" {
+		return errors.New("no worker id given")
+	}
+	for _, manager := range s.managers {
+		if err := manager.StopWorker(uuid); err == nil {
+			s.log.Info("worker restart requested", "uuid", uuid)
+			return nil
+		}
+	}
+	return fmt.Errorf("no running worker with id %s", uuid)
+}
+
 func (s *Service) Close() error {
 	err := s.client.Close()
 	if s.store != nil {

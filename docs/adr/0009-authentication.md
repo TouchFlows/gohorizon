@@ -79,7 +79,8 @@ authentication, rate limiting and three roles (viewer, operator, administrator).
    configuration and audit data and keeps enforcement with that first endpoint. CSRF tokens are deferred the same way: the
    only state-changing calls today are sign-in and sign-out, both protected by
    `SameSite=Lax` plus the same-origin dashboard, and the double-submit token lands with
-   the first administrative mutation.
+   the first administrative mutation. **Update:** both landed with it — the role check and the
+   token guard a worker restart (docs/adr/0011).
 
 ## Consequences
 

@@ -82,8 +82,8 @@ Milestones 1 and 2 implemented:
   request rather than when their session expires, and every session action — sign-in
   allowed, refused or limited, and sign-out — is written to the service log as a
   `msg=audit` record naming the actor, their role and the client address
-  (docs/adr/0010). Roles are not enforced yet: every endpoint today reports state, which the
-  least of them may read.
+  (docs/adr/0010). A role also decides what may be done: restarting a worker needs `operator`
+  or above, and every administrative call needs the CSRF token (docs/adr/0011).
 
 `GET /api/v1/metrics?queue=default[&resolution=minute|hourly|daily][&from=…&to=…]`
 returns one queue's persisted buckets as `{queue, resolution, from, to, buckets: [{start,
@@ -104,6 +104,16 @@ the queue job id (the same `id:` fallback the recorder uses). A malformed query 
 unknown identity a 404, unavailable history a 503, and a store failure a 500 without the
 database path.
 
+`POST /api/v1/workers/{worker}/restart` asks one worker to stop gracefully, so its supervisor
+starts a replacement in the same slot and the job in flight finishes instead of being killed;
+the answer is 202 with `{worker, supervisor}`. The id is one `GET /api/v1/health` reports — the
+API never takes a command, a path or a PID. It needs a session with the `operator` role or
+above, and the `X-CSRF-Token` header repeating the value of the `gohorizon_csrf` cookie the
+service sets at sign-in (readable by the bundle, `SameSite`, not `HttpOnly`). A worker nobody
+runs is a 404 before anything reaches the pool, one that exits in between is a 409, and either
+failed check is a 403 with an audit record saying what was missing. Without
+`server.auth.users` the route is not mounted at all (docs/adr/0011).
+
 `GET /metrics` serves the state `/api/v1/health` reports in the Prometheus text format
 (`text/plain; version=0.0.4; charset=utf-8`), without a client library:
 `gohorizon_up`, `gohorizon_lock_held`,
@@ -116,8 +126,8 @@ the format requires. `/metrics` stays unauthenticated, because Prometheus scrape
 a session; keep it behind the reverse proxy. `/api/v1/health` is behind the gate like the
 rest of the API once `server.auth.users` is configured.
 
-Not implemented yet: authorisation by role (it lands with the first mutating endpoint),
-queryable audit history, CSRF tokens for mutations, balancing, failed-job administration.
+Not implemented yet: a dashboard control for restarting a worker, failed-job retry and delete,
+per-action administrator rights, queryable audit history, balancing.
 
 ## Layout
 
