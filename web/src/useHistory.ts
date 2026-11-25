@@ -26,12 +26,11 @@ export function useHistory(query: string | null): HistoryState {
     // than drawn under the new selection while this read is in flight.
     setState({ history: null, unavailable: false, error: null })
 
+    // Only the catch below can see this read's abort: one aborted before it answered rejects
+    // there, and one that answered settled before the next window's cleanup could run, so this
+    // continuation is only ever reached with a live signal.
     fetchHistory(query, controller.signal)
       .then((history) => {
-        // A read can resolve just as the next window replaces it; the answer is stale then.
-        if (controller.signal.aborted) {
-          return
-        }
         setState({ history, unavailable: false, error: null })
       })
       .catch((failure: unknown) => {

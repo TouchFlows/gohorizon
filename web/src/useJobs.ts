@@ -19,11 +19,11 @@ export function useJobs(query: string): JobsState {
     const controller = new AbortController()
     setState({ page: null, unavailable: false, error: null })
 
+    // Only the catch below can see this read's abort: one aborted before it answered rejects
+    // there, and one that answered settled before the next query's cleanup could run, so this
+    // continuation is only ever reached with a live signal.
     fetchJobs(query, controller.signal)
       .then((page) => {
-        if (controller.signal.aborted) {
-          return
-        }
         setState({ page, unavailable: false, error: null })
       })
       .catch((failure: unknown) => {
