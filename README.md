@@ -1,14 +1,16 @@
-# gohorizon
+# GoHorizon
 
-GoHorizon is an independent Go control plane for existing Laravel queue infrastructure.
-Laravel keeps executing jobs, Redis keeps transporting them, and GoHorizon supervises
-processes, observes lifecycle events and reports operational state.
+Laravel queue supervision, powered by Go.
 
-The specification lives in [`handoff.md`](handoff.md); the verified Laravel 13 behaviour
-that adjusts it is in [`docs/laravel-13-recon.md`](docs/laravel-13-recon.md).
+GoHorizon is an independent, lightweight control plane for existing Laravel queue infrastructure. It supervises Laravel queue workers, monitors Redis-backed queues, collects job lifecycle telemetry, and provides historical metrics through a modern web dashboard.
+
+Laravel continues to execute jobs. Redis remains the queue transport. GoHorizon provides the operational visibility and process supervision around them.
 
 [![Sponsor](https://img.shields.io/badge/Sponsor-GitHub-ea4aaa?logo=github)](https://github.com/sponsors/marktamis)
 [![Buy Me a Coffee](https://img.shields.io/badge/Buy_Me_a_Coffee-Support-FFDD00?logo=buy-me-a-coffee&logoColor=000)](https://buymeacoffee.com/marktamis)
+
+The specification lives in [`handoff.md`](handoff.md); the verified Laravel 13 behaviour
+that adjusts it is in [`docs/laravel-13-recon.md`](docs/laravel-13-recon.md).
 
 ## Status
 
