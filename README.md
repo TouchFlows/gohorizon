@@ -244,3 +244,9 @@ These are enforced by tests, not just documented:
 - One worker serves one queue, so queue-level allocation is real.
 - A graceful stop waits `shutdown_grace`, then escalates to SIGKILL on the process group
   and records the escalation.
+  
+## Support this project
+
+If you find this project useful, consider supporting its development.
+
+[![Sponsor](https://img.shields.io/badge/Sponsor-GitHub-ea4aaa?logo=github)](https://github.com/sponsors/marktamis)
