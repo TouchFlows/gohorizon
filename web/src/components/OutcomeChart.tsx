@@ -21,7 +21,7 @@ export default function OutcomeChart({ model, resolution }: { model: ChartModel;
   const barWidth = Math.max(1, slot - 1)
 
   return (
-    <figure className="chart outcome-chart">
+    <figure className="chart">
       <svg viewBox={`0 0 ${width} ${height}`} role="img" aria-label={`Outcomes over ${model.buckets.length} buckets, ${jobCount(model.total)}`}>
         <line
           x1={padding}

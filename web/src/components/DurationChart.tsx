@@ -21,7 +21,7 @@ export default function DurationChart({ model, resolution }: { model: ChartModel
   const peakAverageMs = Math.max(0, ...model.buckets.map((bucket) => bucket.averageMs))
 
   return (
-    <figure className="chart chart--duration duration-chart">
+    <figure className="chart chart--duration">
       <svg
         viewBox={`0 0 ${width} ${height}`}
         role="img"
