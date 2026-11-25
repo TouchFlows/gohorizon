@@ -73,8 +73,10 @@ Milestones 1 and 2 implemented:
   session routes and the Prometheus scrape do not), sign-out revokes the token, a session
   naming a user the configuration no longer has is refused, and five failed sign-ins lock
   an address for a minute. Behind a TLS-terminating proxy the cookie is `Secure` when
-  `X-Forwarded-Proto` says the browser is on HTTPS. The dashboard opens on a sign-in screen
-  and offers a sign-out; without users it stays open, as before.
+  `X-Forwarded-Proto` says the browser is on HTTPS, and with the proxy named in
+  `server.trusted_proxies` the limiter counts the client it forwards for rather than the
+  proxy itself. The dashboard opens on a sign-in screen and offers a sign-out; without users
+  it stays open, as before.
 
 `GET /api/v1/metrics?queue=default[&resolution=minute|hourly|daily][&from=…&to=…]`
 returns one queue's persisted buckets as `{queue, resolution, from, to, buckets: [{start,

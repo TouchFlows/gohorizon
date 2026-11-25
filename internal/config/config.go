@@ -12,6 +12,7 @@ package config
 
 import (
 	"fmt"
+	"net/netip"
 	"os"
 	"reflect"
 	"regexp"
@@ -42,6 +43,38 @@ type Server struct {
 	Listen  string `yaml:"listen"`
 	Metrics bool   `yaml:"metrics"`
 	Auth    Auth   `yaml:"auth"`
+	// TrustedProxies names the reverse proxies whose X-Forwarded-For is believed, as
+	// addresses or CIDR ranges. Empty trusts none: the client is whoever connected, which is
+	// right for a direct listener and wrong behind a proxy, where every request would
+	// otherwise look like it came from the proxy itself.
+	TrustedProxies []string `yaml:"trusted_proxies"`
+}
+
+// ProxyPrefixes parses server.trusted_proxies into the ranges the sign-in limiter trusts. A
+// bare address is read as a single host (/32 or /128), so an operator can name one proxy.
+func (s Server) ProxyPrefixes() ([]netip.Prefix, error) {
+	prefixes := make([]netip.Prefix, 0, len(s.TrustedProxies))
+	for _, entry := range s.TrustedProxies {
+		text := strings.TrimSpace(entry)
+		if text == "" {
+			return nil, fmt.Errorf("server.trusted_proxies: an empty entry is not an address")
+		}
+		if !strings.Contains(text, "/") {
+			addr, err := netip.ParseAddr(text)
+			if err != nil {
+				return nil, fmt.Errorf("server.trusted_proxies: %q is not an IP address or CIDR range", entry)
+			}
+			addr = addr.Unmap()
+			prefixes = append(prefixes, netip.PrefixFrom(addr, addr.BitLen()))
+			continue
+		}
+		prefix, err := netip.ParsePrefix(text)
+		if err != nil {
+			return nil, fmt.Errorf("server.trusted_proxies: %q is not a CIDR range", entry)
+		}
+		prefixes = append(prefixes, prefix.Masked())
+	}
+	return prefixes, nil
 }
 
 // Auth configures sign-in for the dashboard and the operational API (handoff §13).

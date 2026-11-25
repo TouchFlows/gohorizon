@@ -237,6 +237,9 @@ func TestValidateRejectsEachDocumentedProblem(t *testing.T) {
 			return strings.Replace(s, "queues: [default, emails]", "queues: [default, \"e mails\"]", 1)
 		}, "not a valid queue name"},
 		{"no password_env", func(s string) string { return strings.Replace(s, "  password_env: GOHORIZON_REDIS_PASSWORD\n", "", 1) }, "password_env"},
+		{"trusted proxy that is not an address", func(s string) string {
+			return strings.Replace(s, "  metrics: true\n", "  metrics: true\n  trusted_proxies:\n    - proxy.internal\n", 1)
+		}, "trusted_proxies"},
 	}
 
 	for _, tc := range cases {
@@ -253,6 +256,37 @@ func TestValidateRejectsEachDocumentedProblem(t *testing.T) {
 				t.Errorf("error %q does not contain %q", err, tc.want)
 			}
 		})
+	}
+}
+
+func TestParseReadsTrustedProxies(t *testing.T) {
+	src := strings.Replace(minimal, "  metrics: true\n",
+		"  metrics: true\n  trusted_proxies:\n    - 10.0.0.0/8\n    - 127.0.0.1\n    - \"::1\"\n", 1)
+	cfg, err := Parse([]byte(src))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("Validate: %v", err)
+	}
+
+	// A bare address is a single host, so one proxy can be named without writing /32.
+	prefixes, err := cfg.Server.ProxyPrefixes()
+	if err != nil {
+		t.Fatalf("ProxyPrefixes: %v", err)
+	}
+	var got []string
+	for _, prefix := range prefixes {
+		got = append(got, prefix.String())
+	}
+	want := []string{"10.0.0.0/8", "127.0.0.1/32", "::1/128"}
+	if len(got) != len(want) {
+		t.Fatalf("prefixes = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("prefixes = %v, want %v", got, want)
+		}
 	}
 }
 

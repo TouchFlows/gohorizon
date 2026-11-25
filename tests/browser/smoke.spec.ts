@@ -48,9 +48,10 @@ import { expect, test, type Page, type Route } from '@playwright/test'
 //
 // Sign-in is the one state the whole suite needs rather than one case reaching for it: the API
 // answers 401 without a session cookie, so every case is signed in from `beforeEach` and the
-// one case that starts where an operator starts clears its own cookies. The credential is a
-// password written here that the binary's own `passwd` hashes in `beforeAll`; no hash and no
-// session key belongs in this file.
+// one case that starts where an operator starts clears its own cookies, and one ends its
+// session under a loaded page to read the drop back to the form. The credential is a password
+// written here that the binary's own `passwd` hashes in `beforeAll`; no hash and no session
+// key belongs in this file.
 //
 // What that leaves is a rule rather than a list: a branch the pages draw and no case reaches
 // belongs in this paragraph, named, because staying unnamed is how it goes unread.
@@ -264,6 +265,41 @@ test.describe('the dashboard against the real binary', () => {
     await page.getByRole('button', { name: /^Sign out/ }).click()
     await expect(page.getByRole('heading', { name: 'Sign in', exact: true })).toBeVisible()
     expect((await page.request.get(`${base}/api/v1/health`)).status()).toBe(401)
+  })
+
+  test('a session that ends mid-watch drops back to the sign-in screen', async ({ page }) => {
+    const report = await readHealth(page, `${base}/`)
+    await expect(page.getByRole('navigation')).toBeVisible()
+    await expect(page.locator('.shell__status')).toHaveText(report.status)
+
+    // The session ends under the page: signing out revokes the token, so the cookie the
+    // browser holds stops being honoured while the screen is still polling. The token is the
+    // one `beforeEach` put on this context, presented here directly, so the revocation is the
+    // service's own act rather than an answer dressed in the browser.
+    const ended = await fetch(`${base}/api/v1/session`, {
+      method: 'DELETE',
+      headers: { Cookie: `${sessionCookie}=${session}` },
+    })
+    expect(ended.status).toBe(204)
+
+    // The token is dead before the page asks again, so the 401 its next poll reads is the
+    // service refusing a session that ended, not a request this file broke.
+    expect((await page.request.get(`${base}/api/v1/health`)).status()).toBe(401)
+
+    // The next poll drops the dashboard instead of reporting a failed read: the page does not
+    // claim the service is unreachable, which is the difference between this and a 500.
+    await expect(page.getByRole('heading', { name: 'Sign in', exact: true })).toBeVisible({
+      timeout: 20_000,
+    })
+    await expect(page.getByRole('navigation')).toHaveCount(0)
+    await expect(page.getByText('Refresh failed:')).toHaveCount(0)
+
+    // The way back is the same door: signing in again restores the pages the drop removed.
+    await page.getByLabel('Name').fill(smokeUser)
+    await page.getByLabel('Password').fill(smokePassword)
+    await page.getByRole('button', { name: 'Sign in', exact: true }).click()
+    await expect(page.getByRole('heading', { name: 'Overview', exact: true })).toBeVisible()
+    await expect(page.getByRole('navigation')).toBeVisible()
   })
 
   test('the overview renders the service, its queues and its telemetry', async ({ page }) => {

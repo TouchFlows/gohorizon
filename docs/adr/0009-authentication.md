@@ -47,10 +47,18 @@ authentication, rate limiting and three roles (viewer, operator, administrator).
    `server.auth.users` is refused at the next request. Removing an operator ends their
    access immediately instead of when the signature expires, and it does not depend on the
    in-memory revocation list, which a restart would have lost.
-6. **Failed sign-ins are limited per address**: five failures in a minute lock that
+6. **Failed sign-ins are limited per client address**: five failures in a minute lock that
    address for the rest of the window, whether or not the next password is correct. The
    answer for a wrong password and an unknown user is byte-identical, and an unknown name
-   still costs one hash verification, so names cannot be timed or read apart.
+   still costs one hash verification, so names cannot be timed or read apart. **The address
+   is the client, not the peer**: behind a reverse proxy every request arrives from the
+   proxy, and counting the peer would let five bad guesses from one person lock out every
+   operator. `server.trusted_proxies` names the proxies whose `X-Forwarded-For` is believed
+   (addresses or CIDR ranges); the chain is walked from the right over the hops this
+   deployment runs, and the first hop it does not run is the client. A request from a peer
+   that is not trusted is counted on that peer whatever it claims in the header, so a direct
+   client cannot rotate the header to outrun the limit, and an unreadable chain falls back to
+   the peer rather than to the client's word for it.
 7. **The gate covers the operational API only.** Everything under `/api/v1` except the
    session routes requires a session. `/metrics` stays open because Prometheus scrapes it
    without one, and the dashboard shell stays open because it is a bundle with no data:
@@ -76,6 +84,9 @@ authentication, rate limiting and three roles (viewer, operator, administrator).
 - Removing a user from the configuration is an access control, not only a tidy-up: their
   existing sessions stop at the next request. Rotating the signing key remains the lever for
   a suspected session leak.
+- `server.trusted_proxies` is optional and empty by default: a deployment behind a proxy that
+  does not list it gets one shared sign-in budget, which is the safe failure (a lockout)
+  rather than an unthrottled one.
 - Role-based authorisation, audit logs and CSRF tokens are unbuilt; the gate is
   authentication only.
 - Sessions are per instance. v1 runs one instance behind the ownership lock, so there is

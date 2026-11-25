@@ -53,6 +53,10 @@ func (c *Config) Validate() error {
 		errs.add("server.listen: %v", err)
 	}
 
+	if _, err := c.Server.ProxyPrefixes(); err != nil {
+		errs.add("%v", err)
+	}
+
 	c.Server.Auth.validate(errs)
 
 	switch c.Storage.Driver {

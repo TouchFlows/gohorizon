@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"net/netip"
 	"strings"
 	"time"
 )
@@ -65,6 +66,7 @@ type Store struct {
 	now     func() time.Time
 	revoked map[string]time.Time // jti -> token expiry
 	limiter *limiter
+	trusted []netip.Prefix // peers whose X-Forwarded-For is believed
 }
 
 // Options configures a Store. Users maps a name to its encoded password hash.
@@ -76,6 +78,10 @@ type Options struct {
 	TTL time.Duration
 	// Now is the clock; tests replace it so expiry and lockout are not slept through.
 	Now func() time.Time
+	// TrustedProxies are the peers whose X-Forwarded-For is believed. A request that did not
+	// arrive from one of them is keyed on its own address, so a client cannot rotate the
+	// header to outrun the limiter.
+	TrustedProxies []netip.Prefix
 }
 
 func New(opts Options) (*Store, error) {
@@ -114,6 +120,7 @@ func New(opts Options) (*Store, error) {
 		now:     now,
 		revoked: map[string]time.Time{},
 		limiter: newLimiter(now),
+		trusted: append([]netip.Prefix(nil), opts.TrustedProxies...),
 	}, nil
 }
 
@@ -121,7 +128,7 @@ func New(opts Options) (*Store, error) {
 // wrong password and for an unknown name, and a *RateLimitedError once that address has
 // failed too often inside the window.
 func (s *Store) Authenticate(r *http.Request, name, password string) (Identity, error) {
-	address := clientAddress(r)
+	address := s.clientAddress(r)
 	if wait, ok := s.limiter.blocked(address); !ok {
 		return Identity{}, &RateLimitedError{RetryAfter: wait}
 	}
@@ -311,12 +318,78 @@ func cookieSecure(r *http.Request) bool {
 	return strings.EqualFold(strings.TrimSpace(proto), "https")
 }
 
-func clientAddress(r *http.Request) string {
-	host, _, err := net.SplitHostPort(r.RemoteAddr)
-	if err != nil {
-		return r.RemoteAddr
+// clientAddress is the address the sign-in limiter counts: the peer that connected, unless
+// that peer is a proxy this deployment trusts, in which case it is the client the proxy
+// forwarded for. A deployment behind a reverse proxy sees every request from the proxy, so
+// keying on the peer alone would let five bad guesses from one person lock out everyone
+// behind it.
+func (s *Store) clientAddress(r *http.Request) string {
+	remote := r.RemoteAddr
+	if host, _, err := net.SplitHostPort(remote); err == nil {
+		remote = host
 	}
-	return host
+	peer, ok := parseAddr(remote)
+	if !ok || !s.trusts(peer) {
+		// Whatever a client that is not a trusted proxy claims in the header, it is counted
+		// on its own address: otherwise rotating X-Forwarded-For would reset the count.
+		return remote
+	}
+
+	// X-Forwarded-For is written client first and appended to by each proxy, so the entries
+	// nearest this service are the ones most likely to be proxies we run. Walk back over
+	// those; the first hop we do not run is the client.
+	hops := forwardedFor(r)
+	for i := len(hops) - 1; i >= 0; i-- {
+		hop, ok := parseAddr(hops[i])
+		if !ok {
+			// A chain this service cannot read falls back to the peer it can see: being wrong
+			// about where a guess came from must not make the limiter disappear.
+			return remote
+		}
+		if !s.trusts(hop) {
+			return hop.String()
+		}
+	}
+	if len(hops) > 0 {
+		// Every hop is one of ours, so the leftmost entry is the furthest back the chain
+		// records, and the closest this service can honestly get to the client.
+		first, _ := parseAddr(hops[0])
+		return first.String()
+	}
+	return remote
+}
+
+func (s *Store) trusts(addr netip.Addr) bool {
+	for _, prefix := range s.trusted {
+		if prefix.Contains(addr) {
+			return true
+		}
+	}
+	return false
+}
+
+// forwardedFor is the client chain a proxy appended, in the order it was written: several
+// header lines are read in the same order as their comma-separated entries.
+func forwardedFor(r *http.Request) []string {
+	var hops []string
+	for _, header := range r.Header.Values("X-Forwarded-For") {
+		for _, hop := range strings.Split(header, ",") {
+			if hop = strings.TrimSpace(hop); hop != "" {
+				hops = append(hops, hop)
+			}
+		}
+	}
+	return hops
+}
+
+func parseAddr(text string) (netip.Addr, bool) {
+	addr, err := netip.ParseAddr(strings.TrimSpace(text))
+	if err != nil {
+		return netip.Addr{}, false
+	}
+	// An IPv4-mapped IPv6 address is the same client as the IPv4 one, so both spellings must
+	// land on one count.
+	return addr.Unmap(), true
 }
 
 // limiter counts failed sign-ins per address in the current window.

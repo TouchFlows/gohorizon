@@ -3,8 +3,10 @@ package auth
 import (
 	"crypto/tls"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/netip"
 	"strings"
 	"testing"
 	"time"
@@ -328,6 +330,111 @@ func TestSignInIsRateLimitedPerAddress(t *testing.T) {
 	now = now.Add(loginWindow)
 	if _, err := store.Authenticate(signInRequest(), "alice", "s3cret"); err != nil {
 		t.Fatalf("the lockout outlived its window: %v", err)
+	}
+}
+
+// proxyStore trusts one proxy range, which is the deployment the limiter used to get wrong:
+// every request arrives from the proxy, so the peer is never the client.
+func proxyStore(t *testing.T, now func() time.Time) *Store {
+	t.Helper()
+	store, err := New(Options{
+		Users:          map[string]string{"alice": mustHash(t, "s3cret")},
+		Key:            []byte("0123456789abcdef0123456789abcdef"),
+		Now:            now,
+		TrustedProxies: []netip.Prefix{netip.MustParsePrefix("10.0.0.0/8")},
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	return store
+}
+
+func TestClientAddressIsWhereTheGuessCameFrom(t *testing.T) {
+	store := proxyStore(t, nil)
+
+	cases := []struct {
+		name      string
+		remote    string
+		forwarded string
+		also      string // a second X-Forwarded-For line, which proxies append
+		want      string
+	}{
+		{name: "direct client", remote: "192.0.2.5:1234", want: "192.0.2.5"},
+		{name: "trusted proxy", remote: "10.0.0.2:1234", forwarded: "203.0.113.7", want: "203.0.113.7"},
+		{name: "proxy chain", remote: "10.0.0.2:1234", forwarded: "203.0.113.7, 10.0.0.5", want: "203.0.113.7"},
+		{name: "appended header line", remote: "10.0.0.2:1234", forwarded: "203.0.113.7", also: "10.0.0.5", want: "203.0.113.7"},
+		{name: "every hop trusted", remote: "10.0.0.2:1234", forwarded: "10.0.0.9, 10.0.0.5", want: "10.0.0.9"},
+		{name: "ipv4-mapped entry", remote: "10.0.0.2:1234", forwarded: "::ffff:203.0.113.7", want: "203.0.113.7"},
+		{name: "unreadable chain", remote: "10.0.0.2:1234", forwarded: "203.0.113.7, not-an-address", want: "10.0.0.2"},
+		{name: "forged by a direct client", remote: "192.0.2.5:1234", forwarded: "203.0.113.7", want: "192.0.2.5"},
+		{name: "trusted proxy with no chain", remote: "10.0.0.2:1234", want: "10.0.0.2"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			r := httptest.NewRequest(http.MethodPost, "/api/v1/session", nil)
+			r.RemoteAddr = tc.remote
+			if tc.forwarded != "" {
+				r.Header.Set("X-Forwarded-For", tc.forwarded)
+			}
+			if tc.also != "" {
+				r.Header.Add("X-Forwarded-For", tc.also)
+			}
+			if got := store.clientAddress(r); got != tc.want {
+				t.Errorf("clientAddress = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestSignInLimitFollowsTheForwardedClientBehindATrustedProxy(t *testing.T) {
+	now := time.Date(2026, 11, 25, 12, 0, 0, 0, time.UTC)
+	store := proxyStore(t, func() time.Time { return now })
+
+	behind := func(forwarded string) *http.Request {
+		r := httptest.NewRequest(http.MethodPost, "/api/v1/session", nil)
+		r.RemoteAddr = "10.0.0.2:4444"
+		r.Header.Set("X-Forwarded-For", forwarded)
+		return r
+	}
+
+	for i := 0; i < loginMaxFailures; i++ {
+		if _, err := store.Authenticate(behind("203.0.113.7"), "alice", "wrong"); !errors.Is(err, ErrInvalidCredentials) {
+			t.Fatalf("attempt %d: %v, want ErrInvalidCredentials", i+1, err)
+		}
+	}
+	var limited *RateLimitedError
+	if _, err := store.Authenticate(behind("203.0.113.7"), "alice", "s3cret"); !errors.As(err, &limited) {
+		t.Fatalf("the guessing client was not locked out: %v", err)
+	}
+
+	// The point of the change: the next person behind the same proxy still gets in. Keying on
+	// the proxy would have counted everyone together and locked them all out.
+	if _, err := store.Authenticate(behind("198.51.100.9"), "alice", "s3cret"); err != nil {
+		t.Fatalf("a second operator behind the same proxy was locked out: %v", err)
+	}
+}
+
+func TestForwardedForFromAnUntrustedPeerDoesNotResetTheLimit(t *testing.T) {
+	now := time.Date(2026, 11, 25, 12, 0, 0, 0, time.UTC)
+	store := proxyStore(t, func() time.Time { return now })
+
+	direct := func(forwarded string) *http.Request {
+		r := httptest.NewRequest(http.MethodPost, "/api/v1/session", nil)
+		r.RemoteAddr = "192.0.2.5:4444"
+		r.Header.Set("X-Forwarded-For", forwarded)
+		return r
+	}
+
+	// A client that is not a trusted proxy cannot invent a new address per attempt: the count
+	// stays on the peer the service can see.
+	for i := 0; i < loginMaxFailures; i++ {
+		if _, err := store.Authenticate(direct(fmt.Sprintf("203.0.113.%d", i)), "alice", "wrong"); !errors.Is(err, ErrInvalidCredentials) {
+			t.Fatalf("attempt %d: %v, want ErrInvalidCredentials", i+1, err)
+		}
+	}
+	var limited *RateLimitedError
+	if _, err := store.Authenticate(direct("198.51.100.9"), "alice", "s3cret"); !errors.As(err, &limited) {
+		t.Fatalf("rotating X-Forwarded-For escaped the limit: %v", err)
 	}
 }
 

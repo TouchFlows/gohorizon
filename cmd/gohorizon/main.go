@@ -176,10 +176,17 @@ func newAuthStore(cfg *config.Config) (*auth.Store, error) {
 	for _, user := range cfg.Server.Auth.Users {
 		users[user.Name] = user.PasswordHash
 	}
+	proxies, err := cfg.Server.ProxyPrefixes()
+	if err != nil {
+		return nil, err
+	}
 	return auth.New(auth.Options{
 		Users: users,
 		Key:   []byte(key),
 		TTL:   time.Duration(cfg.Server.Auth.SessionHours) * time.Hour,
+		// The limiter counts the client a trusted proxy forwarded for; without these the
+		// whole deployment shares one count, because every request arrives from the proxy.
+		TrustedProxies: proxies,
 	})
 }
 

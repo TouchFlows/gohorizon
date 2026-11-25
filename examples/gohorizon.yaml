@@ -4,6 +4,14 @@ server:
   listen: "127.0.0.1:8090"
   metrics: true
 
+  # Reverse proxies whose X-Forwarded-For is believed, as addresses or CIDR ranges. The
+  # sign-in limiter counts the client a trusted proxy forwards for; without this, every
+  # request behind a proxy looks like the proxy, and five bad guesses lock out everyone
+  # (docs/adr/0009). Empty is right for a direct listener.
+  # trusted_proxies:
+  #   - 127.0.0.1
+  #   - 10.0.0.0/8
+
   # Sign-in for the dashboard and the API (docs/adr/0009). Without users the service
   # stays open, which is the localhost default. To turn it on:
   #
