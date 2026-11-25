@@ -250,4 +250,4 @@ These are enforced by tests, not just documented:
 If you find this project useful, consider supporting its development.
 
 [![Sponsor](https://img.shields.io/badge/Sponsor-GitHub-ea4aaa?logo=github)](https://github.com/sponsors/marktamis)
-[![Sponsor](https://buymeacoffee.com/marktamis)](https://buymeacoffee.com/marktamis)
+[![Buy Me a Coffee](https://img.shields.io/badge/Buy_Me_a_Coffee-Support-FFDD00?logo=buy-me-a-coffee&logoColor=000)](https://buymeacoffee.com/marktamis)
