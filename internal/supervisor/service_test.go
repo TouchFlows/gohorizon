@@ -896,3 +896,43 @@ func TestLockSilenceFencesTheService(t *testing.T) {
 		t.Errorf("worker pid %d is still alive after the lock was presumed gone", running.worker.PID)
 	}
 }
+
+// stubFailer stands in for the application adapter on the retry path, so the service's own
+// decision — ask the adapter, log what happened, pass the application's answer through — can
+// be read without a Laravel application.
+type stubFailer struct {
+	ids []string
+	err error
+}
+
+func (s *stubFailer) RetryFailedJob(_ context.Context, id string) error {
+	s.ids = append(s.ids, id)
+	return s.err
+}
+
+func TestServiceRetryFailedJobAsksTheApplication(t *testing.T) {
+	failer := &stubFailer{}
+	logs := &bytes.Buffer{}
+	service := &Service{log: slog.New(slog.NewJSONHandler(logs, nil)), failer: failer}
+
+	if err := service.RetryFailedJob(context.Background(), "job-1"); err != nil {
+		t.Fatalf("RetryFailedJob: %v", err)
+	}
+	if len(failer.ids) != 1 || failer.ids[0] != "job-1" {
+		t.Fatalf("adapter was asked for %v, want [job-1]", failer.ids)
+	}
+	if !strings.Contains(logs.String(), "failed job retry requested") {
+		t.Errorf("log = %q, want the retry to be recorded", logs.String())
+	}
+}
+
+func TestServiceRetryFailedJobPassesAMissingRecordThrough(t *testing.T) {
+	// The application says whether it still stores the job; the service does not decide that
+	// itself, so the endpoint's 404 comes from the one place that knows.
+	failer := &stubFailer{err: adapter.ErrFailedJobNotFound}
+	service := &Service{log: slog.New(slog.NewTextHandler(io.Discard, nil)), failer: failer}
+
+	if err := service.RetryFailedJob(context.Background(), "job-1"); !errors.Is(err, adapter.ErrFailedJobNotFound) {
+		t.Fatalf("error = %v, want the adapter's not-found passed through", err)
+	}
+}

@@ -68,6 +68,13 @@ type queueInspector interface {
 	Queues(ctx context.Context, connection string, queues []string) (adapter.Inspection, error)
 }
 
+// failedJobRetrier is the adapter surface an administrative retry goes through, so a failed job
+// is re-published by the application, never by GoHorizon writing a queue key (docs/adr/0012).
+// adapter.Probe implements it.
+type failedJobRetrier interface {
+	RetryFailedJob(ctx context.Context, id string) error
+}
+
 type Service struct {
 	cfg      *config.Config
 	log      *slog.Logger
@@ -77,6 +84,7 @@ type Service struct {
 	managers []*process.Manager
 
 	inspector     queueInspector
+	failer        failedJobRetrier
 	queues        []string
 	queueInterval time.Duration
 	pruneInterval time.Duration
@@ -141,6 +149,7 @@ func New(ctx context.Context, cfg *config.Config, log *slog.Logger) (*Service, e
 		started:       time.Now(),
 		owner:         fmt.Sprintf("%s-%d", version.Version, time.Now().UnixNano()),
 		inspector:     probe,
+		failer:        probe,
 		queues:        configuredQueues(app),
 		queueInterval: defaultQueueInterval,
 		pruneInterval: defaultPruneInterval,
@@ -270,6 +279,22 @@ func (s *Service) RestartWorker(uuid string) error {
 		}
 	}
 	return fmt.Errorf("no running worker with id %s", uuid)
+}
+
+// RetryFailedJob asks the application to push one failed job back onto its queue. The
+// application's own command is the only thing that touches its failed record or its payload,
+// so this is delegation rather than a second implementation of retry (docs/adr/0012). A
+// history store that never opened is not consulted here: the caller decides whether an
+// identity is worth asking about.
+func (s *Service) RetryFailedJob(ctx context.Context, id string) error {
+	if s.failer == nil {
+		return errors.New("the application adapter is unavailable")
+	}
+	if err := s.failer.RetryFailedJob(ctx, id); err != nil {
+		return err
+	}
+	s.log.Info("failed job retry requested", "job", id)
+	return nil
 }
 
 func (s *Service) Close() error {

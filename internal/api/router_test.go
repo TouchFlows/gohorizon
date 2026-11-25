@@ -38,6 +38,10 @@ type stubProvider struct {
 	// The workers a handler asked to restart, and what the restart answered.
 	restarted  []string
 	restartErr error
+
+	// The failed jobs a handler asked to retry, and what the retry answered.
+	retried  []string
+	retryErr error
 }
 
 func (s *stubProvider) Report() health.Report { return s.report }
@@ -60,6 +64,11 @@ func (s *stubProvider) Job(_ context.Context, jobID string) (metrics.Job, error)
 func (s *stubProvider) RestartWorker(uuid string) error {
 	s.restarted = append(s.restarted, uuid)
 	return s.restartErr
+}
+
+func (s *stubProvider) RetryFailedJob(_ context.Context, id string) error {
+	s.retried = append(s.retried, id)
+	return s.retryErr
 }
 
 func get(t *testing.T, provider Provider, target string) *httptest.ResponseRecorder {

@@ -119,6 +119,12 @@ runs is a 404 before anything reaches the pool, one that exits in between is a 4
 failed check is a 403 with an audit record saying what was missing. Without
 `server.auth.users` the route is not mounted at all (docs/adr/0011).
 
+`POST /api/v1/failed/{job}/retry` pushes one failed job back onto its queue under the same
+session, role and token. It answers 202 with `{job, queue}`, and the retry is the application's
+own `php artisan queue:retry`, so GoHorizon neither writes a queue key nor re-publishes a payload
+itself (docs/adr/0012). A job no attempt history knows is a 404, an attempt whose newest outcome
+is not `failed` is a 409, and a failed job the application no longer stores is a 404.
+
 `GET /metrics` serves the state `/api/v1/health` reports in the Prometheus text format
 (`text/plain; version=0.0.4; charset=utf-8`), without a client library:
 `gohorizon_up`, `gohorizon_lock_held`,
@@ -131,7 +137,7 @@ the format requires. `/metrics` stays unauthenticated, because Prometheus scrape
 a session; keep it behind the reverse proxy. `/api/v1/health` is behind the gate like the
 rest of the API once `server.auth.users` is configured.
 
-Not implemented yet: a dashboard control for restarting a worker, failed-job retry and delete,
+Not implemented yet: a dashboard control for restarting a worker, failed-job delete,
 per-action administrator rights, queryable audit history, balancing.
 
 ## Layout

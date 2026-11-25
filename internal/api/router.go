@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/gohorizon/gohorizon/internal/adapter"
 	"github.com/gohorizon/gohorizon/internal/audit"
 	"github.com/gohorizon/gohorizon/internal/auth"
 	"github.com/gohorizon/gohorizon/internal/health"
@@ -22,7 +23,7 @@ import (
 )
 
 // Provider is everything the endpoints expose: the current report, the persisted per-queue
-// history and job history, and the one action the API takes on the pool.
+// history and job history, and the actions the API takes on the pool and on its failed jobs.
 type Provider interface {
 	Report() health.Report
 	Buckets(ctx context.Context, resolution metrics.Resolution, queue string, from, to time.Time) ([]metrics.Bucket, error)
@@ -31,6 +32,9 @@ type Provider interface {
 	// RestartWorker asks the supervisor that runs uuid to stop the worker gracefully and
 	// start its replacement in the same slot (docs/adr/0011).
 	RestartWorker(uuid string) error
+	// RetryFailedJob asks the application to push one failed job back onto its queue through
+	// its own `queue:retry` command (docs/adr/0012).
+	RetryFailedJob(ctx context.Context, id string) error
 }
 
 // defaultHistoryWindows is the range the metrics endpoint answers when no `from` is
@@ -100,12 +104,17 @@ func NewRouter(provider Provider, log *slog.Logger, opts ...Option) http.Handler
 		// roles exist to avoid, so an open service simply has no administrative route.
 		if store := options.auth; store != nil {
 			r.Group(func(r chi.Router) {
-				r.Use(
-					requireSession(store),
+				r.Use(requireSession(store))
+				// Each route names the action its refusals are recorded under, so a token missing
+				// from a retry is never filed as a restart (docs/adr/0010).
+				r.With(
 					requireRole(store, auth.RoleOperator, audit.ActionWorkerRestart, auditor),
 					requireCSRF(store, audit.ActionWorkerRestart, auditor),
-				)
-				r.Post("/workers/{worker}/restart", restartWorker(provider, store, log, auditor))
+				).Post("/workers/{worker}/restart", restartWorker(provider, store, log, auditor))
+				r.With(
+					requireRole(store, auth.RoleOperator, audit.ActionFailedJobRetry, auditor),
+					requireCSRF(store, audit.ActionFailedJobRetry, auditor),
+				).Post("/failed/{job}/retry", retryFailedJob(provider, store, log, auditor))
 			})
 		}
 
@@ -331,6 +340,78 @@ func restartWorker(provider Provider, store *auth.Store, log *slog.Logger, audit
 		})
 		w.Header().Set("Cache-Control", "no-store")
 		writeJSON(w, http.StatusAccepted, map[string]string{"worker": uuid, "supervisor": supervisorID})
+	}
+}
+
+// retryFailedJob pushes one failed job back onto its queue. Laravel owns the failed record and
+// the payload, so the adapter runs the application's own `queue:retry` command rather than
+// GoHorizon writing a queue key (handoff §13, docs/adr/0001). The identity is looked up in
+// history before anything is asked of the application: an id no attempt is known by is a 404,
+// and an attempt whose newest outcome is not `failed` is a 409, so the endpoint cannot be used
+// to push a payload a caller invented.
+func retryFailedJob(provider Provider, store *auth.Store, log *slog.Logger, auditor *audit.Logger) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		identity := chi.URLParam(r, "job")
+		me, _ := store.Current(r)
+		refuse := func(status int, detail, message string) {
+			auditor.Record(r, audit.Event{
+				Action:  audit.ActionFailedJobRetry,
+				Outcome: audit.OutcomeRefused,
+				User:    me.Name,
+				Role:    me.Role,
+				Address: store.ClientAddress(r),
+				Detail:  detail,
+			})
+			w.Header().Set("Cache-Control", "no-store")
+			writeError(w, status, message)
+		}
+
+		job, err := provider.Job(r.Context(), identity)
+		if err != nil {
+			switch {
+			case errors.Is(err, metrics.ErrJobNotFound):
+				refuse(http.StatusNotFound, "no job with id "+identity, "job not found")
+			case errors.Is(err, metrics.ErrDisabled):
+				refuse(http.StatusServiceUnavailable, "job history is unavailable", "could not read job history")
+			default:
+				log.Error("read job history", "job", identity, "error", err)
+				refuse(http.StatusInternalServerError, "job history could not be read", "could not read job history")
+			}
+			return
+		}
+		if job.Outcome != "failed" {
+			// An attempt that was processed, released or timed out has nothing the application
+			// could retry: a failed record either never existed for it or is already gone.
+			refuse(http.StatusConflict, "outcome "+job.Outcome, "only a failed attempt can be retried")
+			return
+		}
+		if job.UUID == "" {
+			refuse(http.StatusConflict, "the attempt carries no uuid", "this attempt has nothing the application can retry")
+			return
+		}
+
+		if err := provider.RetryFailedJob(r.Context(), job.UUID); err != nil {
+			if errors.Is(err, adapter.ErrFailedJobNotFound) {
+				// The retry is a no-op the application reports instead of performing: the record
+				// was retried or forgotten between the history read and the command.
+				refuse(http.StatusNotFound, "the application no longer stores "+job.UUID, "failed job not found")
+				return
+			}
+			log.Warn("retry failed job", "job", job.UUID, "error", err)
+			refuse(http.StatusServiceUnavailable, "the application could not retry the job", "the application could not retry the job")
+			return
+		}
+
+		auditor.Record(r, audit.Event{
+			Action:  audit.ActionFailedJobRetry,
+			Outcome: audit.OutcomeAllowed,
+			User:    me.Name,
+			Role:    me.Role,
+			Address: store.ClientAddress(r),
+			Detail:  "queue " + job.Queue,
+		})
+		w.Header().Set("Cache-Control", "no-store")
+		writeJSON(w, http.StatusAccepted, map[string]string{"job": job.UUID, "queue": job.Queue})
 	}
 }
 

@@ -39,6 +39,10 @@ func (idleProvider) RestartWorker(string) error {
 	return errors.New("this test computes nothing")
 }
 
+func (idleProvider) RetryFailedJob(context.Context, string) error {
+	return errors.New("this test computes nothing")
+}
+
 // TestTrustedProxyCarriesTheClientAndTheTLS is the proxy path with nothing replaced: the
 // configuration an operator writes, the store newAuthStore builds from it, the router the
 // service serves, and real HTTP requests whose peer is the proxy it trusts. The test client

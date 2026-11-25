@@ -95,7 +95,10 @@ const fixtureEnv: NodeJS.ProcessEnv = {
   APP_ENV: 'e2e',
   APP_KEY: 'base64:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=',
   QUEUE_CONNECTION: 'redis',
-  QUEUE_FAILED_DRIVER: 'null',
+  // The failing fixture job is retried through the API, so the application has to keep it: a
+  // `null` failer discards it and `queue:retry` would have nothing to push back. The file
+  // failer is Laravel's own, in the fixture's storage, and no other suite shares this file.
+  QUEUE_FAILED_DRIVER: 'file',
   REDIS_CLIENT: 'predis',
   REDIS_HOST: redis.host,
   REDIS_PORT: String(redis.port),
@@ -187,6 +190,12 @@ test.describe('the dashboard against the real binary', () => {
         supervisors.length === 3 &&
         supervisors.every((supervisor) => supervisor.running === supervisor.desired)
       )
+    })
+
+    // A previous run's failed jobs would be leftovers from another suite; this run starts
+    // with an empty file so the job it retries is the one this setup dispatched.
+    fs.rmSync(path.join(fixture, 'storage', 'framework', 'cache', 'failed-jobs.json'), {
+      force: true,
     })
 
     dispatch(php, 'marker', path.join(dir, 'smoke-marker'))
@@ -1261,6 +1270,56 @@ test.describe('the dashboard against the real binary', () => {
     ).toHaveCount(1)
   })
 
+  test('an operator retries a failed job and the retry is recorded', async ({ page }) => {
+    // The failing attempt the setup dispatched is the one retried, so the job has to be one the
+    // application still stores — which is why the fixture keeps failed jobs in its own file
+    // rather than discarding them.
+    const failed = await waitForJob(
+      'still list the failed attempt',
+      `queue=${queue}&outcome=failed`,
+      (job) => job.class === 'App\\Jobs\\AlwaysFails',
+    )
+    if (failed.uuid === undefined || failed.uuid === '') {
+      throw new Error('the failed attempt carries no uuid to retry')
+    }
+
+    const token = await csrfToken(page)
+    const before = auditLines().length
+
+    // The request carries the browser's session cookie and the token from its jar: the two
+    // things the endpoint asks for, presented by the browser rather than borrowed here.
+    const response = await page.request.post(`${base}/api/v1/failed/${failed.uuid}/retry`, {
+      headers: { 'X-CSRF-Token': token },
+    })
+    expect(response.status()).toBe(202)
+    expect(await response.json()).toEqual({ job: failed.uuid, queue })
+
+    // The application forgot the failed record and pushed the payload back, so the worker ran
+    // the job again. It fails every time, which is what makes the proof readable: the same
+    // identity gains an attempt newer than the one that was retried.
+    await waitFor('run the retried job', async () => {
+      const jobs = await recordedJobs(`queue=${queue}&outcome=failed`)
+      return jobs.some(
+        (job) => job.uuid === failed.uuid && job.finished_at !== failed.finished_at,
+      )
+    })
+
+    // The record is the one durable trace the action leaves, read from the service log where an
+    // operator would find it.
+    await waitFor('write the retry audit record', async () => auditLines().length >= before + 1)
+    const record = auditLines()
+      .slice(before)
+      .find((line) => line.action === 'failed-job-retry')
+    expect(record).toMatchObject({
+      action: 'failed-job-retry',
+      outcome: 'allowed',
+      user: smokeUser,
+      role: 'operator',
+      detail: `queue ${queue}`,
+    })
+    expect(record?.address).toBe('127.0.0.1')
+  })
+
   test('a crash-looping worker is named on both supervisor lines', async ({ page }) => {
     // Nothing in the fixture kills its worker, so this case is the crash: a SIGKILL is a
     // crash to the supervisor, which replaces the worker with a growing backoff. Three of
@@ -1852,6 +1911,7 @@ function averageMs(bucket: HistoryBucket): number {
 // class at all, what it threw when it failed, and when it finished.
 interface RecordedJob {
   class?: string
+  uuid?: string
   finished_at?: string
   exception?: { message?: string } | null
 }

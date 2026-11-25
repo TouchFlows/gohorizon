@@ -2,17 +2,23 @@ package api
 
 import (
 	"bytes"
+	"encoding/json"
 	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 
+	"github.com/gohorizon/gohorizon/internal/adapter"
 	"github.com/gohorizon/gohorizon/internal/auth"
 	"github.com/gohorizon/gohorizon/internal/health"
+	"github.com/gohorizon/gohorizon/internal/metrics"
 )
 
 const testWorkerUUID = "7c9e6679-7425-40de-944b-e07fc1f90ae7"
+
+// testJobUUID is the identity a failed attempt is served under: the uuid Laravel published.
+const testJobUUID = "e0a1c2d3-4b5f-4a6b-8c7d-9e0f1a2b3c4d"
 
 // adminRouter builds a router with one user in role, keeping the service log so the audit
 // records can be read, and reporting one running worker a test can ask to restart.
@@ -299,5 +305,247 @@ func TestAnOpenServiceHasNoAdministrativeRoute(t *testing.T) {
 	}
 	if len(provider.restarted) != 0 {
 		t.Fatalf("an open service restarted %v", provider.restarted)
+	}
+}
+
+// retryJob asks for one failed job's retry, with the cookies a browser holds and, when token is
+// not empty, the header it echoes.
+func retryJob(handler http.Handler, id string, token string, cookies ...*http.Cookie) *httptest.ResponseRecorder {
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/failed/"+id+"/retry", nil)
+	request.RemoteAddr = "192.0.2.10:5555"
+	for _, cookie := range cookies {
+		request.AddCookie(cookie)
+	}
+	if token != "" {
+		request.Header.Set(auth.CSRFHeader, token)
+	}
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, request)
+	return recorder
+}
+
+// failedJob is the history answer a retry is decided on: the newest attempt, failed, with the
+// uuid the application stored it under.
+func failedJob() metrics.Job {
+	return metrics.Job{JobID: testJobUUID, UUID: testJobUUID, Queue: "default", Outcome: "failed"}
+}
+
+func TestRetryNeedsTheTokenAndAnOperatorRole(t *testing.T) {
+	cases := []struct {
+		name string
+		role string
+		// token picks the header: "cookie" echoes the issued token, "wrong" sends another,
+		// "" sends none.
+		token string
+		want  int
+	}{
+		{name: "a viewer with the token", role: auth.RoleViewer, token: "cookie", want: http.StatusForbidden},
+		{name: "an operator with no token", role: auth.RoleOperator, token: "", want: http.StatusForbidden},
+		{name: "an operator with the wrong token", role: auth.RoleOperator, token: "wrong", want: http.StatusForbidden},
+		{name: "an operator with the token", role: auth.RoleOperator, token: "cookie", want: http.StatusAccepted},
+		{name: "an administrator with the token", role: auth.RoleAdministrator, token: "cookie", want: http.StatusAccepted},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			handler, provider, _ := adminRouter(t, tc.role)
+			provider.job = failedJob()
+			session, csrf := signInForAdmin(t, handler)
+
+			token := ""
+			switch tc.token {
+			case "cookie":
+				token = csrf.Value
+			case "wrong":
+				token = "not-the-issued-token"
+			}
+			recorder := retryJob(handler, testJobUUID, token, session, csrf)
+
+			if recorder.Code != tc.want {
+				t.Fatalf("status = %d, want %d (body %s)", recorder.Code, tc.want, recorder.Body)
+			}
+			// Nothing is asked of the application unless both checks passed, so a refused call
+			// is proved by no retry ever reaching the adapter.
+			wantRetries := 0
+			if tc.want == http.StatusAccepted {
+				wantRetries = 1
+			}
+			if len(provider.retried) != wantRetries {
+				t.Errorf("retried = %v, want %d retry(s)", provider.retried, wantRetries)
+			}
+			if got := recorder.Header().Get("Cache-Control"); got != "no-store" {
+				t.Errorf("Cache-Control = %q, want no-store", got)
+			}
+		})
+	}
+}
+
+func TestRetryWithoutASessionIsUnauthorized(t *testing.T) {
+	handler, provider, _ := adminRouter(t, auth.RoleAdministrator)
+	provider.job = failedJob()
+
+	recorder := retryJob(handler, testJobUUID, "anything")
+	if recorder.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401", recorder.Code)
+	}
+	if len(provider.retried) != 0 {
+		t.Fatalf("a session-less call retried %v", provider.retried)
+	}
+}
+
+func TestRetryIsAuditedWithTheQueueItWasPushedTo(t *testing.T) {
+	handler, provider, records := adminRouter(t, auth.RoleOperator)
+	provider.job = failedJob()
+	session, csrf := signInForAdmin(t, handler)
+
+	recorder := retryJob(handler, testJobUUID, csrf.Value, session, csrf)
+	if recorder.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, want 202 (body %s)", recorder.Code, recorder.Body)
+	}
+	// The answer names the identity the application was asked about and the queue it was
+	// pushed back to, which is what the operator would look at next.
+	var answer map[string]string
+	if err := json.Unmarshal(recorder.Body.Bytes(), &answer); err != nil {
+		t.Fatalf("decode answer: %v", err)
+	}
+	if answer["job"] != testJobUUID || answer["queue"] != "default" {
+		t.Errorf("answer = %v, want the uuid and its queue", answer)
+	}
+	if len(provider.retried) != 1 || provider.retried[0] != testJobUUID {
+		t.Fatalf("retried = %v, want [%s]", provider.retried, testJobUUID)
+	}
+
+	events := auditRecords(t, records)
+	allowed := events[len(events)-1]
+	if allowed["action"] != "failed-job-retry" || allowed["outcome"] != "allowed" {
+		t.Fatalf("record = %v, want an allowed failed-job-retry", allowed)
+	}
+	if allowed["user"] != "alice" || allowed["role"] != auth.RoleOperator {
+		t.Errorf("record = %v, want alice as operator", allowed)
+	}
+	if allowed["detail"] != "queue default" {
+		t.Errorf("detail = %v, want the queue the retry was pushed to", allowed["detail"])
+	}
+	if allowed["address"] != "192.0.2.10" {
+		t.Errorf("address = %v, want the client address", allowed["address"])
+	}
+}
+
+func TestRetryOfAnUnknownJobIsANotFound(t *testing.T) {
+	handler, provider, records := adminRouter(t, auth.RoleOperator)
+	provider.jobErr = metrics.ErrJobNotFound
+	session, csrf := signInForAdmin(t, handler)
+
+	recorder := retryJob(handler, testJobUUID, csrf.Value, session, csrf)
+	if recorder.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404 (body %s)", recorder.Code, recorder.Body)
+	}
+	// An invented identity never reaches the application: the history is what decides whether
+	// there is a failed job worth asking about.
+	if len(provider.retried) != 0 {
+		t.Fatalf("an unknown job was retried: %v", provider.retried)
+	}
+
+	events := auditRecords(t, records)
+	refused := events[len(events)-1]
+	if refused["action"] != "failed-job-retry" || refused["outcome"] != "refused" {
+		t.Fatalf("record = %v, want a refused failed-job-retry", refused)
+	}
+	if refused["detail"] != "no job with id "+testJobUUID {
+		t.Errorf("detail = %v, want the id that was looked up", refused["detail"])
+	}
+}
+
+func TestRetryOfAnAttemptThatDidNotFailIsAConflict(t *testing.T) {
+	handler, provider, records := adminRouter(t, auth.RoleOperator)
+	job := failedJob()
+	job.Outcome = "processed"
+	provider.job = job
+	session, csrf := signInForAdmin(t, handler)
+
+	recorder := retryJob(handler, testJobUUID, csrf.Value, session, csrf)
+	if recorder.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want 409 (body %s)", recorder.Code, recorder.Body)
+	}
+	if len(provider.retried) != 0 {
+		t.Fatalf("an attempt that succeeded was retried: %v", provider.retried)
+	}
+
+	events := auditRecords(t, records)
+	refused := events[len(events)-1]
+	if refused["outcome"] != "refused" || refused["detail"] != "outcome processed" {
+		t.Fatalf("record = %v, want a refusal naming the outcome", refused)
+	}
+}
+
+func TestRetryOfAnAttemptWithoutAUUIDIsAConflict(t *testing.T) {
+	handler, provider, _ := adminRouter(t, auth.RoleOperator)
+	// The `id:` fallback names an attempt the application never stored under a uuid, so there
+	// is no failed record to ask it about.
+	provider.job = metrics.Job{JobID: "id:17", Queue: "default", Outcome: "failed"}
+	session, csrf := signInForAdmin(t, handler)
+
+	if recorder := retryJob(handler, "id:17", csrf.Value, session, csrf); recorder.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want 409 (body %s)", recorder.Code, recorder.Body)
+	}
+	if len(provider.retried) != 0 {
+		t.Fatalf("an attempt with no uuid was retried: %v", provider.retried)
+	}
+}
+
+func TestRetryOfAFailedJobTheApplicationNoLongerStoresIsANotFound(t *testing.T) {
+	handler, provider, records := adminRouter(t, auth.RoleOperator)
+	provider.job = failedJob()
+	provider.retryErr = adapter.ErrFailedJobNotFound
+	session, csrf := signInForAdmin(t, handler)
+
+	recorder := retryJob(handler, testJobUUID, csrf.Value, session, csrf)
+	if recorder.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404 (body %s)", recorder.Code, recorder.Body)
+	}
+
+	events := auditRecords(t, records)
+	refused := events[len(events)-1]
+	if refused["outcome"] != "refused" || refused["detail"] != "the application no longer stores "+testJobUUID {
+		t.Fatalf("record = %v, want a refusal naming the missing record", refused)
+	}
+}
+
+func TestRetryWhenJobHistoryIsUnavailableIsAServiceUnavailable(t *testing.T) {
+	handler, provider, _ := adminRouter(t, auth.RoleOperator)
+	provider.jobErr = metrics.ErrDisabled
+	session, csrf := signInForAdmin(t, handler)
+
+	// History that was never opened must not read like "no such job", exactly as on the
+	// history endpoints.
+	if recorder := retryJob(handler, testJobUUID, csrf.Value, session, csrf); recorder.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want 503 (body %s)", recorder.Code, recorder.Body)
+	}
+}
+
+func TestRetryWhenTheApplicationCannotAnswerIsAServiceUnavailable(t *testing.T) {
+	handler, provider, _ := adminRouter(t, auth.RoleOperator)
+	provider.job = failedJob()
+	provider.retryErr = &stubRestartError{}
+	session, csrf := signInForAdmin(t, handler)
+
+	// The command failed for a reason that is not "no such failed job": the application is
+	// unhealthy, and the endpoint says so instead of claiming a retry happened.
+	if recorder := retryJob(handler, testJobUUID, csrf.Value, session, csrf); recorder.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want 503 (body %s)", recorder.Code, recorder.Body)
+	}
+}
+
+func TestAnOpenServiceHasNoFailedJobRetry(t *testing.T) {
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	provider := &stubProvider{report: health.Report{Status: "ok"}, job: failedJob()}
+	recorder := retryJob(NewRouter(provider, log), testJobUUID, "anything")
+
+	// With no users the administrative group is not mounted, so there is nobody to allow and
+	// nothing to retry, whatever token or header is sent (docs/adr/0011).
+	if recorder.Code == http.StatusAccepted {
+		t.Fatal("an open service accepted a failed-job retry")
+	}
+	if len(provider.retried) != 0 {
+		t.Fatalf("an open service retried %v", provider.retried)
 	}
 }
