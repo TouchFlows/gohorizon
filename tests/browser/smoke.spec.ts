@@ -492,7 +492,7 @@ test.describe('the dashboard against the real binary', () => {
     // A request is parked at the gate, so the answer this line waits for has provably not been
     // sent: the line is read against an outstanding read rather than against the milliseconds
     // a local service leaves. A case that lost its hold cannot park, and fails here.
-    await expect.poll(() => jobsRead.parked()).toBe(true)
+    await expect.poll(() => jobsRead.parked()).toBe(1)
     await expect(readingJobs).toBeVisible()
 
     // The answer is let through, and the line gives way to the screen it was standing in for.
@@ -516,7 +516,7 @@ test.describe('the dashboard against the real binary', () => {
     await expect(readingHistory).toBeVisible()
 
     // Parked here too, so the same claim holds on this screen.
-    await expect.poll(() => historyRead.parked()).toBe(true)
+    await expect.poll(() => historyRead.parked()).toBe(1)
     await expect(readingHistory).toBeVisible()
 
     const historyAnswered = page.waitForResponse(
@@ -544,7 +544,7 @@ test.describe('the dashboard against the real binary', () => {
     const jobError = page.getByText('Could not read job history:')
 
     await page.goto(`${base}/#/jobs`)
-    await expect.poll(() => jobs.parked()).toBe(true)
+    await expect.poll(() => jobs.parked()).toBe(1)
     await expect(readingJobs).toBeVisible()
 
     // Away while the read is outstanding: the jobs screen unmounts and aborts its request.
@@ -573,6 +573,63 @@ test.describe('the dashboard against the real binary', () => {
     await expect(jobError).toHaveCount(0)
     await expect(page.getByText('Job history is unavailable:')).toHaveCount(0)
     await expect(readingJobs).toHaveCount(0)
+  })
+
+  test('a filter that replaces a read in flight leaves only the answer it asked for', async ({ page }) => {
+    // A screen that stays mounted still replaces its read when the question changes: a filter
+    // is a new query, so the screen aborts the read for the old one and asks again from where
+    // it is. Leaving the screen hides that — the answer lands on a screen nobody is on — while
+    // here the old read's answer lands on the screen that is still drawing the new one.
+    //
+    // Both reads are held at the socket, because the state under test only lasts while the
+    // superseding read is outstanding: an aborted read is only able to write over the screen
+    // until the read that replaced it answers.
+    let release!: () => void
+    const held = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    const jobs = await dress(page, '**/api/v1/jobs*')
+    jobs.answer({ kind: 'through', until: held })
+
+    const readingJobs = page.getByText('Reading job history…')
+    const jobError = page.getByText('Could not read job history:')
+
+    await page.goto(`${base}/#/jobs`)
+    await expect.poll(() => jobs.parked()).toBe(1)
+    await expect(readingJobs).toBeVisible()
+
+    // The filter is changed while the first read is parked, so the screen is still mounted when
+    // its own read is withdrawn: the queue the first read asked for is not the one the second
+    // does, which is what tells the two apart in the browser's own events.
+    const withdrawn = page.waitForEvent('requestfailed', {
+      predicate: (request) => request.url().includes('/api/v1/jobs?') && !request.url().includes('queue='),
+      timeout: 10_000,
+    })
+    const superseding = page.waitForRequest(
+      (request) => request.url().includes('/api/v1/jobs?') && request.url().includes(`queue=${queue}`),
+    )
+    await page.getByLabel('Queue').selectOption(queue)
+
+    // The first read really was aborted rather than merely left outstanding, and the second was
+    // asked for, so the two parked below are the replaced answer and its replacement.
+    expect((await withdrawn).failure()?.errorText).toContain('ABORTED')
+    await superseding
+
+    // Both are at the gate now. The replaced answer can only reach this screen here, with the
+    // read that replaced it still outstanding, and an aborted read treated as a failure would
+    // take the waiting line's place with an error the service never reported.
+    await expect.poll(() => jobs.parked()).toBe(2)
+    await expect(readingJobs).toBeVisible()
+    await expect(jobError).toHaveCount(0)
+
+    release()
+
+    // The answer the screen asked for last is the one it draws, and the read it gave up on
+    // leaves nothing behind: no failure line, no unavailable line, no waiting line.
+    await expect(page.getByRole('cell', { name: 'App\\Jobs\\RecordMarker', exact: true })).toBeVisible()
+    await expect(readingJobs).toHaveCount(0)
+    await expect(jobError).toHaveCount(0)
+    await expect(page.getByText('Job history is unavailable:')).toHaveCount(0)
   })
 
   test('the metrics screen says when no queue has been sampled', async ({ page }) => {
@@ -1252,7 +1309,7 @@ async function dress(page: Page, ...endpoints: string[]) {
   let answer: Answer = { kind: 'through' }
   // How many requests are waiting at the gate right now. A waiting line is only evidence of an
   // outstanding read while something is actually parked, so cases read this rather than assume
-  // the answer has not come back yet.
+  // the answer has not come back yet; a screen that replaces its read parks two at once.
   let waiting = 0
   for (const endpoint of endpoints) {
     await page.route(endpoint, async (route: Route) => {
@@ -1294,10 +1351,10 @@ async function dress(page: Page, ...endpoints: string[]) {
     answer(next: Answer) {
       answer = next
     },
-    // A parked request has not been answered, so anything the page draws while this is true was
-    // drawn against a read that is genuinely outstanding.
+    // A parked request has not been answered, so anything the page draws while this is above
+    // zero was drawn against a read that is genuinely outstanding, and the number says how many.
     parked() {
-      return waiting > 0
+      return waiting
     },
   }
 }
