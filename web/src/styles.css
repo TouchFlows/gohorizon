@@ -500,6 +500,28 @@ a {
   font-weight: 600;
 }
 
+.detail__actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
+  margin-top: 1.25rem;
+}
+
+.chip--danger:hover {
+  border-color: var(--warn);
+  color: var(--warn);
+}
+
+.notice {
+  font-size: 0.8125rem;
+  color: var(--muted);
+}
+
+.notice--bad {
+  color: var(--warn);
+}
+
 .detail__exception pre {
   margin: 0;
   padding: 0.75rem;

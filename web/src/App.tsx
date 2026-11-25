@@ -106,9 +106,9 @@ function Dashboard({ route, user, onSignOut, onExpired }: DashboardProps) {
         ) : route === 'workers' ? (
           <Workers report={report} />
         ) : route === 'jobs' ? (
-          <Jobs report={report} />
+          <Jobs report={report} canAct={user !== null} />
         ) : route === 'failed' ? (
-          <Jobs report={report} pinnedOutcome="failed" />
+          <Jobs report={report} pinnedOutcome="failed" canAct={user !== null} />
         ) : route === 'metrics' ? (
           <Metrics report={report} />
         ) : (

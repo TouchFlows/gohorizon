@@ -1320,6 +1320,90 @@ test.describe('the dashboard against the real binary', () => {
     expect(record?.address).toBe('127.0.0.1')
   })
 
+  test('an operator retries and deletes a failed job from its detail panel', async ({ page }) => {
+    // The panel is the row's own view and it prints the uuid the two actions take, so the case
+    // opens it from the newest failed attempt and checks it describes the attempt the API lists.
+    const newest = (await recordedJobs(`queue=${queue}&outcome=failed&limit=1`))[0]
+    if (newest?.uuid === undefined || newest.uuid === '') {
+      throw new Error('the failed history lists no attempt with a uuid')
+    }
+
+    await page.goto(`${base}/#/failed`)
+    const detail = page.locator('.jobs__detail')
+    await page.getByRole('button', { name: 'details' }).first().click()
+    await expect(detail).toBeVisible()
+    // The panel prints the uuid twice — as the UUID and as the job id the recorder stores — so
+    // the first of the two is what is read here.
+    await expect(detail.getByText(newest.uuid, { exact: true }).first()).toBeVisible()
+
+    // Retrying from the panel is an operator's press rather than this file's request: the page
+    // echoes the token its own jar holds, which is the half a direct call here would supply.
+    const attempts = (await recordedJobs(`queue=${queue}&outcome=failed&limit=10`)).filter(
+      (job) => job.uuid === newest.uuid,
+    ).length
+    const before = auditLines().length
+
+    await detail.getByRole('button', { name: 'Retry', exact: true }).click()
+    await expect(detail.getByText(`queued again on ${queue}`)).toBeVisible()
+
+    // The application forgot the failed record and pushed the payload back, so the worker runs
+    // the job again; it fails every time, so the same uuid gains an attempt.
+    await waitFor(
+      'run the job the panel retried',
+      async () =>
+        (await recordedJobs(`queue=${queue}&outcome=failed&limit=10`)).filter(
+          (job) => job.uuid === newest.uuid,
+        ).length > attempts,
+    )
+
+    await waitFor('write the retry audit record', async () =>
+      auditLines()
+        .slice(before)
+        .some((line) => line.action === 'failed-job-retry' && line.outcome === 'allowed'),
+    )
+    const retried = auditLines()
+      .slice(before)
+      .find((line) => line.action === 'failed-job-retry')
+    expect(retried).toMatchObject({
+      action: 'failed-job-retry',
+      outcome: 'allowed',
+      user: smokeUser,
+      role: 'operator',
+      detail: `queue ${queue}`,
+    })
+
+    // The attempt the retried run left behind is the newest row, so the panel describes it:
+    // deleting needs a record the application still stores, and this is the one it just wrote.
+    // The reload is what re-reads the table: a goto to the hash the page already shows is a
+    // hash change, not a new page, and the attempt landed after the first read.
+    await page.goto(`${base}/#/failed`)
+    await page.reload()
+    await page.getByRole('button', { name: 'details' }).first().click()
+    await expect(detail.getByText(newest.uuid, { exact: true }).first()).toBeVisible()
+
+    const beforeDelete = auditLines().length
+    await detail.getByRole('button', { name: 'Delete', exact: true }).click()
+    await expect(detail.getByText(`deleted from ${queue}`)).toBeVisible()
+    // The record is gone, so the controls go quiet rather than asking again.
+    await expect(detail.getByRole('button', { name: 'Delete', exact: true })).toBeDisabled()
+
+    await waitFor('write the delete audit record', async () =>
+      auditLines()
+        .slice(beforeDelete)
+        .some((line) => line.action === 'failed-job-delete' && line.outcome === 'allowed'),
+    )
+    const deleted = auditLines()
+      .slice(beforeDelete)
+      .find((line) => line.action === 'failed-job-delete')
+    expect(deleted).toMatchObject({
+      action: 'failed-job-delete',
+      outcome: 'allowed',
+      user: smokeUser,
+      role: 'operator',
+      detail: `queue ${queue}`,
+    })
+  })
+
   test('a crash-looping worker is named on both supervisor lines', async ({ page }) => {
     // Nothing in the fixture kills its worker, so this case is the crash: a SIGKILL is a
     // crash to the supervisor, which replaces the worker with a growing backoff. Three of

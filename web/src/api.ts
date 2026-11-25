@@ -343,6 +343,101 @@ export function isJobPage(value: unknown): value is JobPage {
   return typeof page.next_before === 'string' && Array.isArray(page.jobs) && page.jobs.every(isJob)
 }
 
+// FailedJobAction is what both failed-job mutations answer: the job they acted on and the queue
+// it belongs to, which is where a retry's work landed.
+export interface FailedJobAction {
+  job: string
+  queue: string
+}
+
+// FailedJobActionError is a mutation the service refused or could not carry out, carrying the
+// status that said so. A 404 is the application no longer storing the job, which is an answer
+// about the record rather than a fault in the request, so the caller tells it apart.
+export class FailedJobActionError extends Error {
+  readonly status: number
+
+  constructor(status: number, message: string) {
+    super(message)
+    this.name = 'FailedJobActionError'
+    this.status = status
+  }
+}
+
+// readCSRFToken reads the double-submit token a mutation must echo. The cookie is deliberately
+// not HttpOnly, because reading it here is what proves the request came from a page on this
+// origin (docs/adr/0011); a jar without one answers with an empty token, and the service
+// refuses the request rather than the page inventing a value.
+export function readCSRFToken(): string {
+  const prefix = `${csrfCookieName}=`
+  for (const part of document.cookie.split(';')) {
+    const entry = part.trim()
+    if (entry.startsWith(prefix)) {
+      return decodeURIComponent(entry.slice(prefix.length))
+    }
+  }
+  return ''
+}
+
+const csrfCookieName = 'gohorizon_csrf'
+
+// retryFailedJob pushes one failed job back onto its queue through the application's own
+// `queue:retry` (docs/adr/0012). The service answers 202 because the work is queued.
+export async function retryFailedJob(uuid: string): Promise<FailedJobAction> {
+  return failedJobAction('POST', `/api/v1/failed/${encodeURIComponent(uuid)}/retry`)
+}
+
+// deleteFailedJob removes one failed job through the application's own `queue:forget`. The
+// service answers 200 because the record is already gone when it does.
+export async function deleteFailedJob(uuid: string): Promise<FailedJobAction> {
+  return failedJobAction('DELETE', `/api/v1/failed/${encodeURIComponent(uuid)}`)
+}
+
+// failedJobAction is the one shape both mutations take: the token from the cookie repeated in
+// the header, on a request the browser also sends its session cookie with. The answer's own
+// `error` is what a refusal shows, so the page repeats the service's wording.
+async function failedJobAction(method: string, url: string): Promise<FailedJobAction> {
+  const response = await fetch(url, {
+    method,
+    headers: { Accept: 'application/json', 'X-CSRF-Token': readCSRFToken() },
+  })
+  if (response.status === 401) {
+    throw new Unauthorized()
+  }
+  if (response.status !== 200 && response.status !== 202) {
+    throw new FailedJobActionError(response.status, await errorText(response))
+  }
+  const payload: unknown = await response.json()
+  if (!isFailedJobAction(payload)) {
+    throw new Error(`${url} did not return the job it acted on`)
+  }
+  return payload
+}
+
+async function errorText(response: Response): Promise<string> {
+  try {
+    const payload = (await response.json()) as { error?: unknown }
+    if (typeof payload.error === 'string' && payload.error !== '') {
+      return payload.error
+    }
+  } catch {
+    // A refusal without a JSON body is still a refusal; its status is the answer.
+  }
+  return `the service answered ${response.status}`
+}
+
+function isFailedJobAction(value: unknown): value is FailedJobAction {
+  if (typeof value !== 'object' || value === null) {
+    return false
+  }
+  const answer = value as Partial<FailedJobAction>
+  return (
+    typeof answer.job === 'string' &&
+    answer.job !== '' &&
+    typeof answer.queue === 'string' &&
+    answer.queue !== ''
+  )
+}
+
 // isHealthReport checks the fields a screen cannot render without. The rest of the report is
 // read defensively, so a report that grows a field never breaks the dashboard.
 export function isHealthReport(value: unknown): value is HealthReport {

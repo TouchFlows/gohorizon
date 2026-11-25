@@ -12,9 +12,21 @@ import {
 } from '../jobs'
 import type { Trail } from '../jobs'
 import { useJobs } from '../useJobs'
+import FailedJobActions from '../components/FailedJobActions'
 import JobTable from '../components/JobTable'
 
-export default function Jobs({ report, pinnedOutcome }: { report: HealthReport; pinnedOutcome?: string }) {
+// canAct is whether this deployment has administrative routes at all: a service started
+// without users mounts none, so its failed screen stays read-only rather than offering
+// controls that could not answer.
+export default function Jobs({
+  report,
+  pinnedOutcome,
+  canAct,
+}: {
+  report: HealthReport
+  pinnedOutcome?: string
+  canAct: boolean
+}) {
   const queues = (report.queues.depths ?? []).map((depth) => depth.queue)
   const [queue, setQueue] = useState('')
   const [outcome, setOutcome] = useState(pinnedOutcome ?? '')
@@ -124,17 +136,40 @@ export default function Jobs({ report, pinnedOutcome }: { report: HealthReport; 
         />
       )}
 
-      {selected !== null && <JobDetail job={selected} onClose={() => setSelected(null)} />}
+      {selected !== null && (
+        <JobDetail
+          job={selected}
+          onClose={() => setSelected(null)}
+          actions={canAct && pinnedOutcome === 'failed'}
+        />
+      )}
 
-      <p className="muted">
-        Read-only: retrying or deleting a job is job administration, which needs an authenticated
-        API that does not exist yet.
-      </p>
+      {pinnedOutcome === undefined ? (
+        <p className="muted">
+          Read-only: retry and delete act on a failed job, from its detail panel on the failed jobs
+          screen.
+        </p>
+      ) : (
+        !canAct && (
+          <p className="muted">
+            Read-only: this service was started without users, so it has no administrative routes
+            to retry or delete a failed job.
+          </p>
+        )
+      )}
     </>
   )
 }
 
-function JobDetail({ job, onClose }: { job: Job; onClose: () => void }) {
+function JobDetail({
+  job,
+  onClose,
+  actions,
+}: {
+  job: Job
+  onClose: () => void
+  actions: boolean
+}) {
   return (
     <section className="panel detail jobs__detail" aria-label="Job detail">
       <div className="detail__head">
@@ -171,6 +206,18 @@ function JobDetail({ job, onClose }: { job: Job; onClose: () => void }) {
           <pre>{job.exception.message === '' ? 'no message' : job.exception.message}</pre>
         </div>
       )}
+
+      {actions &&
+        (job.uuid === '' ? (
+          <p className="muted">
+            This attempt carries no uuid the application knows, so there is nothing to retry or
+            delete.
+          </p>
+        ) : (
+          // Keyed by the attempt, so opening another row does not inherit the answer the
+          // previous one got.
+          <FailedJobActions key={job.id} job={job} />
+        ))}
     </section>
   )
 }
