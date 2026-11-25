@@ -126,31 +126,45 @@ func TestAuthenticateStartsASessionTheRequestCarriesBack(t *testing.T) {
 }
 
 func TestCookieIsSecureWhateverTerminatedTLS(t *testing.T) {
-	store := newTestStore(t, nil)
-	identity, err := store.Authenticate(signInRequest(), "alice", "s3cret")
-	if err != nil {
-		t.Fatalf("Authenticate: %v", err)
-	}
-
 	// The proxy case is the one that matters: the browser speaks HTTPS to a proxy that
 	// forwards plain HTTP, so the request carries no TLS state and only the header says the
-	// cookie will travel over TLS.
+	// cookie will travel over TLS. The header is believed only from a peer in the trusted
+	// list, so the same case from a client that is not a proxy is read differently.
 	cases := []struct {
-		name  string
-		tls   bool
-		proto string
-		want  bool
+		name    string
+		tls     bool
+		proto   string
+		proxied bool // the request arrives from a peer listed as a trusted proxy
+		want    bool
 	}{
 		{name: "plain http", want: false},
 		{name: "direct tls", tls: true, want: true},
-		{name: "proxy terminated tls", proto: "https", want: true},
-		{name: "chain of proxies", proto: "https, http", want: true},
-		{name: "mixed case and spaces", proto: " HTTPS ", want: true},
-		{name: "proxy forwarded plain http", proto: "http", want: false},
+		{name: "trusted proxy terminated tls", proto: "https", proxied: true, want: true},
+		{name: "chain of proxies", proto: "https, http", proxied: true, want: true},
+		{name: "mixed case and spaces", proto: " HTTPS ", proxied: true, want: true},
+		{name: "trusted proxy forwarded plain http", proto: "http", proxied: true, want: false},
+		// A header is worth what its sender is: a client that is not a proxy cannot have its
+		// cookie marked Secure, and so cannot make the browser drop it either.
+		{name: "untrusted peer claiming tls", proto: "https", want: false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
+			store := newTestStore(t, nil)
+			remote := "192.0.2.5:5555"
+			if tc.proxied {
+				store = proxyStore(t, nil)
+				remote = "10.0.0.2:5555"
+			}
+
+			signIn := httptest.NewRequest(http.MethodPost, "/api/v1/session", nil)
+			signIn.RemoteAddr = remote
+			identity, err := store.Authenticate(signIn, "alice", "s3cret")
+			if err != nil {
+				t.Fatalf("Authenticate: %v", err)
+			}
+
 			r := httptest.NewRequest(http.MethodPost, "/api/v1/session", nil)
+			r.RemoteAddr = remote
 			if tc.tls {
 				r.TLS = &tls.ConnectionState{}
 			}

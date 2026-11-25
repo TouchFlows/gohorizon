@@ -167,7 +167,7 @@ func (s *Store) Start(w http.ResponseWriter, r *http.Request, identity Identity)
 		Value:    token,
 		Path:     "/",
 		HttpOnly: true,
-		Secure:   cookieSecure(r),
+		Secure:   s.cookieSecure(r),
 		SameSite: http.SameSiteLaxMode,
 		MaxAge:   int(s.ttl.Seconds()),
 	})
@@ -189,7 +189,7 @@ func (s *Store) End(w http.ResponseWriter, r *http.Request) {
 		Value:    "",
 		Path:     "/",
 		HttpOnly: true,
-		Secure:   cookieSecure(r),
+		Secure:   s.cookieSecure(r),
 		SameSite: http.SameSiteLaxMode,
 		MaxAge:   -1,
 	})
@@ -297,17 +297,22 @@ func (s *Store) prune() {
 }
 
 // cookieSecure marks the cookie Secure when the browser reached the service over TLS: either
-// the request itself carries a TLS connection, or a proxy terminated TLS and said so in
-// X-Forwarded-Proto. The second half is the case that matters, because a proxy in front of
-// the service is the normal deployment and without it every session cookie would be issued
-// without Secure and could be sent back over plain HTTP.
+// the request itself carries a TLS connection, or a proxy this deployment trusts terminated
+// TLS and said so in X-Forwarded-Proto. The second half is the case that matters, because a
+// proxy in front of the service is the normal deployment, and without it every session cookie
+// would be issued without Secure and could be sent back over plain HTTP.
 //
-// A forged header can only make the flag stricter than the transport, and a Secure cookie
-// arriving over plain HTTP is dropped by the browser: the cost of a lie here is a sign-in
-// that does not stick for the liar, never a cookie sent in the clear.
-func cookieSecure(r *http.Request) bool {
+// The header is believed only from a peer in server.trusted_proxies: the same list that says
+// whose X-Forwarded-For the limiter counts, so a deployment cannot end up trusting one
+// forwarded header and not the other's sender. A client that is not a proxy cannot make its
+// cookie Secure by claiming to be one, which would otherwise be a way to have the browser
+// drop the session it just received.
+func (s *Store) cookieSecure(r *http.Request) bool {
 	if r.TLS != nil {
 		return true
+	}
+	if _, peer, ok := peerAddress(r); !ok || !s.trusts(peer) {
+		return false
 	}
 	// A chain of proxies appends to the header; the leftmost value is the one the browser
 	// spoke TLS to.
@@ -324,11 +329,7 @@ func cookieSecure(r *http.Request) bool {
 // keying on the peer alone would let five bad guesses from one person lock out everyone
 // behind it.
 func (s *Store) clientAddress(r *http.Request) string {
-	remote := r.RemoteAddr
-	if host, _, err := net.SplitHostPort(remote); err == nil {
-		remote = host
-	}
-	peer, ok := parseAddr(remote)
+	remote, peer, ok := peerAddress(r)
 	if !ok || !s.trusts(peer) {
 		// Whatever a client that is not a trusted proxy claims in the header, it is counted
 		// on its own address: otherwise rotating X-Forwarded-For would reset the count.
@@ -357,6 +358,17 @@ func (s *Store) clientAddress(r *http.Request) string {
 		return first.String()
 	}
 	return remote
+}
+
+// peerAddress is who connected, without the port: the address a proxy decision has to be
+// made about.
+func peerAddress(r *http.Request) (string, netip.Addr, bool) {
+	host := r.RemoteAddr
+	if split, _, err := net.SplitHostPort(host); err == nil {
+		host = split
+	}
+	addr, ok := parseAddr(host)
+	return host, addr, ok
 }
 
 func (s *Store) trusts(addr netip.Addr) bool {

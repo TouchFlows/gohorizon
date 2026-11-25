@@ -35,9 +35,12 @@ authentication, rate limiting and three roles (viewer, operator, administrator).
    reached the service over TLS: either the request itself carries a TLS connection, or a
    proxy terminated it and said so in `X-Forwarded-Proto`. The second half is the normal
    deployment, and without it every session cookie behind a proxy would be issued without
-   `Secure`. A forged header can only make the flag stricter than the transport, and a
-   browser drops a `Secure` cookie that arrives over plain HTTP, so the cost of a lie is a
-   sign-in that does not stick for the liar — never a cookie sent in the clear.
+   `Secure`. **Both proxy decisions read one list**: `X-Forwarded-Proto` is believed only
+   from a peer in `server.trusted_proxies`, the same list that says whose `X-Forwarded-For`
+   the limiter counts. A deployment therefore cannot trust a forwarded header while not
+   trusting its sender, and a client that is not a proxy cannot have its cookie marked
+   `Secure` — which, since a browser drops such a cookie over plain HTTP, would otherwise be
+   a way to have the browser throw away the session it just received.
 4. **Sign-out revokes the token in memory.** A signed token cannot be un-signed, so the
    store keeps a revocation list of ids until their expiry. It is memory: a restart loses
    it, and a copied token would work again until it expires. That is why the TTL is short
@@ -86,7 +89,8 @@ authentication, rate limiting and three roles (viewer, operator, administrator).
   a suspected session leak.
 - `server.trusted_proxies` is optional and empty by default: a deployment behind a proxy that
   does not list it gets one shared sign-in budget, which is the safe failure (a lockout)
-  rather than an unthrottled one.
+  rather than an unthrottled one, and its cookies are issued according to the connection it
+  sees, which is plain HTTP and so without `Secure`.
 - Role-based authorisation, audit logs and CSRF tokens are unbuilt; the gate is
   authentication only.
 - Sessions are per instance. v1 runs one instance behind the ownership lock, so there is
