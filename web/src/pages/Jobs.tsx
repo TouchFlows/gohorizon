@@ -21,11 +21,11 @@ import JobTable from '../components/JobTable'
 export default function Jobs({
   report,
   pinnedOutcome,
-  canAct,
+  canAct = false,
 }: {
   report: HealthReport
   pinnedOutcome?: string
-  canAct: boolean
+  canAct?: boolean
 }) {
   const queues = (report.queues.depths ?? []).map((depth) => depth.queue)
   const [queue, setQueue] = useState('')
@@ -144,18 +144,17 @@ export default function Jobs({
         />
       )}
 
-      {pinnedOutcome === undefined ? (
+      {pinnedOutcome === undefined && (
         <p className="muted">
           Read-only: retry and delete act on a failed job, from its detail panel on the failed jobs
           screen.
         </p>
-      ) : (
-        !canAct && (
-          <p className="muted">
-            Read-only: this service was started without users, so it has no administrative routes
-            to retry or delete a failed job.
-          </p>
-        )
+      )}
+      {pinnedOutcome !== undefined && !canAct && (
+        <p className="muted">
+          Read-only: this service was started without users, so it has no administrative routes to
+          retry or delete a failed job.
+        </p>
       )}
     </>
   )

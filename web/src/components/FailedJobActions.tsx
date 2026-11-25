@@ -24,13 +24,12 @@ export default function FailedJobActions({ job }: { job: Job }) {
     setBusy(verb)
     setNotice(null)
     try {
-      const answer =
+      const queue =
         verb === 'retry' ? await retryFailedJob(job.uuid) : await deleteFailedJob(job.uuid)
       setSettled(true)
       setNotice({
         failed: false,
-        text:
-          verb === 'retry' ? `queued again on ${answer.queue}` : `deleted from ${answer.queue}`,
+        text: verb === 'retry' ? `queued again on ${queue}` : `deleted from ${queue}`,
       })
     } catch (failure) {
       // A 404 is the application saying the record is already gone, so the buttons go quiet

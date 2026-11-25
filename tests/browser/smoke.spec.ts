@@ -1374,9 +1374,7 @@ test.describe('the dashboard against the real binary', () => {
 
     // The attempt the retried run left behind is the newest row, so the panel describes it:
     // deleting needs a record the application still stores, and this is the one it just wrote.
-    // The reload is what re-reads the table: a goto to the hash the page already shows is a
-    // hash change, not a new page, and the attempt landed after the first read.
-    await page.goto(`${base}/#/failed`)
+    // The reload re-reads the table, because the attempt landed after the first read.
     await page.reload()
     await page.getByRole('button', { name: 'details' }).first().click()
     await expect(detail.getByText(newest.uuid, { exact: true }).first()).toBeVisible()
