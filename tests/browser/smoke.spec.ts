@@ -82,6 +82,9 @@ const pollMs = 30_000
 const smokeUser = 'smoke'
 const smokePassword = 'smoke-password'
 const sessionCookie = 'gohorizon_session'
+// The double-submit token a mutation has to echo. It is not HttpOnly, because the page reads it
+// from its own jar, and this file reads it the same way.
+const csrfCookie = 'gohorizon_csrf'
 // At least 32 bytes, which is the length the service refuses to start below.
 const sessionKey = 'gohorizon-smoke-session-key-0123456789abcdef'
 
@@ -344,6 +347,62 @@ test.describe('the dashboard against the real binary', () => {
     })
     // The address is the client the service resolves, which on loopback is the browser itself.
     expect(signIn.address).toBe('127.0.0.1')
+  })
+
+  test('an operator restarts a worker and the restart is recorded', async ({ page }) => {
+    // The target is a worker on the idle pool rather than the one the smoke's jobs run
+    // through, so the restart interrupts nothing and the pool still has its other worker while
+    // the stopped one is replaced.
+    const report = await readHealth(page, `${base}/#/workers`)
+    const pool = (report.supervisors ?? []).find((supervisor) =>
+      (supervisor.workers ?? []).some((worker) => worker.queue === extraQueue),
+    )
+    const target = (pool?.workers ?? []).find((worker) => worker.queue === extraQueue)
+    if (pool === undefined || target === undefined) {
+      throw new Error(`the report lists no worker on the ${extraQueue} queue`)
+    }
+
+    const token = await csrfToken(page)
+    const before = auditLines().length
+
+    // The request carries the browser's session cookie and the token from its jar: the two
+    // things the endpoint asks for, presented by the browser rather than borrowed here.
+    const response = await page.request.post(`${base}/api/v1/workers/${target.uuid}/restart`, {
+      headers: { 'X-CSRF-Token': token },
+    })
+    expect(response.status()).toBe(202)
+    expect(await response.json()).toEqual({ worker: target.uuid, supervisor: pool.id })
+
+    // It is stopped gracefully and its replacement takes the same slot, so the pool returns to
+    // its size with a process the operator did not kill. A restart is a recycle: the worker
+    // keeps its uuid, which names the slot's process, and the pid is what changes.
+    await waitFor('replace the restarted worker', async () => {
+      const next = (await getJSON(`${base}/api/v1/health`)) as HealthReport
+      const supervisor = (next.supervisors ?? []).find((candidate) => candidate.id === pool.id)
+      const workers = (supervisor?.workers ?? []).filter((worker) => worker.queue === extraQueue)
+      const recycled = workers.find((worker) => worker.uuid === target.uuid)
+      return (
+        workers.length === pool.desired &&
+        recycled !== undefined &&
+        recycled.pid !== target.pid &&
+        workers.every((worker) => worker.state === 'running')
+      )
+    })
+
+    // The record is the one durable trace the action leaves, read from the service log where an
+    // operator would find it.
+    await waitFor('write the restart audit record', async () => auditLines().length >= before + 1)
+    const record = auditLines()
+      .slice(before)
+      .find((line) => line.action === 'worker-restart')
+    expect(record).toMatchObject({
+      action: 'worker-restart',
+      outcome: 'allowed',
+      user: smokeUser,
+      role: 'operator',
+      detail: `supervisor ${pool.id}`,
+    })
+    expect(record?.address).toBe('127.0.0.1')
   })
 
   test('the overview renders the service, its queues and its telemetry', async ({ page }) => {
@@ -1455,6 +1514,23 @@ async function signIn(): Promise<string> {
     throw new Error('sign-in answered without the session cookie')
   }
   return cookie.slice(sessionCookie.length + 1).split(';')[0]
+}
+
+// csrfToken reads the double-submit token the dashboard echoes on a mutation. The session route
+// issues one when the jar has none, and the browser's jar is where the page reads it, so this
+// asks through the browser rather than minting a token of its own.
+async function csrfToken(page: Page): Promise<string> {
+  const response = await page.request.get(`${base}/api/v1/session`)
+  if (!response.ok()) {
+    throw new Error(`session read returned ${response.status()}`)
+  }
+  const cookie = (await page.context().cookies(base)).find(
+    (candidate) => candidate.name === csrfCookie,
+  )
+  if (cookie === undefined) {
+    throw new Error('the session route answered without a CSRF cookie')
+  }
+  return cookie.value
 }
 
 // getJSON reads the API the way the pages do, cookie and all: every endpoint below the session

@@ -601,6 +601,66 @@ func TestServiceConsumesTelemetryEndToEnd(t *testing.T) {
 	}
 }
 
+// TestServiceRestartWorkerReplacesTheWorkerInItsSlot proves the restart the administrative
+// endpoint asks the service for: the named worker is stopped gracefully and the supervisor
+// starts its replacement in the same slot, so the pool keeps its size and the job in flight
+// finishes instead of being killed (docs/adr/0002). A stop the service asked for is a recycle,
+// not a crash, so the replacement starts from a clean streak. An id no supervisor runs is an
+// error, which is what lets the endpoint answer 404 rather than pretend something happened.
+func TestServiceRestartWorkerReplacesTheWorkerInItsSlot(t *testing.T) {
+	running := startService(t, nil)
+	before := running.worker
+
+	if err := running.service.RestartWorker(""); err == nil {
+		t.Error("RestartWorker accepted an empty worker id")
+	}
+	if err := running.service.RestartWorker("no-such-worker"); err == nil {
+		t.Error("RestartWorker accepted an id no supervisor runs")
+	}
+
+	if err := running.service.RestartWorker(before.UUID); err != nil {
+		t.Fatalf("RestartWorker(%q): %v", before.UUID, err)
+	}
+	// The stop is graceful: the worker is signalled, not killed, and the manager classifies the
+	// exit it was asked for as a stop rather than a crash.
+
+	// The slot is refilled rather than left empty: one running worker again, with an identity
+	// of its own rather than the one that was stopped.
+	// The replacement arrives on the manager's own tick. A restart is a recycle: the slot keeps
+	// its worker record, whose UUID names the slot's process, so the proof that a new process
+	// took over is the pid rather than a new identity.
+	deadline := time.Now().Add(20 * time.Second)
+	var stats process.Stats
+	for {
+		stats = running.manager.Snapshot()
+		recycled := stats.Running == 1 && stats.Workers[0].UUID == before.UUID &&
+			stats.Workers[0].PID != before.PID
+		if recycled {
+			break
+		}
+		if !time.Now().Before(deadline) {
+			t.Fatalf("no replacement process for worker %s within 20s; pool is %+v", before.UUID, stats)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	replacement := stats.Workers[0]
+	if replacement.Queue != before.Queue || replacement.Slot != before.Slot {
+		t.Errorf("replacement = %+v, want the stopped worker's slot and queue", replacement)
+	}
+	if replacement.PID == 0 {
+		t.Errorf("replacement pid = %d, want the process that took the slot", replacement.PID)
+	}
+	// A requested restart is a recycle. Classifying it as a crash would make the pool back off
+	// and count a healthy restart towards the crash-loop threshold.
+	if replacement.RestartCount != 0 {
+		t.Errorf("restart count = %d, want 0 for a requested restart", replacement.RestartCount)
+	}
+	if _, err := process.Probe(before.PID); err == nil {
+		t.Errorf("worker pid %d is still alive after its restart", before.PID)
+	}
+}
+
 // TestServicePrunesMetricsOnStartup seeds history a previous run left behind and proves
 // the startup pass removes it. The schedule is an hour away, so only the startup pass
 // can be responsible.

@@ -55,8 +55,9 @@ from being made by another origin. ADR 0009 deferred the second to this slice.
 
 ## Consequences
 
-- The dashboard has no control for this yet: the endpoint is exercised by the browser suite's
-  service, by the Go tests, and by an operator with `curl`. A button is a slice of its own.
+- The dashboard has no control for this yet. An operator reaches the endpoint with `curl`, and
+  the browser suite makes one authenticated request carrying the cookie's token against the
+  real binary, then reads the record it left. A button is a slice of its own.
 - The endpoint cannot be used to *stop* a worker for good, by design: the slot always comes back.
   Taking a supervisor out of service remains a configuration change and a restart of the service.
 - Refusals are recorded, so a viewer who keeps trying is visible in the log; there is still no
