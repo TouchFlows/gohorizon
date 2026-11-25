@@ -7,6 +7,9 @@ processes, observes lifecycle events and reports operational state.
 The specification lives in [`handoff.md`](handoff.md); the verified Laravel 13 behaviour
 that adjusts it is in [`docs/laravel-13-recon.md`](docs/laravel-13-recon.md).
 
+[![Sponsor](https://img.shields.io/badge/Sponsor-GitHub-ea4aaa?logo=github)](https://github.com/sponsors/marktamis)
+[![Buy Me a Coffee](https://img.shields.io/badge/Buy_Me_a_Coffee-Support-FFDD00?logo=buy-me-a-coffee&logoColor=000)](https://buymeacoffee.com/marktamis)
+
 ## Status
 
 Milestones 1 and 2 implemented:
