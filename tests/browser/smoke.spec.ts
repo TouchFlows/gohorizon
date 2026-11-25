@@ -632,6 +632,62 @@ test.describe('the dashboard against the real binary', () => {
     await expect(page.getByText('Job history is unavailable:')).toHaveCount(0)
   })
 
+  test('a filter that replaces a metrics read in flight leaves only the answer it asked for', async ({ page }) => {
+    // The jobs screen proved the shape of this; the metrics screen holds the same pair of abort
+    // guards, and until now only the unmount case reached them. A resolution is a new question,
+    // so the chip re-runs the read from the screen the reader is still on. It is the chip rather
+    // than the queue select because the queue the screen opens on is whichever the report lists
+    // first, while the resolution it opens on is its own.
+    let release!: () => void
+    const held = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    const metrics = await dress(page, '**/api/v1/metrics*')
+    metrics.answer({ kind: 'through', until: held })
+
+    const readingHistory = page.getByText('Reading history…')
+    const historyError = page.getByText('Could not read history:')
+
+    await page.goto(`${base}/#/metrics`)
+    await expect.poll(() => metrics.parked()).toBe(1)
+    await expect(readingHistory).toBeVisible()
+
+    // The first read asks for the resolution the screen opens on; the chip asks for another, and
+    // those two windows are what tell the replaced read from its replacement in the browser's
+    // own events rather than by the order they happen to arrive in.
+    const withdrawn = page.waitForEvent('requestfailed', {
+      predicate: (request) =>
+        request.url().includes('/api/v1/metrics?') && request.url().includes('resolution=minute'),
+      timeout: 10_000,
+    })
+    const superseding = page.waitForRequest(
+      (request) =>
+        request.url().includes('/api/v1/metrics?') && request.url().includes('resolution=daily'),
+    )
+    await page.getByRole('button', { name: 'daily', exact: true }).click()
+
+    // The first read really was aborted rather than merely left outstanding, and the second was
+    // asked for, so the two parked below are the replaced answer and its replacement.
+    expect((await withdrawn).failure()?.errorText).toContain('ABORTED')
+    await superseding
+
+    // Both are at the gate now. The replaced answer can only reach this screen here, with the
+    // read that replaced it still outstanding, and an aborted read treated as a failure would
+    // take the waiting line's place with an error the service never reported.
+    await expect.poll(() => metrics.parked()).toBe(2)
+    await expect(readingHistory).toBeVisible()
+    await expect(historyError).toHaveCount(0)
+
+    release()
+
+    // The answer the screen asked for last is the one it draws: a daily window this young store
+    // has no rows for, said plainly rather than as a read that failed.
+    await expect(page.getByText('No data in this window.')).toBeVisible()
+    await expect(readingHistory).toHaveCount(0)
+    await expect(historyError).toHaveCount(0)
+    await expect(page.getByText('History is unavailable:')).toHaveCount(0)
+  })
+
   test('the metrics screen says when no queue has been sampled', async ({ page }) => {
     // The service samples the queues it is configured with, so a store with none is dressed:
     // every health answer comes back with an empty depth list, which is what the screen reads
@@ -718,6 +774,63 @@ test.describe('the dashboard against the real binary', () => {
     }
   })
 
+  test('a supervisor with no workers says so instead of an empty table', async ({ page }) => {
+    // Every worker is up, so a supervisor with none is a state the service does not reach on its
+    // own: the report is dressed with one supervisor's worker list emptied, which is what a
+    // supervisor that has not started its pool yet hands the page. Which supervisor that is is
+    // read from the report, by the queue its worker runs, rather than assumed from the config.
+    const report = (await getJSON(`${base}/api/v1/health`)) as HealthReport
+    const supervisors = report.supervisors ?? []
+    const idle = supervisors.find((supervisor) =>
+      (supervisor.workers ?? []).some((worker) => worker.queue === extraQueue),
+    )
+    if (idle === undefined) {
+      throw new Error(`the report does not list a worker on the ${extraQueue} queue`)
+    }
+    const idleWorkers = (idle.workers ?? []).length
+
+    const health = await dress(page, '**/api/v1/health')
+    health.answer({
+      kind: 'report',
+      edit: (body) => ({
+        ...body,
+        supervisors: (body.supervisors ?? []).map((supervisor) =>
+          supervisor.id === idle.id ? { ...supervisor, workers: [] } : supervisor,
+        ),
+      }),
+    })
+
+    await page.goto(`${base}/#/workers`)
+    await expect(page.getByRole('heading', { name: 'Workers', exact: true })).toBeVisible()
+
+    // The line belongs to the emptied supervisor and stands in place of its table: the section
+    // is found by its own hook, and only the heading picks it out of the three.
+    const section = page.locator('.workers__supervisor', {
+      has: page.getByRole('heading').filter({ hasText: idle.id }),
+    })
+    await expect(section.getByText('This supervisor has no workers yet.')).toBeVisible()
+    await expect(section.locator('tbody tr')).toHaveCount(0)
+
+    // The other supervisors still list theirs, so the empty state is one report's rather than
+    // the screen's: the rows drawn are every worker minus the emptied supervisor's own.
+    const rows = supervisors.reduce((sum, supervisor) => sum + (supervisor.workers ?? []).length, 0)
+    await expect(page.locator('tbody tr')).toHaveCount(rows - idleWorkers)
+  })
+
+  test('the workers screen says when no supervisor has reported', async ({ page }) => {
+    // The service always reports the supervisors it starts, so their absence only comes from the
+    // answer: the report is dressed with none, which is what a service with no supervisors would
+    // hand the page. Nothing is drawn in their place but the line that says so.
+    const health = await dress(page, '**/api/v1/health')
+    health.answer({ kind: 'report', edit: (body) => ({ ...body, supervisors: [] }) })
+
+    await page.goto(`${base}/#/workers`)
+    await expect(page.getByRole('heading', { name: 'Workers', exact: true })).toBeVisible()
+    await expect(page.getByText('No supervisor has reported yet.')).toBeVisible()
+    await expect(page.locator('.workers__supervisor')).toHaveCount(0)
+    await expect(page.locator('tbody tr')).toHaveCount(0)
+  })
+
   test('the queues screen shows the depth it inspected for each queue', async ({ page }) => {
     const report = await readHealth(page, `${base}/#/queues`)
     const depths = report.queues.depths ?? []
@@ -801,6 +914,36 @@ test.describe('the dashboard against the real binary', () => {
     await detail.getByRole('button', { name: 'close' }).click()
     await expect(detail).toHaveCount(0)
     await expect(row).toBeVisible()
+  })
+
+  test('a filter that matches no attempt says so instead of drawing an empty table', async ({ page }) => {
+    // The page opens on every attempt; the extra queue's worker has run none, so filtering to it
+    // is a question with an empty answer rather than a screen that has not been read yet. The
+    // answer is read for itself before the line is, so an empty page and an empty screen are not
+    // mistaken for one another.
+    await page.goto(`${base}/#/jobs`)
+    await expect(page.getByRole('heading', { name: 'Jobs', exact: true })).toBeVisible()
+    await expect(page.locator('tbody tr').first()).toBeVisible()
+
+    const [response] = await Promise.all([
+      page.waitForResponse(
+        (candidate) =>
+          candidate.url().includes('/api/v1/jobs?') &&
+          candidate.url().includes(`queue=${extraQueue}`) &&
+          candidate.ok(),
+      ),
+      page.getByLabel('Queue').selectOption(extraQueue),
+    ])
+    const payload = (await response.json()) as JobsPayload
+    expect(payload.jobs).toHaveLength(0)
+
+    // The line is the table's answer to that empty page, not a failure and not a table with no
+    // rows in it: no header row, no body row.
+    await expect(page.getByText('No attempts match this filter.')).toBeVisible()
+    await expect(page.locator('tbody tr')).toHaveCount(0)
+    await expect(page.locator('thead')).toHaveCount(0)
+    await expect(page.getByText('Could not read job history:')).toHaveCount(0)
+    await expect(page.getByText('Job history is unavailable:')).toHaveCount(0)
   })
 
   test('the failed page renders the attempt with the exception it threw', async ({ page }) => {
