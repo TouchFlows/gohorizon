@@ -1,5 +1,5 @@
-import { describe, expect, it } from 'vitest'
-import { isFailedJobPage, isHealthReport, isHistory, isJobPage } from './api'
+import { afterEach, describe, expect, it, vi } from 'vitest'
+import { deleteFailedJob, isFailedJobPage, isHealthReport, isHistory, isJobPage, retryFailedJob } from './api'
 
 const report = {
   status: 'ok',
@@ -127,6 +127,40 @@ describe('isFailedJobPage', () => {
     expect(isFailedJobPage({ failed_jobs: failedPage.failed_jobs })).toBe(false)
     expect(isFailedJobPage({ ...failedPage, failed_jobs: null })).toBe(false)
     expect(isFailedJobPage(null)).toBe(false)
+  })
+})
+
+// failed-job answers, as the service sends them: the queue is detail history supplies, so a
+// pruned attempt or a deployment with history disabled answers with an empty or absent name.
+function failedJobAnswer(status: number, body: unknown): void {
+  vi.stubGlobal('fetch', vi.fn(async () => ({ status, json: async () => body }) as Response))
+}
+
+describe('failed job actions', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
+  it('resolves a retry whose answer names no queue', async () => {
+    // readCSRFToken reads the cookie, so the action needs a document under test.
+    vi.stubGlobal('document', { cookie: '' })
+    failedJobAnswer(202, { job: 'e0a1c2d3-4b5f-4a6b-8c7d-9e0f1a2b3c4d', queue: '' })
+
+    await expect(retryFailedJob('e0a1c2d3-4b5f-4a6b-8c7d-9e0f1a2b3c4d')).resolves.toBe('')
+  })
+
+  it('resolves a delete whose answer carries no queue field', async () => {
+    vi.stubGlobal('document', { cookie: '' })
+    failedJobAnswer(200, { job: 'e0a1c2d3-4b5f-4a6b-8c7d-9e0f1a2b3c4d' })
+
+    await expect(deleteFailedJob('e0a1c2d3-4b5f-4a6b-8c7d-9e0f1a2b3c4d')).resolves.toBe('')
+  })
+
+  it('still answers with the queue when the service named one', async () => {
+    vi.stubGlobal('document', { cookie: '' })
+    failedJobAnswer(202, { job: 'e0a1c2d3-4b5f-4a6b-8c7d-9e0f1a2b3c4d', queue: 'default' })
+
+    await expect(retryFailedJob('e0a1c2d3-4b5f-4a6b-8c7d-9e0f1a2b3c4d')).resolves.toBe('default')
   })
 })
 
