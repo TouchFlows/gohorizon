@@ -145,6 +145,20 @@ func (h *harness) writeConfigAt(address string) (string, string) {
 // allocation takes its pool size from min.
 func (h *harness) writeConfigFor(address string, queues []string, workers int) (string, string) {
 	h.t.Helper()
+	return h.writeConfigAs(address, queues, workers, h.php)
+}
+
+// writeConfigWithPHP is writeConfigFor with the application's PHP executable overridden, so
+// a test can run the real binary against a PHP that refuses one of the package's commands.
+// Only that command changes: everything else still reaches the fixture's own interpreter.
+func (h *harness) writeConfigWithPHP(php string) (string, string) {
+	h.t.Helper()
+	return h.writeConfigAs(testRedisAddr, []string{testQueue}, 1, php)
+}
+
+// writeConfigAs writes the configuration for one PHP executable.
+func (h *harness) writeConfigAs(address string, queues []string, workers int, php string) (string, string) {
+	h.t.Helper()
 
 	listen := fmt.Sprintf("127.0.0.1:%d", freePort(h.t))
 	var queueLines strings.Builder
@@ -195,7 +209,7 @@ applications:
 		testRedisDB,
 		testApplication,
 		h.fixture,
-		h.php,
+		php,
 		testEnvironment,
 		queueLines.String(),
 		workers,
