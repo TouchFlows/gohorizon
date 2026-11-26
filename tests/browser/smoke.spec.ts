@@ -4,7 +4,7 @@ import net from 'node:net'
 import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { expect, test, type Page, type Route } from '@playwright/test'
+import { expect, test, type BrowserContext, type Page, type Route } from '@playwright/test'
 
 // The whole point of this suite is that it is not a component test: the pages below are
 // served by the compiled binary, from the embedded bundle, over a store the worker wrote.
@@ -49,10 +49,11 @@ import { expect, test, type Page, type Route } from '@playwright/test'
 // Sign-in is the one state the whole suite needs rather than one case reaching for it: the API
 // answers 401 without a session cookie, so every case is signed in from `beforeEach` and the
 // one case that starts where an operator starts clears its own cookies, one ends its session
-// under a loaded page to read the drop back to the form, one signs in as the viewer the
-// configuration also carries to read the refusal a role below operator gets, and one reads the
-// audit records a sign-out and a sign-in leave in the service log — the one durable trace of a
-// session action that until now only the Go tests had read. The credential is a password written here that
+// under a loaded page to read the drop back to the form, two sign in as the viewer the
+// configuration also carries to read the refusal a role below operator gets — once on a worker's
+// row and once from a failed attempt's panel — and one reads the audit records a sign-out and a
+// sign-in leave in the service log, the one durable trace of a session action that until now
+// only the Go tests had read. The credential is a password written here that
 // the binary's own `passwd` hashes in `beforeAll`; no hash and no session key belongs in this
 // file.
 //
@@ -423,14 +424,8 @@ test.describe('the dashboard against the real binary', () => {
 
   test('a viewer is refused a restart with the service wording', async ({ page, context }) => {
     // The role gates the call rather than the screen, so a viewer is offered the control and
-    // gets the service's own refusal; the page has to repeat that wording, not invent one. This
-    // case signs in as the viewer instead of using the session the hook put on the context.
-    await context.clearCookies()
-    await page.goto(`${base}/`)
-    await page.getByLabel('Name').fill(viewerUser)
-    await page.getByLabel('Password').fill(smokePassword)
-    await page.getByRole('button', { name: 'Sign in', exact: true }).click()
-    await expect(page.getByRole('heading', { name: 'Overview', exact: true })).toBeVisible()
+    // gets the service's own refusal; the page has to repeat that wording, not invent one.
+    await signInAsViewer(page, context)
 
     const { target } = idlePoolWorker(await readHealth(page, `${base}/#/workers`))
     const row = page.getByRole('row', { name: new RegExp(target.uuid) })
@@ -1433,6 +1428,35 @@ test.describe('the dashboard against the real binary', () => {
     })
   })
 
+  test('a viewer is refused a retry and a delete with the service wording', async ({ page, context }) => {
+    // Both controls are drawn for anyone signed in and the two routes gate the call, so a
+    // viewer's press comes back refused: the panel has to repeat the service's wording in place
+    // of the notice a success would leave, and neither control goes quiet over it.
+    await signInAsViewer(page, context)
+
+    // The panel acts on the attempt the screen lists first, which is the row a person would
+    // open; which attempt that is does not matter to a refusal.
+    await page.goto(`${base}/#/failed`)
+    const detail = page.locator('.jobs__detail')
+    await page.getByRole('button', { name: 'details' }).first().click()
+    await expect(detail).toBeVisible()
+
+    // `operator role required` is the wording the routes' minimum produces. A retry the
+    // application took would have said the attempt was queued and a delete that it was gone,
+    // and either answer would have quietened both controls; a refusal leaves them offered.
+    const retry = detail.getByRole('button', { name: 'Retry', exact: true })
+    await retry.click()
+    await expect(detail.getByRole('alert')).toHaveText('operator role required')
+    await expect(detail.getByText(`queued again on ${queue}`)).toHaveCount(0)
+    await expect(retry).toBeEnabled()
+
+    const remove = detail.getByRole('button', { name: 'Delete', exact: true })
+    await remove.click()
+    await expect(detail.getByRole('alert')).toHaveText('operator role required')
+    await expect(detail.getByText(`deleted from ${queue}`)).toHaveCount(0)
+    await expect(remove).toBeEnabled()
+  })
+
   test('a crash-looping worker is named on both supervisor lines', async ({ page }) => {
     // Nothing in the fixture kills its worker, so this case is the crash: a SIGKILL is a
     // crash to the supervisor, which replaces the worker with a growing backoff. Three of
@@ -1689,6 +1713,18 @@ async function signIn(): Promise<string> {
     throw new Error('sign-in answered without the session cookie')
   }
   return cookie.slice(sessionCookie.length + 1).split(';')[0]
+}
+
+// signInAsViewer starts a case as the user the configuration puts below the operator role. The
+// form is where a person would start, so the case signs in there rather than borrowing the
+// operator session the hook left on the context.
+async function signInAsViewer(page: Page, context: BrowserContext): Promise<void> {
+  await context.clearCookies()
+  await page.goto(`${base}/`)
+  await page.getByLabel('Name').fill(viewerUser)
+  await page.getByLabel('Password').fill(smokePassword)
+  await page.getByRole('button', { name: 'Sign in', exact: true }).click()
+  await expect(page.getByRole('heading', { name: 'Overview', exact: true })).toBeVisible()
 }
 
 // csrfToken reads the double-submit token the dashboard echoes on a mutation. The session route
