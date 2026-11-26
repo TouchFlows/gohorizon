@@ -1405,8 +1405,16 @@ test.describe('the dashboard against the real binary', () => {
     ).length
     const before = auditLines().length
 
+    // The panel re-reads the store after acting, so the next GET is part of the answer: waiting
+    // for it is how this case knows the table was rebuilt rather than left describing a record
+    // the application has already taken back.
+    const retryReread = page.waitForResponse(
+      (response) => response.url().includes('/api/v1/failed') && response.request().method() === 'GET',
+    )
+
     await detail.getByRole('button', { name: 'Retry', exact: true }).click()
     await expect(detail.getByText(`queued again on ${queue}`)).toBeVisible()
+    expect((await retryReread).ok()).toBe(true)
 
     // The application forgot the failed record and pushed the payload back, so the worker runs
     // the job again; it fails every time, so the same uuid gains an attempt.
@@ -1442,10 +1450,18 @@ test.describe('the dashboard against the real binary', () => {
     await expect(detail.getByText(newest.uuid, { exact: true }).first()).toBeVisible()
 
     const beforeDelete = auditLines().length
+    const deleteReread = page.waitForResponse(
+      (response) => response.url().includes('/api/v1/failed') && response.request().method() === 'GET',
+    )
     await detail.getByRole('button', { name: 'Delete', exact: true }).click()
     await expect(detail.getByText(`deleted from ${queue}`)).toBeVisible()
+    await deleteReread
     // The record is gone, so the controls go quiet rather than asking again.
     await expect(detail.getByRole('button', { name: 'Delete', exact: true })).toBeDisabled()
+    // And it does not stay on screen: the table was re-read and no longer lists it, without a
+    // reload. This store holds only the record the two operator cases acted on.
+    await expect(page.getByText('No failed jobs are stored by the application.')).toBeVisible()
+    await expect(page.getByRole('button', { name: 'details' })).toHaveCount(0)
 
     await waitFor('write the delete audit record', async () =>
       auditLines()

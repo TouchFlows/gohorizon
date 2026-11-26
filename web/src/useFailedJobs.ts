@@ -12,8 +12,9 @@ export interface FailedJobsState {
 
 // useFailedJobs reads one page of the application's failed store for the cursor the trail
 // holds. A new cursor drops the previous page rather than showing records that answer a
-// different question.
-export function useFailedJobs(query: string): FailedJobsState {
+// different question; a new revision re-reads the same page after an action changed the store
+// behind it.
+export function useFailedJobs(query: string, revision: number): FailedJobsState {
   const [state, setState] = useState<FailedJobsState>({ page: null, unavailable: false, error: null })
 
   useEffect(() => {
@@ -37,7 +38,7 @@ export function useFailedJobs(query: string): FailedJobsState {
       })
 
     return () => controller.abort()
-  }, [query])
+  }, [query, revision])
 
   return state
 }

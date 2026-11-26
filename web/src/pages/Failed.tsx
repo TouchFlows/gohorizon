@@ -12,10 +12,13 @@ import FailedJobActions from '../components/FailedJobActions'
 export default function Failed({ canAct }: { canAct: boolean }) {
   const [trail, setTrail] = useState<Trail>(firstTrail)
   const [selected, setSelected] = useState<FailedJob | null>(null)
+  // A retry or a delete changes the store, not the question the page asks, so the page is
+  // re-read at the same cursor rather than the trail being reset.
+  const [revision, setRevision] = useState(0)
 
   const cursor = trailCursor(trail)
   const query = useMemo(() => buildFailedJobsQuery(cursor), [cursor])
-  const { page, unavailable, error } = useFailedJobs(query)
+  const { page, unavailable, error } = useFailedJobs(query, revision)
 
   // The panel describes one row, so leaving the page it is on closes it: otherwise the
   // detail sits under a table that no longer lists what it describes.
@@ -105,6 +108,7 @@ export default function Failed({ canAct }: { canAct: boolean }) {
           job={selected}
           onClose={() => setSelected(null)}
           actions={canAct}
+          onStoreChanged={() => setRevision((current) => current + 1)}
         />
       )}
 
@@ -125,10 +129,12 @@ function FailedJobDetail({
   job,
   onClose,
   actions,
+  onStoreChanged,
 }: {
   job: FailedJob
   onClose: () => void
   actions: boolean
+  onStoreChanged: () => void
 }) {
   return (
     <section className="panel detail jobs__detail" aria-label="Failed job detail">
@@ -169,7 +175,7 @@ function FailedJobDetail({
         ) : (
           // Keyed by the record, so opening another row does not inherit the answer the
           // previous one got.
-          <FailedJobActions key={job.id} job={job} />
+          <FailedJobActions key={job.id} job={job} onStoreChanged={onStoreChanged} />
         ))}
     </section>
   )
