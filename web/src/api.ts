@@ -476,13 +476,12 @@ export async function deleteFailedJob(uuid: string): Promise<string> {
 }
 
 // failedJobAction answers with the queue the job belongs to — the attempt's own id is already
-// on screen — so a retry can say where the work landed.
+// on screen — so a retry can say where the work landed. The name is detail: history may have
+// been pruned or disabled, and the service then answers with an empty one, which is a done
+// action rather than a failed request.
 async function failedJobAction(method: string, url: string): Promise<string> {
   const answer = (await adminAction(method, url)) as { queue?: unknown }
-  if (typeof answer.queue !== 'string' || answer.queue === '') {
-    throw new Error(`${url} did not answer with the queue the job belongs to`)
-  }
-  return answer.queue
+  return typeof answer.queue === 'string' ? answer.queue : ''
 }
 
 // adminAction is the one shape every administrative mutation takes: the token from the cookie

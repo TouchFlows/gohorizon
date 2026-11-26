@@ -1,6 +1,7 @@
 # ADR 0012 — Retrying and deleting a failed job from the control plane
 
-**Status:** accepted (Milestone 3, fourth slice; extended by the fifth with delete)
+**Status:** accepted (Milestone 3, fourth slice; extended by the fifth with delete, and by the
+failed-store slice with a gate the store decides)
 **Implements:** handoff §11 (`POST /failed/{id}/retry`) and §13, continuing docs/adr/0001,
 docs/adr/0010 and docs/adr/0011.
 
@@ -32,16 +33,21 @@ writes a Laravel queue key, and framework-specific operations go through the ada
    Laravel forgets the failed record and re-publishes or discards the payload it stored, exactly
    as an operator running the command would get. GoHorizon writes no queue key, no payload and
    no failed record of its own.
-3. **History decides who may ask, the application decides what happens.** The uuid is looked up
-   in job history before anything is asked of the application: unknown is a 404, and an attempt
-   whose newest outcome is not `failed` is a 409, so the endpoints cannot be used on a payload a
-   caller invented. The application's own answer decides the rest: a failed job it no longer
-   stores (already retried, already forgotten) is a 404, and a command that could not run is a
-   503 — the application is the one place that knows, and the endpoints do not pretend
-   otherwise. One lookup, one mapping and one record shape serve both actions.
+3. **The application's store decides, and history is only detail.** The id from the path goes
+   straight to `queue:retry` / `queue:forget`, whose answer is the whole verdict: a record the
+   store does not hold (never stored, already retried, already forgotten) is a 404, a command
+   that could not run is a 503, and anything else is the action having happened. Job history is
+   read afterwards for one thing only — the queue name in the answer and in the audit record —
+   and its absence never refuses: history is pruned to 72 hours, so a failed record older than
+   its window is still actionable, and a deployment with history disabled still retries and
+   deletes. Nothing local is used as an allow-list, so the id is checked only for the shape that
+   keeps it one, non-option argument on the command line; whether the record exists is the
+   store's answer to give (docs/adr/0013). An earlier revision decided this in history instead
+   (404 unknown, 409 when the newest outcome was not `failed`, 503 when history was disabled),
+   which listed records the screen showed but the actions refused.
 4. **The audit actions are `failed-job-retry` and `failed-job-delete`**, `allowed` with
-   `queue <name>` as the detail, or `refused` with the reason (role, token, unknown job, an
-   attempt that did not fail, or one the application no longer stores). Each is one line under
+   `queue <name>` as the detail (`queue unknown` when history cannot name it), or `refused` with
+   the reason (role, token, or one the application no longer stores). Each is one line under
    `msg=audit`, like every other record (docs/adr/0010).
 5. **The two commands report a missing id differently, and neither status is the whole answer.**
    `queue:retry` prints "Unable to find failed job with ID" and still exits successfully;
@@ -52,6 +58,11 @@ writes a Laravel queue key, and framework-specific operations go through the ada
 
 ## Consequences
 
+- A record the failed screen lists is actionable, whatever its age: the store that listed it is
+  the store that decides, so pruned history and a deployment with `storage.enabled: false` no
+  longer refuse an action the application would have performed. The cost is that the action
+  itself is the existence check — a caller asking about an id the store does not hold learns it
+  from the application's answer rather than from a local lookup.
 - Retry and delete are the two actions of this pair. The browser suite retries the failing
   fixture job through the real binary and reads the new attempt and the audit record it left;
   delete is covered by the handler and adapter tests, which drive `queue:forget` through a fake

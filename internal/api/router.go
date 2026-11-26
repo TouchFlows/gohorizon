@@ -356,53 +356,44 @@ func restartWorker(provider Provider, store *auth.Store, log *slog.Logger, audit
 	}
 }
 
-// failedJobFor resolves one failed job from history and writes the refusal itself when the
-// identity is not something this group may act on. Laravel owns the failed record and its
-// payload, so nothing is asked of the application until an attempt that actually failed is
-// known: an id no history has is a 404, an attempt whose newest outcome is not `failed` is a
-// 409, and one that carries no uuid has nothing the application could be asked about
-// (docs/adr/0012). The bool says whether the caller still has work to do.
-func failedJobFor(w http.ResponseWriter, r *http.Request, provider Provider, store *auth.Store, log *slog.Logger, auditor *audit.Logger, action string) (metrics.Job, bool) {
-	identity := chi.URLParam(r, "job")
+// failedJobIdentity is the id a failed record is named by in the path. The application's own
+// failed store decides whether that record exists, so this only keeps the value one,
+// non-option argument on the command line: nothing a caller sends can become an artisan option
+// (docs/adr/0012).
+func failedJobIdentity(w http.ResponseWriter, r *http.Request) (string, bool) {
+	identity := strings.TrimSpace(chi.URLParam(r, "job"))
+	if identity == "" || strings.HasPrefix(identity, "-") || strings.ContainsAny(identity, "\x00\r\n\t") {
+		writeError(w, http.StatusBadRequest, "job must be the id of one failed job")
+		return "", false
+	}
+	return identity, true
+}
 
-	job, err := provider.Job(r.Context(), identity)
+// failedJobQueue names the queue history recorded for identity, and is empty when history is
+// disabled or no longer holds that attempt. It is detail for the answer and the audit record,
+// never a gate: history is pruned, so a failed record older than its window is still
+// actionable, and a deployment without history still retries and deletes (docs/adr/0012,
+// docs/adr/0013).
+func failedJobQueue(ctx context.Context, provider Provider, identity string) string {
+	job, err := provider.Job(ctx, identity)
 	if err != nil {
-		switch {
-		case errors.Is(err, metrics.ErrJobNotFound):
-			refuseFailedJobAction(w, r, store, auditor, action, http.StatusNotFound, "no job with id "+identity, "job not found")
-		case errors.Is(err, metrics.ErrDisabled):
-			refuseFailedJobAction(w, r, store, auditor, action, http.StatusServiceUnavailable, "job history is unavailable", "could not read job history")
-		default:
-			log.Error("read job history", "job", identity, "error", err)
-			refuseFailedJobAction(w, r, store, auditor, action, http.StatusInternalServerError, "job history could not be read", "could not read job history")
-		}
-		return metrics.Job{}, false
+		return ""
 	}
-	if job.Outcome != "failed" {
-		// An attempt that was processed, released or timed out has nothing the application
-		// could act on: a failed record either never existed for it or is already gone.
-		refuseFailedJobAction(w, r, store, auditor, action, http.StatusConflict, "outcome "+job.Outcome, "only a failed attempt can be acted on")
-		return metrics.Job{}, false
-	}
-	if job.UUID == "" {
-		refuseFailedJobAction(w, r, store, auditor, action, http.StatusConflict, "the attempt carries no uuid", "this attempt has nothing the application can act on")
-		return metrics.Job{}, false
-	}
-	return job, true
+	return job.Queue
 }
 
 // failedJobCommandError maps a refused or failed application command onto its answer, so retry
 // and delete report the same thing in the same words. The application is the only place that
 // knows whether it still stores the job.
-func failedJobCommandError(w http.ResponseWriter, r *http.Request, store *auth.Store, log *slog.Logger, auditor *audit.Logger, action string, job metrics.Job, verb string, err error) {
+func failedJobCommandError(w http.ResponseWriter, r *http.Request, store *auth.Store, log *slog.Logger, auditor *audit.Logger, action string, identity string, verb string, err error) {
 	if errors.Is(err, adapter.ErrFailedJobNotFound) {
-		// The record was retried or forgotten between the history read and the command, so the
-		// command had nothing to do rather than failing.
+		// The store is the answer: it has no record with that id, whether it was never stored
+		// or has already been retried or forgotten.
 		refuseFailedJobAction(w, r, store, auditor, action, http.StatusNotFound,
-			"the application no longer stores "+job.UUID, "failed job not found")
+			"the application no longer stores "+identity, "failed job not found")
 		return
 	}
-	log.Warn("failed job "+verb, "job", job.UUID, "error", err)
+	log.Warn("failed job "+verb, "job", identity, "error", err)
 	message := "the application could not " + verb + " the job"
 	refuseFailedJobAction(w, r, store, auditor, action, http.StatusServiceUnavailable, message, message)
 }
@@ -424,16 +415,23 @@ func refuseFailedJobAction(w http.ResponseWriter, r *http.Request, store *auth.S
 }
 
 // allowFailedJobAction records an action that happened, naming the queue the job belongs to so
-// the record says where the work landed rather than only which id was touched.
-func allowFailedJobAction(w http.ResponseWriter, r *http.Request, store *auth.Store, auditor *audit.Logger, action string, job metrics.Job) {
+// the record says where the work landed rather than only which id was touched — and saying the
+// queue is unknown when history could not supply it, rather than leaving the detail blank.
+func allowFailedJobAction(w http.ResponseWriter, r *http.Request, store *auth.Store, auditor *audit.Logger, action string, queue string) {
 	me, _ := store.Current(r)
+	detail := "queue " + queue
+	if queue == "" {
+		// History could not name the queue (pruned, or disabled), which does not make the
+		// action any less done: say so rather than leaving the record with a bare "queue ".
+		detail = "queue unknown"
+	}
 	auditor.Record(r, audit.Event{
 		Action:  action,
 		Outcome: audit.OutcomeAllowed,
 		User:    me.Name,
 		Role:    me.Role,
 		Address: store.ClientAddress(r),
-		Detail:  "queue " + job.Queue,
+		Detail:  detail,
 	})
 	w.Header().Set("Cache-Control", "no-store")
 }
@@ -443,18 +441,19 @@ func allowFailedJobAction(w http.ResponseWriter, r *http.Request, store *auth.St
 // is queued rather than done, which is why the answer is 202.
 func retryFailedJob(provider Provider, store *auth.Store, log *slog.Logger, auditor *audit.Logger) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		job, ok := failedJobFor(w, r, provider, store, log, auditor, audit.ActionFailedJobRetry)
+		identity, ok := failedJobIdentity(w, r)
 		if !ok {
 			return
 		}
+		queue := failedJobQueue(r.Context(), provider, identity)
 
-		if err := provider.RetryFailedJob(r.Context(), job.UUID); err != nil {
-			failedJobCommandError(w, r, store, log, auditor, audit.ActionFailedJobRetry, job, "retry", err)
+		if err := provider.RetryFailedJob(r.Context(), identity); err != nil {
+			failedJobCommandError(w, r, store, log, auditor, audit.ActionFailedJobRetry, identity, "retry", err)
 			return
 		}
 
-		allowFailedJobAction(w, r, store, auditor, audit.ActionFailedJobRetry, job)
-		writeJSON(w, http.StatusAccepted, map[string]string{"job": job.UUID, "queue": job.Queue})
+		allowFailedJobAction(w, r, store, auditor, audit.ActionFailedJobRetry, queue)
+		writeJSON(w, http.StatusAccepted, map[string]string{"job": identity, "queue": queue})
 	}
 }
 
@@ -463,18 +462,19 @@ func retryFailedJob(provider Provider, store *auth.Store, log *slog.Logger, audi
 // than the 202 a retry gets: there is no queued work left to wait for.
 func deleteFailedJob(provider Provider, store *auth.Store, log *slog.Logger, auditor *audit.Logger) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		job, ok := failedJobFor(w, r, provider, store, log, auditor, audit.ActionFailedJobDelete)
+		identity, ok := failedJobIdentity(w, r)
 		if !ok {
 			return
 		}
+		queue := failedJobQueue(r.Context(), provider, identity)
 
-		if err := provider.ForgetFailedJob(r.Context(), job.UUID); err != nil {
-			failedJobCommandError(w, r, store, log, auditor, audit.ActionFailedJobDelete, job, "delete", err)
+		if err := provider.ForgetFailedJob(r.Context(), identity); err != nil {
+			failedJobCommandError(w, r, store, log, auditor, audit.ActionFailedJobDelete, identity, "delete", err)
 			return
 		}
 
-		allowFailedJobAction(w, r, store, auditor, audit.ActionFailedJobDelete, job)
-		writeJSON(w, http.StatusOK, map[string]string{"job": job.UUID, "queue": job.Queue})
+		allowFailedJobAction(w, r, store, auditor, audit.ActionFailedJobDelete, queue)
+		writeJSON(w, http.StatusOK, map[string]string{"job": identity, "queue": queue})
 	}
 }
 

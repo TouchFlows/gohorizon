@@ -44,10 +44,15 @@ export default function FailedJobActions({
         verb === 'retry' ? await retryFailedJob(job.uuid) : await deleteFailedJob(job.uuid)
       setSettled(true)
       setConfirming(false)
-      setNotice({
-        failed: false,
-        text: verb === 'retry' ? `queued again on ${queue}` : `deleted from ${queue}`,
-      })
+      // The queue is detail history may not have — it is pruned, and a deployment without it
+      // names none — so an empty one is dropped from the sentence rather than printed as
+      // "queued again on ". The action happened either way.
+      const done = verb === 'retry' ? 'queued again' : 'deleted'
+      let text = done
+      if (queue !== '') {
+        text = verb === 'retry' ? `${done} on ${queue}` : `${done} from ${queue}`
+      }
+      setNotice({ failed: false, text })
       onStoreChanged()
     } catch (failure) {
       // The question is over whatever the answer was, so the controls and the answer itself are

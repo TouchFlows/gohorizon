@@ -138,8 +138,10 @@ session, role and token, and `DELETE /api/v1/failed/{job}` deletes it. The retry
 `{job, queue}` because the work is queued; the delete answers 200 with the same body because the
 record is already gone. Both are the application's own commands (`php artisan queue:retry` and
 `queue:forget`), so GoHorizon neither writes a queue key nor re-publishes a payload itself
-(docs/adr/0012). A job no attempt history knows is a 404, an attempt whose newest outcome is not
-`failed` is a 409, and a failed job the application no longer stores is a 404.
+(docs/adr/0012). The application's store decides whether the record exists: a failed job it no
+longer stores is a 404. Attempt history is read only to name the queue in the answer and the
+audit record, never to refuse, so a failed record older than the history window is still
+actionable and a deployment without history still retries and deletes.
 
 `GET /api/v1/failed?[limit=…][before=…]` lists the application's own failed store as
 `{failed_jobs: [{id, uuid, connection, queue, job, failed_at, exception}], next_before}`, newest

@@ -392,6 +392,21 @@ func TestRetryWithoutASessionIsUnauthorized(t *testing.T) {
 	}
 }
 
+func TestRetryRefusesAnIdThatCouldBeAnOption(t *testing.T) {
+	handler, provider, _ := adminRouter(t, auth.RoleOperator)
+	session, csrf := signInForAdmin(t, handler)
+
+	// The id becomes one argument of the application's command, so a value artisan would read
+	// as an option never reaches it (docs/adr/0012).
+	recorder := retryJob(handler, "-h", csrf.Value, session, csrf)
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400 (body %s)", recorder.Code, recorder.Body)
+	}
+	if len(provider.retried) != 0 {
+		t.Fatalf("an option-like id reached the application: %v", provider.retried)
+	}
+}
+
 func TestRetryIsAuditedWithTheQueueItWasPushedTo(t *testing.T) {
 	handler, provider, records := adminRouter(t, auth.RoleOperator)
 	provider.job = failedJob()
@@ -430,65 +445,55 @@ func TestRetryIsAuditedWithTheQueueItWasPushedTo(t *testing.T) {
 	}
 }
 
-func TestRetryOfAnUnknownJobIsANotFound(t *testing.T) {
+func TestRetryOfARecordOlderThanTheHistoryWindowIsStillAllowed(t *testing.T) {
 	handler, provider, records := adminRouter(t, auth.RoleOperator)
+	// History is pruned to 72 hours, so a failed record older than that is not in it — but it
+	// is still in the application's store, which is what decides (docs/adr/0013).
 	provider.jobErr = metrics.ErrJobNotFound
 	session, csrf := signInForAdmin(t, handler)
 
 	recorder := retryJob(handler, testJobUUID, csrf.Value, session, csrf)
-	if recorder.Code != http.StatusNotFound {
-		t.Fatalf("status = %d, want 404 (body %s)", recorder.Code, recorder.Body)
+	if recorder.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, want 202 (body %s)", recorder.Code, recorder.Body)
 	}
-	// An invented identity never reaches the application: the history is what decides whether
-	// there is a failed job worth asking about.
-	if len(provider.retried) != 0 {
-		t.Fatalf("an unknown job was retried: %v", provider.retried)
+	if len(provider.retried) != 1 || provider.retried[0] != testJobUUID {
+		t.Fatalf("retried = %v, want [%s]", provider.retried, testJobUUID)
+	}
+	// History only supplied the queue name, so the answer says it does not know it rather
+	// than inventing one or refusing the action.
+	var answer map[string]string
+	if err := json.Unmarshal(recorder.Body.Bytes(), &answer); err != nil {
+		t.Fatalf("decode answer: %v", err)
+	}
+	if answer["job"] != testJobUUID || answer["queue"] != "" {
+		t.Errorf("answer = %v, want the uuid and an unnamed queue", answer)
 	}
 
 	events := auditRecords(t, records)
-	refused := events[len(events)-1]
-	if refused["action"] != "failed-job-retry" || refused["outcome"] != "refused" {
-		t.Fatalf("record = %v, want a refused failed-job-retry", refused)
+	allowed := events[len(events)-1]
+	if allowed["action"] != "failed-job-retry" || allowed["outcome"] != "allowed" {
+		t.Fatalf("record = %v, want an allowed failed-job-retry", allowed)
 	}
-	if refused["detail"] != "no job with id "+testJobUUID {
-		t.Errorf("detail = %v, want the id that was looked up", refused["detail"])
+	if allowed["detail"] != "queue unknown" {
+		t.Errorf("detail = %v, want the queue named as unknown", allowed["detail"])
 	}
 }
 
-func TestRetryOfAnAttemptThatDidNotFailIsAConflict(t *testing.T) {
-	handler, provider, records := adminRouter(t, auth.RoleOperator)
+func TestRetryIsDecidedByTheStoreNotByTheLastOutcome(t *testing.T) {
+	handler, provider, _ := adminRouter(t, auth.RoleOperator)
+	// History's last observation of the identity is not the question: the application still
+	// stores the failed record, so the action is allowed to ask it (docs/adr/0012).
 	job := failedJob()
 	job.Outcome = "processed"
 	provider.job = job
 	session, csrf := signInForAdmin(t, handler)
 
 	recorder := retryJob(handler, testJobUUID, csrf.Value, session, csrf)
-	if recorder.Code != http.StatusConflict {
-		t.Fatalf("status = %d, want 409 (body %s)", recorder.Code, recorder.Body)
+	if recorder.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, want 202 (body %s)", recorder.Code, recorder.Body)
 	}
-	if len(provider.retried) != 0 {
-		t.Fatalf("an attempt that succeeded was retried: %v", provider.retried)
-	}
-
-	events := auditRecords(t, records)
-	refused := events[len(events)-1]
-	if refused["outcome"] != "refused" || refused["detail"] != "outcome processed" {
-		t.Fatalf("record = %v, want a refusal naming the outcome", refused)
-	}
-}
-
-func TestRetryOfAnAttemptWithoutAUUIDIsAConflict(t *testing.T) {
-	handler, provider, _ := adminRouter(t, auth.RoleOperator)
-	// The `id:` fallback names an attempt the application never stored under a uuid, so there
-	// is no failed record to ask it about.
-	provider.job = metrics.Job{JobID: "id:17", Queue: "default", Outcome: "failed"}
-	session, csrf := signInForAdmin(t, handler)
-
-	if recorder := retryJob(handler, "id:17", csrf.Value, session, csrf); recorder.Code != http.StatusConflict {
-		t.Fatalf("status = %d, want 409 (body %s)", recorder.Code, recorder.Body)
-	}
-	if len(provider.retried) != 0 {
-		t.Fatalf("an attempt with no uuid was retried: %v", provider.retried)
+	if len(provider.retried) != 1 {
+		t.Fatalf("retried = %v, want one retry", provider.retried)
 	}
 }
 
@@ -510,15 +515,25 @@ func TestRetryOfAFailedJobTheApplicationNoLongerStoresIsANotFound(t *testing.T) 
 	}
 }
 
-func TestRetryWhenJobHistoryIsUnavailableIsAServiceUnavailable(t *testing.T) {
-	handler, provider, _ := adminRouter(t, auth.RoleOperator)
+func TestRetryWorksWhenJobHistoryIsDisabled(t *testing.T) {
+	handler, provider, records := adminRouter(t, auth.RoleOperator)
 	provider.jobErr = metrics.ErrDisabled
 	session, csrf := signInForAdmin(t, handler)
 
-	// History that was never opened must not read like "no such job", exactly as on the
-	// history endpoints.
-	if recorder := retryJob(handler, testJobUUID, csrf.Value, session, csrf); recorder.Code != http.StatusServiceUnavailable {
-		t.Fatalf("status = %d, want 503 (body %s)", recorder.Code, recorder.Body)
+	// A deployment that keeps no history still has an application with a failed store, so
+	// the action runs and only the queue name is missing (docs/adr/0012).
+	recorder := retryJob(handler, testJobUUID, csrf.Value, session, csrf)
+	if recorder.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, want 202 (body %s)", recorder.Code, recorder.Body)
+	}
+	if len(provider.retried) != 1 || provider.retried[0] != testJobUUID {
+		t.Fatalf("retried = %v, want [%s]", provider.retried, testJobUUID)
+	}
+
+	events := auditRecords(t, records)
+	allowed := events[len(events)-1]
+	if allowed["outcome"] != "allowed" || allowed["detail"] != "queue unknown" {
+		t.Fatalf("record = %v, want an allowed retry with an unnamed queue", allowed)
 	}
 }
 
@@ -668,46 +683,39 @@ func TestDeleteIsAuditedWithTheQueueItWasRemovedFrom(t *testing.T) {
 	}
 }
 
-func TestDeleteOfAnUnknownJobIsANotFound(t *testing.T) {
+func TestDeleteOfARecordOlderThanTheHistoryWindowIsStillAllowed(t *testing.T) {
 	handler, provider, records := adminRouter(t, auth.RoleOperator)
 	provider.jobErr = metrics.ErrJobNotFound
 	session, csrf := signInForAdmin(t, handler)
 
-	if recorder := deleteJob(handler, testJobUUID, csrf.Value, session, csrf); recorder.Code != http.StatusNotFound {
-		t.Fatalf("status = %d, want 404 (body %s)", recorder.Code, recorder.Body)
+	if recorder := deleteJob(handler, testJobUUID, csrf.Value, session, csrf); recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (body %s)", recorder.Code, recorder.Body)
 	}
-	if len(provider.forgotten) != 0 {
-		t.Fatalf("an unknown job was deleted: %v", provider.forgotten)
+	if len(provider.forgotten) != 1 || provider.forgotten[0] != testJobUUID {
+		t.Fatalf("forgotten = %v, want [%s]", provider.forgotten, testJobUUID)
 	}
 
 	events := auditRecords(t, records)
-	refused := events[len(events)-1]
-	if refused["action"] != "failed-job-delete" || refused["outcome"] != "refused" {
-		t.Fatalf("record = %v, want a refused failed-job-delete", refused)
+	allowed := events[len(events)-1]
+	if allowed["action"] != "failed-job-delete" || allowed["outcome"] != "allowed" {
+		t.Fatalf("record = %v, want an allowed failed-job-delete", allowed)
 	}
-	if refused["detail"] != "no job with id "+testJobUUID {
-		t.Errorf("detail = %v, want the id that was looked up", refused["detail"])
+	if allowed["detail"] != "queue unknown" {
+		t.Errorf("detail = %v, want the queue named as unknown", allowed["detail"])
 	}
 }
 
-func TestDeleteOfAnAttemptThatDidNotFailIsAConflict(t *testing.T) {
-	handler, provider, records := adminRouter(t, auth.RoleOperator)
-	job := failedJob()
-	job.Outcome = "processed"
-	provider.job = job
+func TestDeleteWorksWhenJobHistoryIsDisabled(t *testing.T) {
+	handler, provider, _ := adminRouter(t, auth.RoleOperator)
+	provider.jobErr = metrics.ErrDisabled
 	session, csrf := signInForAdmin(t, handler)
 
-	if recorder := deleteJob(handler, testJobUUID, csrf.Value, session, csrf); recorder.Code != http.StatusConflict {
-		t.Fatalf("status = %d, want 409 (body %s)", recorder.Code, recorder.Body)
+	// No history is not an unavailable application: the store is the only thing consulted.
+	if recorder := deleteJob(handler, testJobUUID, csrf.Value, session, csrf); recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (body %s)", recorder.Code, recorder.Body)
 	}
-	if len(provider.forgotten) != 0 {
-		t.Fatalf("an attempt that succeeded was deleted: %v", provider.forgotten)
-	}
-
-	events := auditRecords(t, records)
-	refused := events[len(events)-1]
-	if refused["outcome"] != "refused" || refused["detail"] != "outcome processed" {
-		t.Fatalf("record = %v, want a refusal naming the outcome", refused)
+	if len(provider.forgotten) != 1 || provider.forgotten[0] != testJobUUID {
+		t.Fatalf("forgotten = %v, want [%s]", provider.forgotten, testJobUUID)
 	}
 }
 
