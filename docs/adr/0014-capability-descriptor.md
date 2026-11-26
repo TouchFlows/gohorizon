@@ -76,11 +76,18 @@ operator and a refusal would be the 503 the action returns.
 - Broken payloads stay distinguishable from unknown schemas: one fills `error` with the artisan
   output, the other with the schema numbers, so an operator can tell a missing package from an
   older one.
+- An unknown schema degrades startup instead of stopping it. `supervisor.New` skips the launch
+  preflight with a warning, exactly as it does when the command cannot answer (docs/adr/0001,
+  docs/adr/0002), and the endpoint publishes `available: false` with both versions; the
+  deployment keeps supervising its pool and loses only its controls, so the operator sees the
+  reason on the page rather than a service that never came up. Nothing is read from the
+  payload, which is the refusal the schema number exists for.
 - `internal/adapter` now keeps the identifiers and events it only ignored before, and the
   package's `events` list replaces the illustrative `operations` array in the fixture: the
   operations map is this service's derivation, not a field the package sends.
 - Tests: `internal/api/capabilities_test.go` covers the published descriptor, the unavailable
   adapter, the unknown schema and the session/read-only rules; `web/src/capabilities.test.ts`
-  covers the gating, including the transient-failure and per-action cases. A contract test that
-  drives a real application through the endpoint is still deferred, as is the second broker
-  adapter that would make the descriptor earn its keep.
+  covers the gating, including the transient-failure and per-action cases; `tests/integration`
+  drives the real binary through the endpoint against the application's own payload, against a
+  PHP that refuses the probe, and against one that answers an unknown schema. The second broker
+  adapter that would make the descriptor earn its keep is still deferred.

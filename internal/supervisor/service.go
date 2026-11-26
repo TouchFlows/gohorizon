@@ -126,11 +126,23 @@ func New(ctx context.Context, cfg *config.Config, log *slog.Logger) (*Service, e
 	// warning rather than blocking supervision (docs/adr/0001).
 	probe := adapter.Probe{PHP: app.PHP, Artisan: app.Artisan, Dir: app.Path}
 	caps, probeErr := probe.Capabilities(ctx)
-	if probeErr != nil {
+	switch {
+	case probeErr != nil:
 		log.Warn("application capabilities unavailable; pcntl and retry_after preflight skipped",
 			"application", app.ID, "php", app.PHP, "error", probeErr)
-	} else if err := adapter.Check(&caps, app); err != nil {
-		return nil, fmt.Errorf("refusing to start: %w", err)
+	case !caps.Supported():
+		// A schema this service does not understand is as unusable as one that never
+		// arrived: the launch checks would read fields that may mean something else, so
+		// they are skipped, and the endpoint publishes the deployment as read-only with
+		// both schema numbers as the reason (docs/adr/0014). Supervision continues, so
+		// the operator can see the deployment and repair it instead of finding a service
+		// that refuses to start.
+		log.Warn("application capabilities schema not understood; pcntl and retry_after preflight skipped",
+			"application", app.ID, "schema", caps.Schema, "understood", adapter.SchemaVersion)
+	default:
+		if err := adapter.Check(&caps, app); err != nil {
+			return nil, fmt.Errorf("refusing to start: %w", err)
+		}
 	}
 
 	keys, err := redis.NewKeys(app.ID, app.Environment)

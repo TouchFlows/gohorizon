@@ -113,6 +113,28 @@ func TestNewRefusesToSpawnWithAnUnsafeTimeout(t *testing.T) {
 	}
 }
 
+// TestNewSkipsThePreflightForASchemaItDoesNotUnderstand pins the one degradation that is not
+// a probe failure: the application answered, but with a schema this service cannot read. Its
+// fields may mean something else, so the launch checks are skipped rather than guessed from,
+// and the endpoint publishes the deployment as read-only (docs/adr/0014).
+func TestNewSkipsThePreflightForASchemaItDoesNotUnderstand(t *testing.T) {
+	t.Setenv("GOHORIZON_TEST_CAPABILITIES",
+		strings.Replace(capabilitiesPayload("60"), `"schema":1`, `"schema":2`, 1))
+
+	// The timeout that TestNewRefusesToSpawnWithAnUnsafeTimeout refuses: if the preflight ran
+	// against an unknown schema, this would be a startup refusal.
+	_, err := New(context.Background(), preflightConfig(t, 60), slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err == nil {
+		t.Fatal("New succeeded without Redis; the test expects the redis ping to fail")
+	}
+	if strings.Contains(err.Error(), "refusing to start") {
+		t.Fatalf("a schema this service does not understand refused supervision: %v", err)
+	}
+	if !strings.Contains(err.Error(), "connect to redis") {
+		t.Fatalf("error = %q, want the redis connection failure", err)
+	}
+}
+
 func TestNewPassesPreflightForACompatibleLaunch(t *testing.T) {
 	t.Setenv("GOHORIZON_TEST_CAPABILITIES", capabilitiesPayload("90"))
 

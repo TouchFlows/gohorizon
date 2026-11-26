@@ -104,6 +104,28 @@ exec '%s' "$@"
 	return path
 }
 
+// answeringPHP writes a PHP executable that answers the capabilities command with this payload
+// and passes every other command through to the fixture's own interpreter. The payload is the
+// application's answer, not the endpoint's: what this service makes of it is the assertion.
+func (h *harness) answeringPHP(payload string) string {
+	h.t.Helper()
+
+	path := filepath.Join(h.dir, "php-other-schema")
+	script := fmt.Sprintf(`#!/bin/sh
+for arg in "$@"; do
+  if [ "$arg" = "gohorizon:capabilities" ]; then
+    echo '%s'
+    exit 0
+  fi
+done
+exec '%s' "$@"
+`, payload, h.php)
+	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
+		h.t.Fatalf("write the answering php: %v", err)
+	}
+	return path
+}
+
 func (h *harness) fetchCapabilities(t *testing.T, base string) capabilitiesAnswer {
 	t.Helper()
 
@@ -266,6 +288,56 @@ func TestCapabilitiesReportTheApplicationsRefusal(t *testing.T) {
 	}
 
 	// Every operation is named and off, so a key that disappeared cannot pass as a refusal.
+	wantOperations := map[string]bool{
+		"inspect_queues":    false,
+		"telemetry":         false,
+		"failed_jobs_list":  false,
+		"failed_job_retry":  false,
+		"failed_job_delete": false,
+		"restart_workers":   false,
+	}
+	if fmt.Sprint(answer.Operations) != fmt.Sprint(wantOperations) {
+		t.Errorf("operations = %v, want %v", answer.Operations, wantOperations)
+	}
+}
+
+// TestCapabilitiesReportASchemaThisServiceDoesNotUnderstand runs the real binary against an
+// application that answers the probe with a schema this service cannot read. The payload is
+// well-formed and deliberately contradicts the worker launch (no pcntl, a `--timeout`
+// configured), so the test also proves the preflight was skipped rather than guessed from: a
+// service that read the fields would refuse to start, and one that ignored the schema would
+// publish them.
+func TestCapabilitiesReportASchemaThisServiceDoesNotUnderstand(t *testing.T) {
+	h := newHarness(t)
+	payload := `{"schema":2,"package":"gohorizon/laravel","laravel":"13.0.0","php":"8.4.0",` +
+		`"queue":{"default_connection":"redis","connections":{"redis":{"driver":"redis",` +
+		`"retry_after":10}}},"runtime":{"pcntl":false},"telemetry":{"stream":"gohorizon:events"},` +
+		`"events":[]}`
+
+	configPath, base := h.writeConfigWithPHP(h.answeringPHP(payload))
+	h.startBinary(h.buildBinary(), configPath)
+	// Supervision comes up although the launch checks could not run, which is what keeps the
+	// deployment repairable instead of an unexplained failed start.
+	awaitRunning(h, base)
+
+	answer := h.fetchCapabilities(t, base)
+
+	if answer.Available {
+		t.Error("available = true, want false for a schema this service does not understand")
+	}
+	// The reason has to name both versions, or an operator cannot tell which side to upgrade.
+	if !strings.Contains(answer.Error, "schema 2") || !strings.Contains(answer.Error, "schema 1") {
+		t.Errorf("error = %q, want it to name the application's schema 2 and this service's schema 1", answer.Error)
+	}
+
+	// Nothing the payload claims may be published: read through, those fields would look like a
+	// descriptor this version understands.
+	if answer.Schema != 0 || answer.Package != "" || answer.PCNTL ||
+		len(answer.Connections) != 0 || len(answer.Events) != 0 {
+		t.Errorf("descriptor published an unread schema: schema=%d package=%q pcntl=%t connections=%d events=%d",
+			answer.Schema, answer.Package, answer.PCNTL, len(answer.Connections), len(answer.Events))
+	}
+
 	wantOperations := map[string]bool{
 		"inspect_queues":    false,
 		"telemetry":         false,

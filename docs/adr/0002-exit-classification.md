@@ -63,7 +63,10 @@ kill unless the adapter reports it.
    answer. If the command is unavailable (package absent, artisan failing) the
    preflight is skipped with a logged warning and supervision continues, because
    ADR 0001 degrades adapter features instead of blocking workers. A report that
-   answers with an unknown capabilities schema is refused, not guessed.
+   answers with an unknown capabilities schema is treated like one that never
+   arrived: nothing is read from it, the preflight is skipped, and the deployment
+   is published as read-only with both schema numbers as its reason
+   (docs/adr/0014).
 
 ## Consequences
 

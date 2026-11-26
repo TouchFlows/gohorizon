@@ -168,7 +168,8 @@ the table (`docs/adr/0013`, decision 4).
 laravel, php, application, environment, default_connection, connections: {name: {driver,
 retry_after}}, pcntl, telemetry_stream, events, operations}`. `available` is false when the
 application could not answer or answered a schema this service does not understand; `error`
-then says which, the descriptor fields are omitted, and the answer is still a 200. `operations`
+then says which, the descriptor fields are omitted, and the answer is still a 200. Either case
+still supervises the pool: the deployment loses its controls, not its workers. `operations`
 names what this service can do: `inspect_queues`, `telemetry`, `failed_jobs_list`,
 `failed_job_retry` and `failed_job_delete` follow `available` because they run the package's
 commands, and so does `restart_workers`: a deployment whose descriptor cannot be read is
