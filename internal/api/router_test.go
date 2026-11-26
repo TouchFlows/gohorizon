@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gohorizon/gohorizon/internal/adapter"
 	"github.com/gohorizon/gohorizon/internal/health"
 	"github.com/gohorizon/gohorizon/internal/metrics"
 )
@@ -44,6 +45,12 @@ type stubProvider struct {
 	retryErr  error
 	forgotten []string
 	forgetErr error
+
+	// The failed store a handler asked the application for, and what it answered.
+	failedJobs  []adapter.FailedJob
+	failedNext  string
+	failedErr   error
+	failedQuery adapter.FailedJobQuery
 }
 
 func (s *stubProvider) Report() health.Report { return s.report }
@@ -76,6 +83,11 @@ func (s *stubProvider) RetryFailedJob(_ context.Context, id string) error {
 func (s *stubProvider) ForgetFailedJob(_ context.Context, id string) error {
 	s.forgotten = append(s.forgotten, id)
 	return s.forgetErr
+}
+
+func (s *stubProvider) FailedJobs(_ context.Context, query adapter.FailedJobQuery) (adapter.FailedJobsPage, error) {
+	s.failedQuery = query
+	return adapter.FailedJobsPage{FailedJobs: s.failedJobs, NextBefore: s.failedNext}, s.failedErr
 }
 
 func get(t *testing.T, provider Provider, target string) *httptest.ResponseRecorder {

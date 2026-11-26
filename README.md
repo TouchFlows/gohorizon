@@ -55,6 +55,10 @@ Milestones 1 and 2 implemented:
   report are `null`, and a missing package or failing command only fills in
   `queues.error` — the status stays `ok`, so a health check cannot restart healthy
   workers over a failed inspection.
+- Failed jobs: `php artisan gohorizon:failed:list --json` reads the application's own
+  failed store through its configured failer, and `GET /api/v1/failed` pages it newest first,
+  so the screen and the retry/delete actions name the same records (docs/adr/0013). The job
+  payload is never returned; `exception` is the redacted first line of the stored trace.
 - Read-only `GET /api/v1/health`, and `GET /metrics` for a Prometheus scrape of the same
   state: `gohorizon_up`, `gohorizon_lock_held`, telemetry counters by result, queue depth
   by state, and workers by state and crash loops per supervisor.
@@ -75,7 +79,7 @@ Milestones 1 and 2 implemented:
   cached forever, `index.html` is not cached, and a client route falls back to it
   (docs/adr/0008).
 - `gohorizon/laravel` package: configuration, job lifecycle telemetry to a Redis Stream,
-  `gohorizon:capabilities`, `gohorizon:inspect`.
+  `gohorizon:capabilities`, `gohorizon:inspect`, `gohorizon:failed:list`.
 - Sign-in (Milestone 3, docs/adr/0009): `server.auth.users` turns authentication on, with
   PBKDF2 password hashes minted by `gohorizon passwd` and a session cookie signed with the
   key named by `server.auth.session_key_env`. `/api/v1/*` then requires a session (the
@@ -131,6 +135,16 @@ record is already gone. Both are the application's own commands (`php artisan qu
 (docs/adr/0012). A job no attempt history knows is a 404, an attempt whose newest outcome is not
 `failed` is a 409, and a failed job the application no longer stores is a 404.
 
+`GET /api/v1/failed?[limit=…][before=…]` lists the application's own failed store as
+`{failed_jobs: [{id, uuid, connection, queue, job, failed_at, exception}], next_before}`, newest
+first, so the list names the records the two actions above act on instead of GoHorizon's pruned
+attempt history (docs/adr/0013). The command behind it is
+`php artisan gohorizon:failed:list --json`, which reads the configured failer; the payload is
+never returned and `exception` is the redacted first line of the stored trace. `limit` defaults
+to 50 and may not exceed 200, `before` is the `next_before` of the previous page and is empty on
+the last page, and either being malformed is a 400. An application that cannot answer is a 503,
+an empty store is `[]`, and any signed-in role may read it.
+
 `GET /metrics` serves the state `/api/v1/health` reports in the Prometheus text format
 (`text/plain; version=0.0.4; charset=utf-8`), without a client library:
 `gohorizon_up`, `gohorizon_lock_held`,
@@ -152,7 +166,7 @@ cmd/gohorizon          CLI and service entrypoint
 internal/config        YAML loading, env expansion, validation
 internal/redis         key ownership and the typed Redis client
 internal/process       worker state machine, launch specs, process manager
-internal/adapter       gohorizon:capabilities probe, queue inspection, launch preflight
+internal/adapter       gohorizon:capabilities probe, queue inspection, failed-job listing, launch preflight
 internal/telemetry     events stream consumer, dedupe and counters
 internal/metrics       SQLite job rows and per-queue aggregates (historical metrics)
 internal/supervisor    lock + managers + health report

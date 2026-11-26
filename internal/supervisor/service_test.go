@@ -901,10 +901,13 @@ func TestLockSilenceFencesTheService(t *testing.T) {
 // decision — ask the adapter, log what happened, pass the application's answer through — can
 // be read without a Laravel application.
 type stubFailer struct {
-	ids       []string
-	forgotten []string
-	err       error
-	forgetErr error
+	ids         []string
+	forgotten   []string
+	err         error
+	forgetErr   error
+	failedPage  adapter.FailedJobsPage
+	failedErr   error
+	failedQuery adapter.FailedJobQuery
 }
 
 func (s *stubFailer) RetryFailedJob(_ context.Context, id string) error {
@@ -915,6 +918,40 @@ func (s *stubFailer) RetryFailedJob(_ context.Context, id string) error {
 func (s *stubFailer) ForgetFailedJob(_ context.Context, id string) error {
 	s.forgotten = append(s.forgotten, id)
 	return s.forgetErr
+}
+
+func (s *stubFailer) FailedJobs(_ context.Context, query adapter.FailedJobQuery) (adapter.FailedJobsPage, error) {
+	s.failedQuery = query
+	return s.failedPage, s.failedErr
+}
+
+func TestServiceFailedJobsAsksTheApplication(t *testing.T) {
+	// The store is the application's, so the service asks the adapter for the page it was
+	// given and returns the application's answer unchanged (docs/adr/0013).
+	failer := &stubFailer{failedPage: adapter.FailedJobsPage{
+		FailedJobs: []adapter.FailedJob{{ID: "17", Queue: "default"}},
+		NextBefore: "17",
+	}}
+	service := &Service{failer: failer}
+
+	page, err := service.FailedJobs(context.Background(), adapter.FailedJobQuery{Limit: 2, Before: "9"})
+	if err != nil {
+		t.Fatalf("FailedJobs: %v", err)
+	}
+	if failer.failedQuery != (adapter.FailedJobQuery{Limit: 2, Before: "9"}) {
+		t.Errorf("adapter was asked for %+v, want the page", failer.failedQuery)
+	}
+	if len(page.FailedJobs) != 1 || page.FailedJobs[0].ID != "17" || page.NextBefore != "17" {
+		t.Errorf("page = %+v, want the adapter's answer", page)
+	}
+}
+
+func TestServiceFailedJobsReportsAMissingAdapter(t *testing.T) {
+	service := &Service{}
+
+	if _, err := service.FailedJobs(context.Background(), adapter.FailedJobQuery{Limit: 10}); err == nil {
+		t.Fatal("FailedJobs with no adapter = nil, want an error")
+	}
 }
 
 func TestServiceRetryFailedJobAsksTheApplication(t *testing.T) {

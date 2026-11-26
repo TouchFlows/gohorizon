@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gohorizon/gohorizon/internal/adapter"
 	"github.com/gohorizon/gohorizon/internal/api"
 	"github.com/gohorizon/gohorizon/internal/auth"
 	"github.com/gohorizon/gohorizon/internal/health"
@@ -45,6 +46,10 @@ func (idleProvider) RetryFailedJob(context.Context, string) error {
 
 func (idleProvider) ForgetFailedJob(context.Context, string) error {
 	return errors.New("this test computes nothing")
+}
+
+func (idleProvider) FailedJobs(context.Context, adapter.FailedJobQuery) (adapter.FailedJobsPage, error) {
+	return adapter.FailedJobsPage{}, nil
 }
 
 // TestTrustedProxyCarriesTheClientAndTheTLS is the proxy path with nothing replaced: the

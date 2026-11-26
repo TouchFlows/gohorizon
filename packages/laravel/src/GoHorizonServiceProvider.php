@@ -5,7 +5,9 @@ declare(strict_types=1);
 namespace GoHorizon\Laravel;
 
 use GoHorizon\Laravel\Console\CapabilitiesCommand;
+use GoHorizon\Laravel\Console\FailedJobsCommand;
 use GoHorizon\Laravel\Console\InspectQueuesCommand;
+use GoHorizon\Laravel\Inspection\FailedJobLister;
 use GoHorizon\Laravel\Inspection\QueueInspector;
 use GoHorizon\Laravel\Redis\Keys;
 use GoHorizon\Laravel\Telemetry\JobEventSubscriber;
@@ -43,6 +45,12 @@ final class GoHorizonServiceProvider extends ServiceProvider
         ));
 
         $this->app->singleton(QueueInspector::class, static fn ($app): QueueInspector => new QueueInspector($app['queue']));
+
+        // The failed-job store belongs to the application: the lister reads it through the
+        // configured failer, so the dashboard lists what retry and delete act on.
+        $this->app->singleton(FailedJobLister::class, static fn ($app): FailedJobLister => new FailedJobLister(
+            $app['queue.failer']
+        ));
     }
 
     public function boot(): void
@@ -54,6 +62,7 @@ final class GoHorizonServiceProvider extends ServiceProvider
 
             $this->commands([
                 CapabilitiesCommand::class,
+                FailedJobsCommand::class,
                 InspectQueuesCommand::class,
             ]);
         }

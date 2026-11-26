@@ -33,7 +33,20 @@ final class Sanitizer
             return null;
         }
 
-        $message = preg_replace('/\s+/', ' ', $exception->getMessage()) ?? '';
+        return self::text($exception->getMessage());
+    }
+
+    /**
+     * Sanitises text that is already a string, such as the message line of a stored stack
+     * trace. It applies the same redaction as a thrown exception.
+     */
+    public static function text(?string $message): ?string
+    {
+        if ($message === null) {
+            return null;
+        }
+
+        $message = preg_replace('/\s+/', ' ', $message) ?? '';
 
         foreach (self::PATTERNS as $pattern => $replacement) {
             $message = preg_replace($pattern, $replacement, $message) ?? $message;

@@ -29,6 +29,9 @@ type Provider interface {
 	Buckets(ctx context.Context, resolution metrics.Resolution, queue string, from, to time.Time) ([]metrics.Bucket, error)
 	Jobs(ctx context.Context, query metrics.JobQuery) ([]metrics.Job, error)
 	Job(ctx context.Context, jobID string) (metrics.Job, error)
+	// FailedJobs lists the application's own failed store through the adapter, which is the
+	// same store retry and delete act on (docs/adr/0013).
+	FailedJobs(ctx context.Context, query adapter.FailedJobQuery) (adapter.FailedJobsPage, error)
 	// RestartWorker asks the supervisor that runs uuid to stop the worker gracefully and
 	// start its replacement in the same slot (docs/adr/0011).
 	RestartWorker(uuid string) error
@@ -140,6 +143,9 @@ func NewRouter(provider Provider, log *slog.Logger, opts ...Option) http.Handler
 			r.Get("/metrics", metricsHistory(provider, log))
 			r.Get("/jobs", jobHistory(provider, log))
 			r.Get("/jobs/{id}", jobDetail(provider, log))
+			// The failed store is read through the application, not from the history above,
+			// so the list and the two actions always name the same records.
+			r.Get("/failed", failedJobList(provider, log))
 		})
 	})
 

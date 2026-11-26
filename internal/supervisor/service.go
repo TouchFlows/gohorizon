@@ -68,10 +68,11 @@ type queueInspector interface {
 	Queues(ctx context.Context, connection string, queues []string) (adapter.Inspection, error)
 }
 
-// failedJobAdmin is the adapter surface the failed-job actions go through, so a failed job is
-// re-published or deleted by the application, never by GoHorizon writing a queue key
-// (docs/adr/0012). adapter.Probe implements it.
-type failedJobAdmin interface {
+// failedJobStore is the adapter surface the failed-job read and the two actions go through,
+// so a failed job is listed, re-published or deleted by the application, never by GoHorizon
+// writing a queue key (docs/adr/0012, docs/adr/0013). adapter.Probe implements it.
+type failedJobStore interface {
+	FailedJobs(ctx context.Context, query adapter.FailedJobQuery) (adapter.FailedJobsPage, error)
 	RetryFailedJob(ctx context.Context, id string) error
 	ForgetFailedJob(ctx context.Context, id string) error
 }
@@ -85,7 +86,7 @@ type Service struct {
 	managers []*process.Manager
 
 	inspector     queueInspector
-	failer        failedJobAdmin
+	failer        failedJobStore
 	queues        []string
 	queueInterval time.Duration
 	pruneInterval time.Duration
@@ -280,6 +281,16 @@ func (s *Service) RestartWorker(uuid string) error {
 		}
 	}
 	return fmt.Errorf("no running worker with id %s", uuid)
+}
+
+// FailedJobs lists the application's own failed jobs for the dashboard. It is a read through
+// the same adapter retry and delete use, so the screen names the records those actions can
+// actually act on rather than the pruned history GoHorizon observed (docs/adr/0013).
+func (s *Service) FailedJobs(ctx context.Context, query adapter.FailedJobQuery) (adapter.FailedJobsPage, error) {
+	if s.failer == nil {
+		return adapter.FailedJobsPage{}, errors.New("the application adapter is unavailable")
+	}
+	return s.failer.FailedJobs(ctx, query)
 }
 
 // RetryFailedJob asks the application to push one failed job back onto its queue. The

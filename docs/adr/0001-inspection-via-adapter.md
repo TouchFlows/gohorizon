@@ -34,10 +34,9 @@ itself considers internal.
    `php artisan gohorizon:inspect --json` (contract methods only) and
    `php artisan gohorizon:capabilities --json` (drivers, `retry_after`, `pcntl`,
    versions, event availability).
-3. Failed-job listing, retry and delete are adapter operations
-   (`gohorizon:failed:list|retry|forget` to be added in the dashboards/administration
-   slice). They delegate to Laravel's failer and `queue:retry`/`queue:forget`
-   semantics, never to raw SQL written by Go.
+3. Failed-job listing is the package command `gohorizon:failed:list --json`, and retry and
+   delete run Laravel's own `queue:retry` / `queue:forget`. All three delegate to the
+   application's failer and never to raw SQL or a queue key written by Go (docs/adr/0013).
 4. Go schedules inspection by executing the adapter command in the application
    directory with the configured PHP binary. A package that is not installed degrades
    the feature (counts unavailable, "adapter_missing" capability) instead of breaking
