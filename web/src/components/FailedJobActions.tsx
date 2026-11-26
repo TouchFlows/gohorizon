@@ -1,5 +1,7 @@
 import { useState } from 'react'
 import { AdminActionError, deleteFailedJob, retryFailedJob } from '../api'
+import type { FailedJob } from '../api'
+import { failedJobClass } from '../failed'
 import { mutationMessage } from '../view'
 
 type Verb = 'retry' | 'delete'
@@ -16,11 +18,14 @@ interface Notice {
 // Either answer can leave the store without the record: a retry takes it back and a delete
 // removes it, and a 404 says it was already gone. onStoreChanged is how the screen learns to
 // re-read its list, because a record the application no longer stores may not stay on it.
+//
+// Delete is the one action nothing can undo, so it asks first, naming the record it would
+// remove; the press that removes it is a second, deliberate one.
 export default function FailedJobActions({
   job,
   onStoreChanged,
 }: {
-  job: { id: string; uuid: string }
+  job: FailedJob
   onStoreChanged: () => void
 }) {
   const [busy, setBusy] = useState<Verb | null>(null)
@@ -29,6 +34,7 @@ export default function FailedJobActions({
   // delete removes it, and after either the same id has nothing left to act on until the job
   // fails again.
   const [settled, setSettled] = useState(false)
+  const [confirming, setConfirming] = useState(false)
 
   const act = async (verb: Verb) => {
     setBusy(verb)
@@ -37,12 +43,16 @@ export default function FailedJobActions({
       const queue =
         verb === 'retry' ? await retryFailedJob(job.uuid) : await deleteFailedJob(job.uuid)
       setSettled(true)
+      setConfirming(false)
       setNotice({
         failed: false,
         text: verb === 'retry' ? `queued again on ${queue}` : `deleted from ${queue}`,
       })
       onStoreChanged()
     } catch (failure) {
+      // The question is over whatever the answer was, so the controls and the answer itself are
+      // visible again rather than the confirmation hiding the refusal behind it.
+      setConfirming(false)
       // A 404 is the application saying the record is already gone, so the buttons go quiet
       // with the message: pressing them again could only ask the same question.
       if (failure instanceof AdminActionError && failure.status === 404) {
@@ -55,6 +65,29 @@ export default function FailedJobActions({
     } finally {
       setBusy(null)
     }
+  }
+
+  // While the question is being asked the two actions step aside for it; once the delete is
+  // in flight the normal buttons return, disabled, so the progress is where it has always been.
+  if (confirming && busy === null && !settled) {
+    return (
+      <div className="detail__actions" role="group" aria-label="Confirm delete">
+        <span className="notice notice--bad">
+          Delete the failed record of {failedJobClass(job)} on{' '}
+          {job.queue === '' ? 'an unknown queue' : job.queue}? This cannot be undone.
+        </span>
+        <button
+          type="button"
+          className="chip chip--danger"
+          onClick={() => void act('delete')}
+        >
+          Delete now
+        </button>
+        <button type="button" className="chip" onClick={() => setConfirming(false)}>
+          Cancel
+        </button>
+      </div>
+    )
   }
 
   return (
@@ -71,7 +104,7 @@ export default function FailedJobActions({
         type="button"
         className="chip chip--danger"
         disabled={busy !== null || settled}
-        onClick={() => void act('delete')}
+        onClick={() => setConfirming(true)}
       >
         {busy === 'delete' ? 'Deleting…' : 'Delete'}
       </button>

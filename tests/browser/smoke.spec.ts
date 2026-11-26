@@ -1450,10 +1450,28 @@ test.describe('the dashboard against the real binary', () => {
     await expect(detail.getByText(newest.uuid, { exact: true }).first()).toBeVisible()
 
     const beforeDelete = auditLines().length
+
+    // Delete asks first, naming the record it would remove, and the question alone asks the
+    // application for nothing: no audit record is written until the second press.
+    const confirm = detail.getByRole('group', { name: 'Confirm delete' })
+    await detail.getByRole('button', { name: 'Delete', exact: true }).click()
+    await expect(confirm).toBeVisible()
+    await expect(
+      confirm.getByText(`Delete the failed record of App\\Jobs\\AlwaysFails on ${queue}?`),
+    ).toBeVisible()
+    expect(auditLines().length).toBe(beforeDelete)
+
+    // Backing out leaves the record and the controls exactly where they were.
+    await confirm.getByRole('button', { name: 'Cancel', exact: true }).click()
+    await expect(confirm).toHaveCount(0)
+    await expect(detail.getByRole('button', { name: 'Delete', exact: true })).toBeEnabled()
+    expect(auditLines().length).toBe(beforeDelete)
+
     const deleteReread = page.waitForResponse(
       (response) => response.url().includes('/api/v1/failed') && response.request().method() === 'GET',
     )
     await detail.getByRole('button', { name: 'Delete', exact: true }).click()
+    await confirm.getByRole('button', { name: 'Delete now', exact: true }).click()
     await expect(detail.getByText(`deleted from ${queue}`)).toBeVisible()
     await deleteReread
     // The record is gone, so the controls go quiet rather than asking again.
@@ -1512,8 +1530,14 @@ test.describe('the dashboard against the real binary', () => {
     await expect(detail.getByText(`queued again on ${queue}`)).toHaveCount(0)
     await expect(retry).toBeEnabled()
 
+    // A viewer sees the same confirmation, because it is the panel's question and not the
+    // route's; the refusal comes from the press that answers it.
     const remove = detail.getByRole('button', { name: 'Delete', exact: true })
     await remove.click()
+    await detail
+      .getByRole('group', { name: 'Confirm delete' })
+      .getByRole('button', { name: 'Delete now', exact: true })
+      .click()
     await expect(detail.getByRole('alert')).toHaveText('operator role required')
     await expect(detail.getByText(`deleted from ${queue}`)).toHaveCount(0)
     await expect(remove).toBeEnabled()
