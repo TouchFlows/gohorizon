@@ -39,11 +39,14 @@ operator and a refusal would be the 503 the action returns.
    published unchanged when it is true and omitted when it is not: a field this service thinks
    it recognises is not meaningful in another schema. `retry_after` is null for a driver with no
    reservation window, never an invented zero.
-4. **`operations` is a map of booleans, and each entry says what this service can actually do.**
-   `inspect_queues`, `telemetry`, `failed_jobs_list`, `failed_job_retry` and `failed_job_delete`
-   all run the package's own artisan commands, so they follow `available`. `restart_workers` is
-   the supervisor's own action — it stops a process GoHorizon started and replaces it in the
-   same slot — so it stays true even when the application cannot answer at all.
+4. **`operations` is a map of booleans, and each entry says what this service offers against
+   this deployment.** `inspect_queues`, `telemetry`, `failed_jobs_list`, `failed_job_retry` and
+   `failed_job_delete` all run the package's own artisan commands, so they follow `available`.
+   `restart_workers` is the supervisor's own action, but it follows `available` as well: a
+   deployment whose descriptor could not be read is presented as read-only until it is
+   repaired, so the dashboard never offers an action beside an unexplained failure. The
+   supervisor can still restart a process it owns — the operator just is not offered that
+   control from a page that cannot say what the deployment is.
 5. **An unavailable or unreadable adapter is a 200, not a 503.** "This deployment cannot do
    that" is the answer the caller asked for; a 503 would describe a failed read and invite a
    retry of a fact that does not change until the service restarts.
@@ -62,9 +65,11 @@ operator and a refusal would be the 503 the action returns.
 - The screen and the service now agree about what exists: a deployment whose application cannot
   answer offers no failed-job actions and says why, and an operator installing or repairing the
   package sees the same message in the dashboard as in the service log.
-- `restart_workers` being unconditionally true is honest for the current supervisor-owned pool,
-  and it is the seam a later external-worker integration needs: the descriptor, not the screen,
-  decides.
+- `restart_workers` follows `available` rather than standing alone. The supervisor losing a
+  capability of its own would be wrong — it still owns the pool — but the dashboard's reading of
+  an unavailable descriptor is "this deployment is read-only, and here is what to repair", which
+  is only coherent if every control obeys it. The descriptor, not the screen, still decides,
+  which is the seam a later external-worker integration needs.
 - The endpoint publishes what the application reports about itself, including its Laravel and
   PHP versions and event list. It does not publish payloads, credentials or keys; the package
   already omits `has_password` values, and the probe ignores them.

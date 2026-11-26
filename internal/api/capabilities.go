@@ -42,11 +42,11 @@ type capabilityConnection struct {
 	RetryAfter *int   `json:"retry_after"`
 }
 
-// capabilityOperations names what this service can do against the application. Queue
-// inspection, telemetry, the failed store and its two actions all run the application's own
-// artisan commands, so they are offered only when the probe answered with a schema this
-// service understands. Restarting a worker is the supervisor's own action and does not depend
-// on the application at all, so it stays offered while the rest do not (docs/adr/0014).
+// capabilityOperations names what this service offers against the application. Every entry is
+// offered only when the probe answered with a schema this service understands: a deployment
+// whose descriptor cannot be read is presented as read-only until it is repaired, restart
+// included, so the dashboard never offers an action beside an unexplained failure
+// (docs/adr/0014).
 func capabilityOperations(understood bool) map[string]bool {
 	return map[string]bool{
 		"inspect_queues":    understood,
@@ -54,7 +54,7 @@ func capabilityOperations(understood bool) map[string]bool {
 		"failed_jobs_list":  understood,
 		"failed_job_retry":  understood,
 		"failed_job_delete": understood,
-		"restart_workers":   true,
+		"restart_workers":   understood,
 	}
 }
 

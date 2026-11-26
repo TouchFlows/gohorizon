@@ -102,7 +102,7 @@ func TestCapabilitiesPublishesTheApplicationDescriptor(t *testing.T) {
 	}
 }
 
-func TestCapabilitiesOffersWhatStillWorksWhenTheApplicationCannotAnswer(t *testing.T) {
+func TestCapabilitiesOffersNothingWhenTheApplicationCannotAnswer(t *testing.T) {
 	answer := readCapabilities(t, &stubProvider{capsErr: errors.New("gohorizon/laravel adapter is unavailable: exit status 1: could not open input file: artisan")})
 
 	if answer.Available {
@@ -111,15 +111,14 @@ func TestCapabilitiesOffersWhatStillWorksWhenTheApplicationCannotAnswer(t *testi
 	if answer.Error == "" {
 		t.Error("error is empty, so the dashboard cannot say why the controls are missing")
 	}
-	// The failed store and inspection go through the application; restarting a worker is
-	// this service's own action.
-	for _, operation := range []string{"inspect_queues", "telemetry", "failed_jobs_list", "failed_job_retry", "failed_job_delete"} {
+	// A deployment the service cannot read is read-only as a whole, restart included.
+	for _, operation := range []string{
+		"inspect_queues", "telemetry", "failed_jobs_list",
+		"failed_job_retry", "failed_job_delete", "restart_workers",
+	} {
 		if answer.Operations[operation] {
 			t.Errorf("operations[%q] = true although the application never answered", operation)
 		}
-	}
-	if !answer.Operations["restart_workers"] {
-		t.Error("operations[restart_workers] = false, want true: the supervisor owns the pool")
 	}
 }
 

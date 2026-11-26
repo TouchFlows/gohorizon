@@ -73,12 +73,15 @@ describe('workerControls', () => {
     expect(workerControls(descriptor(), true)).toEqual({ restart: true, reason: '' })
   })
 
-  it('keeps the restart when the application itself cannot answer', () => {
-    // Restarting is the supervisor's own action, so an unavailable packages does not take it
-    // away (docs/adr/0014).
+  it('drops the restart and says why when the application cannot answer', () => {
+    // A deployment whose descriptor cannot be read is read-only as a whole, restart included
+    // (docs/adr/0014).
     const caps = descriptor({ available: false, error: 'the package is not installed' })
+    caps.operations.restart_workers = false
 
-    expect(workerControls(caps, true)).toEqual({ restart: true, reason: '' })
+    const controls = workerControls(caps, true)
+    expect(controls.restart).toBe(false)
+    expect(controls.reason).toBe('Read-only: the package is not installed')
   })
 
   it('disables the restart the descriptor does not advertise, and says so', () => {

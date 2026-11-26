@@ -171,8 +171,9 @@ application could not answer or answered a schema this service does not understa
 then says which, the descriptor fields are omitted, and the answer is still a 200. `operations`
 names what this service can do: `inspect_queues`, `telemetry`, `failed_jobs_list`,
 `failed_job_retry` and `failed_job_delete` follow `available` because they run the package's
-commands, while `restart_workers` is the supervisor's own action and stays true. Any signed-in
-role may read it; it is read-only and not cached (docs/adr/0014).
+commands, and so does `restart_workers`: a deployment whose descriptor cannot be read is
+presented as read-only until it is repaired. Any signed-in role may read it; it is read-only
+and not cached (docs/adr/0014).
 
 `GET /metrics` serves the state `/api/v1/health` reports in the Prometheus text format
 (`text/plain; version=0.0.4; charset=utf-8`), without a client library:

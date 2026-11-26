@@ -77,6 +77,15 @@ const extraQueue = 'gohorizon-smoke-extra'
 // to the supervisor, which replaces it with a growing backoff until the streak is a loop.
 const crashy = 'crashy'
 const crashyQueue = 'gohorizon-smoke-crashy'
+// A fourth deployment, of the same fixture, whose PHP refuses the capabilities command: the
+// one case that reads an operator's dashboard beside a descriptor the application could not
+// answer. Its supervisor serves a queue nothing is dispatched to, so it cannot take work from
+// the service above.
+const nocapsApplication = 'gohorizon-smoke-nocaps'
+const nocapsQueue = 'gohorizon-smoke-nocaps'
+// What the wrapper PHP writes to stderr for the capabilities command. The service publishes it
+// as the descriptor's `error`, and both screens must repeat it rather than invent a reason.
+const nocapsReason = 'the gohorizon/laravel package is not installed in this deployment'
 const pollMs = 30_000
 
 // The operator the smoke signs in as. The password is hashed by the binary itself before the
@@ -137,6 +146,11 @@ const skipReason =
 let dir = ''
 let base = ''
 let service: ChildProcess | undefined
+// The second deployment's address, and the process serving it. The capabilities probe runs
+// once at startup, so a descriptor the application cannot answer is only reachable by starting
+// a service against a package that cannot answer, not by breaking the one every case uses.
+let nocapsBase = ''
+let nocapsService: ChildProcess | undefined
 // session is the token the suite's direct calls to the API carry. The browser gets its own
 // cookie of the same shape, set on its context before each case.
 let session = ''
@@ -226,13 +240,47 @@ test.describe('the dashboard against the real binary', () => {
       throw new Error('the failed attempt is recorded without a finished_at')
     }
     failedAt = failed.finished_at
+
+    // A second service against the same fixture through a PHP wrapper that refuses only
+    // `gohorizon:capabilities`. Everything else the deployment runs still works, which is the
+    // point: the failed store keeps listing, so the controls that the descriptor withholds are
+    // read disappearing from a screen that has a record to act on.
+    const nocapsPort = await freePort()
+    nocapsBase = `http://127.0.0.1:${nocapsPort}`
+    const wrapper = path.join(dir, 'php-nocaps')
+    fs.writeFileSync(
+      wrapper,
+      `#!/bin/sh\nfor arg in "$@"; do\n  if [ "$arg" = "gohorizon:capabilities" ]; then\n    echo '${nocapsReason}' >&2\n    exit 1\n  fi\ndone\nexec ${JSON.stringify(php)} "$@"\n`,
+      { mode: 0o755 },
+    )
+    const nocapsConfig = path.join(dir, 'gohorizon-nocaps.yaml')
+    fs.writeFileSync(nocapsConfig, noCapsConfigYAML(nocapsPort, dir, wrapper, passwordHash))
+
+    const nocapsLog = fs.openSync(path.join(dir, 'gohorizon-nocaps.log'), 'a')
+    nocapsService = spawn(binary, ['run', '-config', nocapsConfig], {
+      cwd: root,
+      detached: true,
+      stdio: ['ignore', nocapsLog, nocapsLog],
+      env: { ...process.env, ...fixtureEnv, GOHORIZON_SMOKE_SESSION_KEY: sessionKey },
+    })
+    fs.closeSync(nocapsLog)
+
+    // Listening is the 401 its session gate answers with; the descriptor and the worker it
+    // starts are read by the case through the pages.
+    await waitFor('listen on the deployment without a capabilities answer', async () => {
+      const response = await fetch(`${nocapsBase}/api/v1/health`, {
+        signal: AbortSignal.timeout(3_000),
+      })
+      return response.status === 401
+    })
   })
 
   test.afterAll(() => {
     if (skipReason !== null) {
       return
     }
-    stopService()
+    stopService(nocapsService)
+    stopService(service)
     fs.rmSync(dir, { recursive: true, force: true })
   })
 
@@ -1655,6 +1703,71 @@ test.describe('the dashboard against the real binary', () => {
     await expect(steadyRow.getByRole('cell').nth(3)).toHaveText(steadyWorker.state)
   })
 
+  test('an application that cannot answer the capabilities probe leaves both screens read-only', async ({ page }) => {
+    // The second deployment's PHP refuses `gohorizon:capabilities`, so what this service
+    // publishes is its own unavailable answer: no descriptor fields, every operation withheld,
+    // and the reason the probe gave. The descriptor is a startup snapshot, which is why the
+    // state is a second service rather than a restart of the one every other case reads.
+    // The session the hook left on the context is a signed token under the key both
+    // deployments share, so this one opens signed in as the same operator without a second
+    // sign-in.
+    await page.goto(nocapsBase)
+    await expect(page.getByRole('heading', { name: 'Overview', exact: true })).toBeVisible()
+
+    const described = await page.request.get(`${nocapsBase}/api/v1/capabilities`)
+    expect(described.status()).toBe(200)
+    const capabilities = (await described.json()) as {
+      available: boolean
+      error?: string
+      operations: Record<string, boolean>
+    }
+    expect(capabilities.available).toBe(false)
+    expect(capabilities.error).toContain(nocapsReason)
+    // Every control is withheld, restart included: the deployment is read-only until the
+    // package is repaired, so no screen offers an action beside the unexplained failure.
+    expect(capabilities.operations).toEqual({
+      inspect_queues: false,
+      telemetry: false,
+      failed_jobs_list: false,
+      failed_job_retry: false,
+      failed_job_delete: false,
+      restart_workers: false,
+    })
+
+    // The reason is the service's own wording, and it is what both screens must carry.
+    const reason = `Read-only: ${capabilities.error ?? ''}`
+
+    // A record for the controls to be missing from: the smoke's own worker runs the failing
+    // fixture job, and this deployment reads the same application's failed store.
+    dispatch(php, 'fail')
+    await page.goto(`${nocapsBase}/#/failed`)
+    const record = page.getByRole('cell', { name: 'App\\Jobs\\AlwaysFails', exact: true })
+    await expect(record.first()).toBeVisible({ timeout: 20_000 })
+    await page
+      .getByRole('row')
+      .filter({ has: record })
+      .first()
+      .getByRole('button', { name: 'details' })
+      .click()
+
+    // The panel still describes the record; only the two actions it used to carry are gone,
+    // and the line under the table says why in the service's words.
+    const detail = page.locator('.jobs__detail')
+    await expect(detail).toBeVisible()
+    await expect(detail.getByRole('button', { name: 'Retry', exact: true })).toHaveCount(0)
+    await expect(detail.getByRole('button', { name: 'Delete', exact: true })).toHaveCount(0)
+    await expect(page.getByText(reason, { exact: true })).toBeVisible()
+
+    // The worker rows lose the control and the column that held it, and the same reason is
+    // drawn under the table rather than only in the payload.
+    await page.goto(`${nocapsBase}/#/workers`)
+    await expect(page.getByRole('heading', { name: 'Workers', exact: true })).toBeVisible()
+    await expect(page.locator('tbody tr').first()).toBeVisible()
+    await expect(page.getByRole('button', { name: 'Restart', exact: true })).toHaveCount(0)
+    await expect(page.getByRole('columnheader', { name: 'Action', exact: true })).toHaveCount(0)
+    await expect(page.getByText(reason, { exact: true })).toBeVisible()
+  })
+
   test('a deep link outside the navigation loads the shell instead of a 404', async ({ page }) => {
     const response = await page.goto(`${base}/queues/anything`)
 
@@ -1764,6 +1877,59 @@ applications:
         shutdown_grace: 30
         # The backoff is both the window a crash leaves the page to fetch in and, doubled plus
         # thirty seconds, the stable run that clears the loop: the lowest keeps both shortest.
+        restart_backoff: 1
+`
+}
+
+// noCapsConfigYAML is the second deployment: the same fixture and Redis database under its
+// own application and queue names, through a PHP that refuses the capabilities command. Its
+// one worker serves a queue nothing is dispatched to, so it cannot take the work the case
+// above dispatches, and its store is its own file beside the service's.
+function noCapsConfigYAML(port: number, dir: string, php: string, passwordHash: string): string {
+  return `version: 1
+
+server:
+  listen: "127.0.0.1:${port}"
+  auth:
+    session_key_env: GOHORIZON_SMOKE_SESSION_KEY
+    session_hours: 1
+    users:
+      - name: ${smokeUser}
+        password_hash: ${JSON.stringify(passwordHash)}
+        role: operator
+
+storage:
+  driver: sqlite
+  path: ${JSON.stringify(path.join(dir, 'nocaps.db'))}
+
+redis:
+  address: "${redis.host}:${redis.port}"
+  password_env: GOHORIZON_REDIS_PASSWORD
+  db: ${redis.db}
+
+applications:
+  - id: ${nocapsApplication}
+    name: GoHorizon smoke fixture without a capabilities answer
+    path: ${JSON.stringify(fixture)}
+    php: ${JSON.stringify(php)}
+    artisan: artisan
+    environment: e2e
+    redis_connection: redis
+    supervisors:
+      - id: idle
+        queues:
+          - ${nocapsQueue}
+        balance:
+          strategy: fixed
+        workers:
+          min: 1
+          max: 1
+        worker:
+          sleep: 1
+          tries: 1
+          timeout: 6
+          memory: 128
+        shutdown_grace: 30
         restart_backoff: 1
 `
 }
@@ -2269,8 +2435,8 @@ function readLog(): string {
 
 // stopService ends the service's process group: the supervisor handles SIGTERM by stopping
 // its worker, and the group kill is what guarantees no worker of the smoke survives.
-function stopService(): void {
-  const pid = service?.pid
+function stopService(child: ChildProcess | undefined): void {
+  const pid = child?.pid
   if (pid === undefined) {
     return
   }
