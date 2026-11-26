@@ -360,17 +360,26 @@ function readCSRFToken(): string {
   return ''
 }
 
-// FailedJobActionError is a mutation the service refused or could not carry out, carrying the
-// status that said so. A 404 is the application no longer storing the job, which is an answer
-// about the record rather than a fault in the request, so the caller tells it apart.
-export class FailedJobActionError extends Error {
+// AdminActionError is an administrative mutation the service refused or could not carry out,
+// carrying the status that said so. A 404 is the record the action named no longer being
+// there, which is an answer about the record rather than a fault in the request, so a caller
+// can tell it apart.
+export class AdminActionError extends Error {
   readonly status: number
 
   constructor(status: number, message: string) {
     super(message)
-    this.name = 'FailedJobActionError'
+    this.name = 'AdminActionError'
     this.status = status
   }
+}
+
+// restartWorker asks the supervisor to stop one worker gracefully and start its replacement in
+// the same slot, so the job in flight finishes instead of being killed (docs/adr/0002). The
+// service answers 202 with the worker and its supervisor, both of which the row already
+// shows, so only the answer's status is read.
+export async function restartWorker(uuid: string): Promise<void> {
+  await adminAction('POST', `/api/v1/workers/${encodeURIComponent(uuid)}/restart`)
 }
 
 // retryFailedJob pushes one failed job back onto its queue through the application's own
@@ -385,11 +394,20 @@ export async function deleteFailedJob(uuid: string): Promise<string> {
   return failedJobAction('DELETE', `/api/v1/failed/${encodeURIComponent(uuid)}`)
 }
 
-// failedJobAction is the one shape both mutations take: the token from the cookie repeated in
-// the header, on a request the browser also sends its session cookie with. It answers with the
-// queue the job belongs to — the attempt's own id is already on screen — and a refusal shows
-// the service's own `error` wording.
+// failedJobAction answers with the queue the job belongs to — the attempt's own id is already
+// on screen — so a retry can say where the work landed.
 async function failedJobAction(method: string, url: string): Promise<string> {
+  const answer = (await adminAction(method, url)) as { queue?: unknown }
+  if (typeof answer.queue !== 'string' || answer.queue === '') {
+    throw new Error(`${url} did not answer with the queue the job belongs to`)
+  }
+  return answer.queue
+}
+
+// adminAction is the one shape every administrative mutation takes: the token from the cookie
+// repeated in the header, on a request the browser also sends its session cookie with, and a
+// refusal that carries the service's own `error` wording.
+async function adminAction(method: string, url: string): Promise<unknown> {
   const response = await fetch(url, {
     method,
     headers: { Accept: 'application/json', 'X-CSRF-Token': readCSRFToken() },
@@ -398,13 +416,9 @@ async function failedJobAction(method: string, url: string): Promise<string> {
     throw new Unauthorized()
   }
   if (response.status !== 200 && response.status !== 202) {
-    throw new FailedJobActionError(response.status, await errorText(response))
+    throw new AdminActionError(response.status, await errorText(response))
   }
-  const answer = (await response.json()) as { queue?: unknown }
-  if (typeof answer.queue !== 'string' || answer.queue === '') {
-    throw new Error(`${url} did not answer with the queue the job belongs to`)
-  }
-  return answer.queue
+  return response.json()
 }
 
 async function errorText(response: Response): Promise<string> {

@@ -1,7 +1,17 @@
 import type { HealthReport } from '../api'
 import { buildWorkers, countNoun } from '../view'
+import RestartWorker from '../components/RestartWorker'
 
-export default function Workers({ report }: { report: HealthReport }) {
+// canAct is whether this deployment has administrative routes at all: a service started
+// without users mounts none, so its rows stay read-only rather than offering a control that
+// could not answer.
+export default function Workers({
+  report,
+  canAct = false,
+}: {
+  report: HealthReport
+  canAct?: boolean
+}) {
   const supervisors = buildWorkers(report)
 
   return (
@@ -32,6 +42,7 @@ export default function Workers({ report }: { report: HealthReport }) {
                   <th>State</th>
                   <th className="num">Restarts</th>
                   <th>Last exit</th>
+                  {canAct && <th>Action</th>}
                 </tr>
               </thead>
               <tbody>
@@ -50,6 +61,11 @@ export default function Workers({ report }: { report: HealthReport }) {
                       {worker.lastExit}
                       {worker.reason !== '' && <span className="muted"> {worker.reason}</span>}
                     </td>
+                    {canAct && (
+                      <td className="workers__action">
+                        <RestartWorker uuid={worker.uuid} />
+                      </td>
+                    )}
                   </tr>
                 ))}
               </tbody>
@@ -57,6 +73,13 @@ export default function Workers({ report }: { report: HealthReport }) {
           )}
         </section>
       ))}
+
+      {!canAct && (
+        <p className="muted">
+          Read-only: this service was started without users, so it has no administrative route to
+          restart a worker.
+        </p>
+      )}
     </>
   )
 }

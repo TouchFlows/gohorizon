@@ -414,6 +414,57 @@ test.describe('the dashboard against the real binary', () => {
     expect(record?.address).toBe('127.0.0.1')
   })
 
+  test('an operator restarts a worker from its row', async ({ page }) => {
+    // The row is one of the idle pool's, so pressing its button interrupts nothing: the pool
+    // keeps its other worker while this one is stopped and replaced.
+    const report = await readHealth(page, `${base}/#/workers`)
+    const pool = (report.supervisors ?? []).find((supervisor) =>
+      (supervisor.workers ?? []).some((worker) => worker.queue === extraQueue),
+    )
+    const target = (pool?.workers ?? []).find((worker) => worker.queue === extraQueue)
+    if (pool === undefined || target === undefined) {
+      throw new Error(`the report lists no worker on the ${extraQueue} queue`)
+    }
+
+    // The row is found by the uuid it prints and the control by its label, so neither needs a
+    // hook: a role and a name already pick them out.
+    const row = page.getByRole('row', { name: new RegExp(target.uuid) })
+    await expect(row).toBeVisible()
+
+    const before = auditLines().length
+    await row.getByRole('button', { name: 'Restart', exact: true }).click()
+    await expect(row.getByText('restart requested')).toBeVisible()
+
+    // The supervisor stops the worker gracefully and starts its replacement in the same slot,
+    // so the uuid stays — it names the slot — and the pid is what changes.
+    await waitFor('replace the restarted worker', async () => {
+      const next = (await getJSON(`${base}/api/v1/health`)) as HealthReport
+      const supervisor = (next.supervisors ?? []).find((candidate) => candidate.id === pool.id)
+      const workers = (supervisor?.workers ?? []).filter((worker) => worker.queue === extraQueue)
+      const recycled = workers.find((worker) => worker.uuid === target.uuid)
+      return (
+        workers.length === pool.desired &&
+        recycled !== undefined &&
+        recycled.pid !== target.pid &&
+        workers.every((worker) => worker.state === 'running')
+      )
+    })
+
+    // The record is the one durable trace the button leaves, written by the service the page
+    // asked rather than by this file.
+    await waitFor('write the restart audit record', async () => auditLines().length >= before + 1)
+    const record = auditLines()
+      .slice(before)
+      .find((line) => line.action === 'worker-restart')
+    expect(record).toMatchObject({
+      action: 'worker-restart',
+      outcome: 'allowed',
+      user: smokeUser,
+      role: 'operator',
+      detail: `supervisor ${pool.id}`,
+    })
+  })
+
   test('the overview renders the service, its queues and its telemetry', async ({ page }) => {
     // Every number below comes from the health payload the page itself fetched, so this reads
     // the page against its own response instead of against literals. Both panels are found by
@@ -998,6 +1049,8 @@ test.describe('the dashboard against the real binary', () => {
         stateCell(worker),
         String(worker.restarts),
         String(worker.last_exit_code) + (worker.last_exit_reason ? ` ${worker.last_exit_reason}` : ''),
+        // The last cell is the control rather than a field, so it carries the button's label.
+        'Restart',
       ])
     }
   })

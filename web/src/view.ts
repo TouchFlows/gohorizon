@@ -1,6 +1,7 @@
 // Everything a screen shows is built here, away from React, so it can be tested without a
 // browser. A count the driver could not report becomes "unknown": zero is a real answer and
 // saying it for an unanswered question would be a lie.
+import { Unauthorized } from './api'
 import type { HealthReport, QueueDepth, Queues, Supervisor, Worker } from './api'
 
 export function count(value: number | null | undefined): string {
@@ -186,6 +187,15 @@ function workerRow(worker: Worker): WorkerRow {
     crashLooping: worker.crash_looping,
     adopted: worker.adopted,
   }
+}
+
+// mutationMessage is what an administrative action's failure says on screen: an ended session
+// asks for a sign-in, and anything else repeats the service's own wording.
+export function mutationMessage(failure: unknown): string {
+  if (failure instanceof Unauthorized) {
+    return 'Your session ended. Sign in again.'
+  }
+  return failure instanceof Error ? failure.message : String(failure)
 }
 
 export function buildWorkers(report: HealthReport): SupervisorRows[] {

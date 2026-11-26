@@ -68,8 +68,10 @@ Milestones 1 and 2 implemented:
   cursor paging and a detail panel, and failed jobs is the same table pinned to `failed` with
   the exception in the row itself and `Retry` and `Delete` in the detail panel of an attempt
   that failed. Those two go through the failed-job endpoints below, echoing the CSRF token
-  the page reads from its own cookie; without `server.auth.users` there are no administrative
-  routes to call, so the failed screen stays read-only. The Vite bundle under `web/` is embedded in the binary, hashed assets are
+  the page reads from its own cookie; a worker row's `Restart` posts the restart endpoint below
+  and the supervisor recycles the process in its slot, so the job in flight finishes instead of
+  being killed. Without `server.auth.users` there are no administrative routes to call, so both
+  screens stay read-only. The Vite bundle under `web/` is embedded in the binary, hashed assets are
   cached forever, `index.html` is not cached, and a client route falls back to it
   (docs/adr/0008).
 - `gohorizon/laravel` package: configuration, job lifecycle telemetry to a Redis Stream,
@@ -141,8 +143,7 @@ the format requires. `/metrics` stays unauthenticated, because Prometheus scrape
 a session; keep it behind the reverse proxy. `/api/v1/health` is behind the gate like the
 rest of the API once `server.auth.users` is configured.
 
-Not implemented yet: a dashboard control for restarting a worker, per-action administrator
-rights, queryable audit history, balancing.
+Not implemented yet: per-action administrator rights, queryable audit history, balancing.
 
 ## Layout
 

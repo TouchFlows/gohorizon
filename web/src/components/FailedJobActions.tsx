@@ -1,6 +1,7 @@
 import { useState } from 'react'
-import { deleteFailedJob, FailedJobActionError, retryFailedJob, Unauthorized } from '../api'
+import { AdminActionError, deleteFailedJob, retryFailedJob } from '../api'
 import type { Job } from '../api'
+import { mutationMessage } from '../view'
 
 type Verb = 'retry' | 'delete'
 
@@ -34,10 +35,10 @@ export default function FailedJobActions({ job }: { job: Job }) {
     } catch (failure) {
       // A 404 is the application saying the record is already gone, so the buttons go quiet
       // with the message: pressing them again could only ask the same question.
-      if (failure instanceof FailedJobActionError && failure.status === 404) {
+      if (failure instanceof AdminActionError && failure.status === 404) {
         setSettled(true)
       }
-      setNotice({ failed: true, text: messageOf(failure) })
+      setNotice({ failed: true, text: mutationMessage(failure) })
     } finally {
       setBusy(null)
     }
@@ -71,11 +72,4 @@ export default function FailedJobActions({ job }: { job: Job }) {
       )}
     </div>
   )
-}
-
-function messageOf(failure: unknown): string {
-  if (failure instanceof Unauthorized) {
-    return 'Your session ended. Sign in again.'
-  }
-  return failure instanceof Error ? failure.message : String(failure)
 }
