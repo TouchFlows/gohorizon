@@ -5,6 +5,9 @@ declare(strict_types=1);
 namespace GoHorizon\Laravel\Inspection;
 
 use GoHorizon\Laravel\Telemetry\Sanitizer;
+use Illuminate\Database\Query\Builder;
+use Illuminate\Queue\Failed\DatabaseFailedJobProvider;
+use Illuminate\Queue\Failed\DatabaseUuidFailedJobProvider;
 use Illuminate\Queue\Failed\FailedJobProviderInterface;
 use InvalidArgumentException;
 
@@ -21,6 +24,16 @@ use InvalidArgumentException;
  * their failure time, then by id, and a page continues after an opaque cursor holding the
  * last record's time and id. Ids are not assumed to be numbers: Laravel's file failer uses
  * the job uuid as the record id, and its database failer uses a row id.
+ *
+ * Laravel's database failers expose their table, so a page can be read with a keyset query
+ * over `failed_at` and the id instead of materialising the whole store. Every other failer
+ * is read through `all()`, which for the file failer is bounded by Laravel's own retention
+ * limit for that file.
+ *
+ * The keyset page is only a seek when the store is indexed in the order it asks for: Laravel's
+ * own failed-jobs migration has no such index, so a store should carry `(failed_at, id)` — or
+ * `(failed_at, uuid)` for the uuid failer (docs/adr/0013, decision 4). Without it the page is
+ * still one bounded read, but the database sorts the table to produce it.
  */
 final class FailedJobLister
 {
@@ -41,6 +54,14 @@ final class FailedJobLister
     {
         $limit = max(1, min(self::MAX_LIMIT, $limit));
         $cursor = $this->decodeCursor($before);
+
+        // A store that can be asked in order is asked for one page and nothing else. A
+        // cursor this store could not have issued (a uuid cursor sent after switching
+        // failers) takes the interface path, where the ordering is defined in PHP.
+        $page = $this->pageInTheStore($limit, $cursor);
+        if ($page !== null) {
+            return $page;
+        }
 
         $rows = [];
         foreach ($this->failer->all() as $record) {
@@ -67,6 +88,99 @@ final class FailedJobLister
             $rows = array_slice($rows, 0, $limit);
             $next = self::encodeCursor($rows[count($rows) - 1]);
         }
+
+        return [
+            'failed_jobs' => array_map(static function (array $row): array {
+                unset($row['at'], $row['payload']);
+
+                return $row;
+            }, $rows),
+            'next_before' => $next,
+        ];
+    }
+
+    /**
+     * Reads the page from a database failer's own table with two keyset conditions, so the
+     * store is asked for at most one record more than the page. Null means this failer has
+     * no table to ask, or its cursor belongs to a different store.
+     *
+     * The two database failers number their records differently: the classic one exposes the
+     * row id, and the uuid one exposes the uuid column as the record id (its `all()` maps it
+     * that way). The tie-breaker column and the exposed id therefore differ, while the
+     * cursor keeps the same shape for both.
+     *
+     * @param  array{at: int, id: string}|null  $cursor
+     * @return array{failed_jobs: list<array<string, mixed>>, next_before: string|null}|null
+     */
+    private function pageInTheStore(int $limit, ?array $cursor): ?array
+    {
+        if ($this->failer instanceof DatabaseUuidFailedJobProvider) {
+            return $this->pageQuery(
+                $this->failer->getTable()->orderByDesc('failed_at')->orderByDesc('uuid'),
+                'uuid',
+                static function (mixed $record): mixed {
+                    // The interface reports the uuid as the record id, so the page does the
+                    // same; the column itself still carries the uuid the actions take.
+                    $record->id = $record->uuid;
+
+                    return $record;
+                },
+                $limit,
+                $cursor,
+            );
+        }
+
+        if ($this->failer instanceof DatabaseFailedJobProvider && ($cursor === null || is_numeric($cursor['id']))) {
+            return $this->pageQuery(
+                $this->failer->getTable()->orderByDesc('failed_at')->orderByDesc('id'),
+                'id',
+                static fn (mixed $record): mixed => $record,
+                $limit,
+                $cursor,
+            );
+        }
+
+        return null;
+    }
+
+    /**
+     * @param  callable(mixed): mixed  $normalise
+     * @param  array{at: int, id: string}|null  $cursor
+     * @return array{failed_jobs: list<array<string, mixed>>, next_before: string|null}
+     */
+    private function pageQuery(Builder $query, string $column, callable $normalise, int $limit, ?array $cursor): array
+    {
+        $query->limit($limit + 1);
+
+        if ($cursor !== null) {
+            // The store wrote failed_at in the application's timezone, which is PHP's default
+            // inside Laravel; formatting the cursor the same way compares like with like.
+            $at = date('Y-m-d H:i:s', $cursor['at']);
+            $query->where(static function (Builder $query) use ($at, $column, $cursor): void {
+                $query->where('failed_at', '<', $at)
+                    ->orWhere(static function (Builder $query) use ($at, $column, $cursor): void {
+                        $query->where('failed_at', '=', $at)->where($column, '<', $cursor['id']);
+                    });
+            });
+        }
+
+        $records = $query->get()->all();
+        $hasMore = count($records) > $limit;
+        if ($hasMore) {
+            $records = array_slice($records, 0, $limit);
+        }
+
+        $rows = [];
+        foreach ($records as $record) {
+            $row = $this->row($normalise($record));
+            if ($row !== null) {
+                $rows[] = $row;
+            }
+        }
+
+        // The cursor names the last record returned here, not the look-ahead one that only
+        // proved another page exists.
+        $next = $hasMore && $rows !== [] ? self::encodeCursor($rows[count($rows) - 1]) : null;
 
         return [
             'failed_jobs' => array_map(static function (array $row): array {

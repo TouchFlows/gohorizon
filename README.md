@@ -57,8 +57,13 @@ Milestones 1 and 2 implemented:
   workers over a failed inspection.
 - Failed jobs: `php artisan gohorizon:failed:list --json` reads the application's own
   failed store through its configured failer, and `GET /api/v1/failed` pages it newest first,
-  so the screen and the retry/delete actions name the same records (docs/adr/0013). The job
-  payload is never returned; `exception` is the redacted first line of the stored trace.
+  so the screen and the retry/delete actions name the same records (docs/adr/0013). A database
+  store is paged with a keyset query on `failed_at` and its id, one page per request; the file
+  failer is read whole but Laravel caps that file at its own configured limit. Laravel's
+  `failed_jobs` table has no index in that order, so a large store should add one —
+  `(failed_at, id)`, or `(failed_at, uuid)` for the `database-uuids` driver — and the page
+  becomes a seek instead of a sort (`docs/adr/0013`). The job payload
+  is never returned; `exception` is the redacted first line of the stored trace.
 - Read-only `GET /api/v1/health`, and `GET /metrics` for a Prometheus scrape of the same
   state: `gohorizon_up`, `gohorizon_lock_held`, telemetry counters by result, queue depth
   by state, and workers by state and crash loops per supervisor.
@@ -144,7 +149,10 @@ attempt history (docs/adr/0013). The command behind it is
 never returned and `exception` is the redacted first line of the stored trace. `limit` defaults
 to 50 and may not exceed 200, `before` is the `next_before` of the previous page and is empty on
 the last page, and either being malformed is a 400. An application that cannot answer is a 503,
-an empty store is `[]`, and any signed-in role may read it.
+an empty store is `[]`, and any signed-in role may read it. Paging a database store is a keyset
+query, so it stays one page per request; give the store an index on `(failed_at, id)` (or
+`(failed_at, uuid)` for `database-uuids`) and the database seeks the page instead of sorting
+the table (`docs/adr/0013`, decision 4).
 
 `GET /metrics` serves the state `/api/v1/health` reports in the Prometheus text format
 (`text/plain; version=0.0.4; charset=utf-8`), without a client library:
