@@ -49,9 +49,10 @@ import { expect, test, type Page, type Route } from '@playwright/test'
 // Sign-in is the one state the whole suite needs rather than one case reaching for it: the API
 // answers 401 without a session cookie, so every case is signed in from `beforeEach` and the
 // one case that starts where an operator starts clears its own cookies, one ends its session
-// under a loaded page to read the drop back to the form, and one reads the audit records a
-// sign-out and a sign-in leave in the service log — the one durable trace of a session action
-// that until now only the Go tests had read. The credential is a password written here that
+// under a loaded page to read the drop back to the form, one signs in as the viewer the
+// configuration also carries to read the refusal a role below operator gets, and one reads the
+// audit records a sign-out and a sign-in leave in the service log — the one durable trace of a
+// session action that until now only the Go tests had read. The credential is a password written here that
 // the binary's own `passwd` hashes in `beforeAll`; no hash and no session key belongs in this
 // file.
 //
@@ -80,6 +81,10 @@ const pollMs = 30_000
 // service starts, and the key that signs the session cookie is an environment variable like
 // the deployment's own; neither a hash nor a key is written into this file.
 const smokeUser = 'smoke'
+// A second user below the operator role the administrative routes require, so the refusal a
+// role gets can be read from the page rather than only from the Go tests. One password is
+// hashed once and serves both.
+const viewerUser = 'viewer'
 const smokePassword = 'smoke-password'
 const sessionCookie = 'gohorizon_session'
 // The double-submit token a mutation has to echo. It is not HttpOnly, because the page reads it
@@ -414,6 +419,28 @@ test.describe('the dashboard against the real binary', () => {
       role: 'operator',
       detail: `supervisor ${pool.id}`,
     })
+  })
+
+  test('a viewer is refused a restart with the service wording', async ({ page, context }) => {
+    // The role gates the call rather than the screen, so a viewer is offered the control and
+    // gets the service's own refusal; the page has to repeat that wording, not invent one. This
+    // case signs in as the viewer instead of using the session the hook put on the context.
+    await context.clearCookies()
+    await page.goto(`${base}/`)
+    await page.getByLabel('Name').fill(viewerUser)
+    await page.getByLabel('Password').fill(smokePassword)
+    await page.getByRole('button', { name: 'Sign in', exact: true }).click()
+    await expect(page.getByRole('heading', { name: 'Overview', exact: true })).toBeVisible()
+
+    const { target } = idlePoolWorker(await readHealth(page, `${base}/#/workers`))
+    const row = page.getByRole('row', { name: new RegExp(target.uuid) })
+    await row.getByRole('button', { name: 'Restart', exact: true }).click()
+
+    // `operator role required` is the wording the route's minimum produces. It arrives in place
+    // of an answer, and the control is offered again because nothing was done to the worker.
+    await expect(row.getByText('operator role required')).toBeVisible()
+    await expect(row.getByText('restart requested')).toHaveCount(0)
+    await expect(row.getByRole('button', { name: 'Restart', exact: true })).toBeEnabled()
   })
 
   test('the overview renders the service, its queues and its telemetry', async ({ page }) => {
@@ -1559,6 +1586,9 @@ server:
       - name: ${smokeUser}
         password_hash: ${JSON.stringify(passwordHash)}
         role: operator
+      - name: ${viewerUser}
+        password_hash: ${JSON.stringify(passwordHash)}
+        role: viewer
 
 storage:
   driver: sqlite
