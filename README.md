@@ -64,6 +64,12 @@ Milestones 1 and 2 implemented:
   `(failed_at, id)`, or `(failed_at, uuid)` for the `database-uuids` driver — and the page
   becomes a seek instead of a sort (`docs/adr/0013`). The job payload
   is never returned; `exception` is the redacted first line of the stored trace.
+- Capabilities: `GET /api/v1/capabilities` publishes what the application said about itself
+  before the workers started — package, Laravel and PHP versions, connections with their
+  drivers and `retry_after`, `pcntl`, the telemetry stream and the lifecycle events — together
+  with an `operations` map saying which actions this deployment can actually offer. The
+  dashboard gates `Retry`, `Delete` and `Restart` on that map, so an application that cannot
+  answer offers no action it could not perform and says why (docs/adr/0014).
 - Read-only `GET /api/v1/health`, and `GET /metrics` for a Prometheus scrape of the same
   state: `gohorizon_up`, `gohorizon_lock_held`, telemetry counters by result, queue depth
   by state, and workers by state and crash loops per supervisor.
@@ -79,9 +85,10 @@ Milestones 1 and 2 implemented:
   `Retry` and `Delete` in the record's detail panel. The two actions go through the failed-job
   endpoints below, echoing the CSRF token the page reads from its own cookie; a worker row's
   `Restart` posts the restart endpoint below and the supervisor recycles the process in its
-  slot, so the job in flight finishes instead of being killed. Without `server.auth.users`
-  there are no administrative routes to call, so the failed screen and the worker rows stay
-  read-only. The Vite bundle under `web/` is embedded in the binary, hashed assets are
+  slot, so the job in flight finishes instead of being killed. Those three controls are also
+  gated on `/api/v1/capabilities`: one the deployment does not advertise is disabled and the
+  screen says why (docs/adr/0014). Without `server.auth.users` there are no administrative
+  routes to call, so the failed screen and the worker rows stay read-only. The Vite bundle under `web/` is embedded in the binary, hashed assets are
   cached forever, `index.html` is not cached, and a client route falls back to it
   (docs/adr/0008).
 - `gohorizon/laravel` package: configuration, job lifecycle telemetry to a Redis Stream,
@@ -155,6 +162,17 @@ an empty store is `[]`, and any signed-in role may read it. Paging a database st
 query, so it stays one page per request; give the store an index on `(failed_at, id)` (or
 `(failed_at, uuid)` for `database-uuids`) and the database seeks the page instead of sorting
 the table (`docs/adr/0013`, decision 4).
+
+`GET /api/v1/capabilities` publishes the descriptor startup read from
+`php artisan gohorizon:capabilities --json`, as `{available, schema, package, package_version,
+laravel, php, application, environment, default_connection, connections: {name: {driver,
+retry_after}}, pcntl, telemetry_stream, events, operations}`. `available` is false when the
+application could not answer or answered a schema this service does not understand; `error`
+then says which, the descriptor fields are omitted, and the answer is still a 200. `operations`
+names what this service can do: `inspect_queues`, `telemetry`, `failed_jobs_list`,
+`failed_job_retry` and `failed_job_delete` follow `available` because they run the package's
+commands, while `restart_workers` is the supervisor's own action and stays true. Any signed-in
+role may read it; it is read-only and not cached (docs/adr/0014).
 
 `GET /metrics` serves the state `/api/v1/health` reports in the Prometheus text format
 (`text/plain; version=0.0.4; charset=utf-8`), without a client library:

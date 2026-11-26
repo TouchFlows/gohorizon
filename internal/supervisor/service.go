@@ -102,6 +102,11 @@ type Service struct {
 	fenceAfter time.Duration
 	started    time.Time
 	owner      string
+	// probed is the capabilities answer startup read, and probeErr says why it could not
+	// answer when it did not. It is kept, not re-read: the endpoint has to publish the
+	// same facts the preflight acted on, and probing runs PHP (docs/adr/0014).
+	probed   adapter.Capabilities
+	probeErr error
 
 	mu         sync.Mutex
 	lockHeld   bool
@@ -152,6 +157,8 @@ func New(ctx context.Context, cfg *config.Config, log *slog.Logger) (*Service, e
 		owner:         fmt.Sprintf("%s-%d", version.Version, time.Now().UnixNano()),
 		inspector:     probe,
 		failer:        probe,
+		probed:        caps,
+		probeErr:      probeErr,
 		queues:        configuredQueues(app),
 		queueInterval: defaultQueueInterval,
 		pruneInterval: defaultPruneInterval,
@@ -281,6 +288,13 @@ func (s *Service) RestartWorker(uuid string) error {
 		}
 	}
 	return fmt.Errorf("no running worker with id %s", uuid)
+}
+
+// Capabilities returns the application descriptor startup read, or the error that stopped it
+// answering. It is the answer the launch preflight used, so the capabilities endpoint and the
+// decisions taken from it cannot disagree (docs/adr/0014).
+func (s *Service) Capabilities() (adapter.Capabilities, error) {
+	return s.probed, s.probeErr
 }
 
 // FailedJobs lists the application's own failed jobs for the dashboard. It is a read through

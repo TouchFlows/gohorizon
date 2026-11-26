@@ -66,6 +66,83 @@ export interface Worker {
   crash_looping: boolean
 }
 
+// The JSON /api/v1/capabilities returns: what the application said about itself at startup, and
+// which operations this service can offer given that answer. `available` is false when the
+// application could not answer or answered a schema this service does not understand; `error`
+// then says which, and `operations` still answers what works (restarting a worker is this
+// service's own action, so it survives an application that cannot answer at all).
+export interface CapabilityOperations {
+  inspect_queues: boolean
+  telemetry: boolean
+  failed_jobs_list: boolean
+  failed_job_retry: boolean
+  failed_job_delete: boolean
+  restart_workers: boolean
+}
+
+// One queue connection as the descriptor reports it. retry_after is null when the driver has
+// no reservation window, which is not a zero-second window.
+export interface CapabilityConnection {
+  driver?: string
+  retry_after: number | null
+}
+
+export interface Capabilities {
+  available: boolean
+  schema?: number
+  package?: string
+  package_version?: string
+  laravel?: string
+  php?: string
+  application?: string
+  environment?: string
+  default_connection?: string
+  connections?: Record<string, CapabilityConnection>
+  pcntl?: boolean
+  telemetry_stream?: string
+  events?: string[]
+  operations: CapabilityOperations
+  error?: string
+}
+
+export async function fetchCapabilities(signal?: AbortSignal): Promise<Capabilities> {
+  const response = await fetch('/api/v1/capabilities', {
+    signal,
+    headers: { Accept: 'application/json' },
+    cache: 'no-store',
+  })
+  if (response.status === 401) {
+    throw new Unauthorized()
+  }
+  if (response.status !== 200) {
+    throw new Error(`/api/v1/capabilities returned ${response.status}`)
+  }
+  const payload: unknown = await response.json()
+  if (!isCapabilities(payload)) {
+    throw new Error('/api/v1/capabilities did not return a capability descriptor')
+  }
+  return payload
+}
+
+// isCapabilities checks the fields the controls are gated on. Every operation is required: a
+// missing one would read as "not supported" and hide a control the service does offer.
+export function isCapabilities(value: unknown): value is Capabilities {
+  if (typeof value !== 'object' || value === null) {
+    return false
+  }
+  const capabilities = value as Partial<Capabilities>
+  if (typeof capabilities.available !== 'boolean') {
+    return false
+  }
+  if (typeof capabilities.operations !== 'object' || capabilities.operations === null) {
+    return false
+  }
+  const operations = capabilities.operations as unknown as Record<string, unknown>
+  return (
+    ['inspect_queues', 'telemetry', 'failed_jobs_list', 'failed_job_retry', 'failed_job_delete', 'restart_workers'] as const
+  ).every((name) => typeof operations[name] === 'boolean')
+}
+
 // Unauthorized is the 401 the API answers when the request carried no session, or one that
 // has ended: a sign-out, an expiry, or a user the configuration no longer has. It is not a
 // failed read, so it is its own error: the shell can tell it apart from a blip and ask for a

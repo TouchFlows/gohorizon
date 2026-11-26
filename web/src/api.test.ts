@@ -1,5 +1,13 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { deleteFailedJob, isFailedJobPage, isHealthReport, isHistory, isJobPage, retryFailedJob } from './api'
+import {
+  deleteFailedJob,
+  isCapabilities,
+  isFailedJobPage,
+  isHealthReport,
+  isHistory,
+  isJobPage,
+  retryFailedJob,
+} from './api'
 
 const report = {
   status: 'ok',
@@ -161,6 +169,31 @@ describe('failed job actions', () => {
     failedJobAnswer(202, { job: 'e0a1c2d3-4b5f-4a6b-8c7d-9e0f1a2b3c4d', queue: 'default' })
 
     await expect(retryFailedJob('e0a1c2d3-4b5f-4a6b-8c7d-9e0f1a2b3c4d')).resolves.toBe('default')
+  })
+})
+
+describe('isCapabilities', () => {
+  const operations = {
+    inspect_queues: true,
+    telemetry: true,
+    failed_jobs_list: true,
+    failed_job_retry: false,
+    failed_job_delete: false,
+    restart_workers: true,
+  }
+
+  it('accepts a descriptor that says which operations work', () => {
+    expect(isCapabilities({ available: false, operations, error: 'the package is not installed' })).toBe(true)
+  })
+
+  it('rejects a descriptor missing an operation the controls are gated on', () => {
+    const withoutRestart: Record<string, unknown> = { ...operations }
+    delete withoutRestart.restart_workers
+
+    expect(isCapabilities({ available: true, operations: withoutRestart })).toBe(false)
+    expect(isCapabilities({ available: true, operations: { ...operations, failed_job_retry: 'no' } })).toBe(false)
+    expect(isCapabilities({ operations })).toBe(false)
+    expect(isCapabilities(null)).toBe(false)
   })
 })
 

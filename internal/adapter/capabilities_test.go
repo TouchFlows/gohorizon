@@ -42,7 +42,7 @@ func capabilitiesJSON(retryAfter string, pcntl bool) string {
 		`"sync":{"driver":"sync","queue":"default","retry_after":null,"block_for":null,"after_commit":false,"has_password":false}}},` +
 		`"runtime":{"pcntl":` + map[bool]string{true: "true", false: "false"}[pcntl] + `,"posix":true,"sapi":"cli"},` +
 		`"telemetry":{"enabled":true,"stream":"gohorizon:production:production:events","batch_size":100,"buffer_size":1000},` +
-		`"operations":["inspect_queues","telemetry","capabilities"]}`
+		`"events":["Illuminate\\Queue\\Events\\JobProcessed","Illuminate\\Queue\\Events\\JobFailed"]}`
 }
 
 func TestProbeDecodesCapabilities(t *testing.T) {
@@ -60,8 +60,8 @@ func TestProbeDecodesCapabilities(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Capabilities: %v", err)
 			}
-			if caps.Schema != schemaVersion {
-				t.Errorf("schema = %d, want %d", caps.Schema, schemaVersion)
+			if caps.Schema != SchemaVersion {
+				t.Errorf("schema = %d, want %d", caps.Schema, SchemaVersion)
 			}
 			if !caps.Runtime.PCNTL {
 				t.Error("pcntl = false, want true")
@@ -72,7 +72,30 @@ func TestProbeDecodesCapabilities(t *testing.T) {
 			if got := caps.Queue.Connections["sync"].RetryAfter; got != 0 {
 				t.Errorf("sync retry_after = %d, want 0 for null", got)
 			}
+			// The endpoint publishes these, so the probe has to keep what the application
+			// said rather than only the two fields the preflight reads.
+			if caps.Package != "gohorizon/laravel" || caps.PackageVersion != "0.1.0" {
+				t.Errorf("package = %q %q, want the application's package and version", caps.Package, caps.PackageVersion)
+			}
+			if caps.Application != "production" || caps.Environment != "production" || caps.Laravel != "13.0.0" {
+				t.Errorf("identifiers = %q %q laravel %q, want the application's own", caps.Application, caps.Environment, caps.Laravel)
+			}
+			if got := caps.Queue.Connections["redis"].Driver; got != "redis" {
+				t.Errorf("redis driver = %q, want redis", got)
+			}
+			if len(caps.Events) != 2 {
+				t.Errorf("events = %v, want the two the payload named", caps.Events)
+			}
 		})
+	}
+}
+
+func TestSupportedRefusesAnUnknownSchema(t *testing.T) {
+	if !decoded(t, capabilitiesJSON("90", true)).Supported() {
+		t.Error("a schema 1 payload is not supported")
+	}
+	if decoded(t, `{"schema":2}`).Supported() {
+		t.Error("a schema 2 payload is reported as supported")
 	}
 }
 

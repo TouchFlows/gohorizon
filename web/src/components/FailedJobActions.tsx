@@ -24,9 +24,17 @@ interface Notice {
 export default function FailedJobActions({
   job,
   onStoreChanged,
+  // The application's descriptor says which of the two it supports (docs/adr/0014). An action
+  // it does not support is disabled rather than hidden, so the panel still names what exists.
+  canRetry = true,
+  canDelete = true,
+  reason = '',
 }: {
   job: FailedJob
   onStoreChanged: () => void
+  canRetry?: boolean
+  canDelete?: boolean
+  reason?: string
 }) {
   const [busy, setBusy] = useState<Verb | null>(null)
   const [notice, setNotice] = useState<Notice | null>(null)
@@ -76,6 +84,7 @@ export default function FailedJobActions({
         <button
           type="button"
           className="chip chip--danger"
+          disabled={!canDelete}
           onClick={() => void act('delete')}
         >
           Delete now
@@ -92,7 +101,8 @@ export default function FailedJobActions({
       <button
         type="button"
         className="chip"
-        disabled={busy !== null || settled}
+        disabled={busy !== null || settled || !canRetry}
+        title={canRetry ? undefined : 'the application does not support this action'}
         onClick={() => void act('retry')}
       >
         {busy === 'retry' ? 'Retrying…' : 'Retry'}
@@ -100,11 +110,13 @@ export default function FailedJobActions({
       <button
         type="button"
         className="chip chip--danger"
-        disabled={busy !== null || settled}
+        disabled={busy !== null || settled || !canDelete}
+        title={canDelete ? undefined : 'the application does not support this action'}
         onClick={() => setConfirming(true)}
       >
         {busy === 'delete' ? 'Deleting…' : 'Delete'}
       </button>
+      {reason !== '' && <span className="muted">{reason}</span>}
       {notice !== null && (
         <span
           className={notice.failed ? 'notice notice--bad' : 'notice'}

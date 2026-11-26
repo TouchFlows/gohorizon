@@ -1,18 +1,23 @@
-import type { HealthReport } from '../api'
+import type { Capabilities, HealthReport } from '../api'
+import { workerControls } from '../capabilities'
 import { buildWorkers, countNoun } from '../view'
 import RestartWorker from '../components/RestartWorker'
 
 // canAct is whether this deployment has administrative routes at all: a service started
-// without users mounts none, so its rows stay read-only rather than offering a control that
-// could not answer.
+// without users mounts none. capabilities is what the application supports, which decides
+// whether a restart is offered at all (docs/adr/0014); while it is still being read, the
+// session alone decides.
 export default function Workers({
   report,
   canAct = false,
+  capabilities = null,
 }: {
   report: HealthReport
   canAct?: boolean
+  capabilities?: Capabilities | null
 }) {
   const supervisors = buildWorkers(report)
+  const controls = workerControls(capabilities, canAct)
 
   return (
     <>
@@ -42,7 +47,7 @@ export default function Workers({
                   <th>State</th>
                   <th className="num">Restarts</th>
                   <th>Last exit</th>
-                  {canAct && <th>Action</th>}
+                  {controls.restart && <th>Action</th>}
                 </tr>
               </thead>
               <tbody>
@@ -61,7 +66,7 @@ export default function Workers({
                       {worker.lastExit}
                       {worker.reason !== '' && <span className="muted"> {worker.reason}</span>}
                     </td>
-                    {canAct && (
+                    {controls.restart && (
                       <td className="workers__action">
                         <RestartWorker uuid={worker.uuid} />
                       </td>
@@ -74,12 +79,7 @@ export default function Workers({
         </section>
       ))}
 
-      {!canAct && (
-        <p className="muted">
-          Read-only: this service was started without users, so it has no administrative route to
-          restart a worker.
-        </p>
-      )}
+      {!controls.restart && <p className="muted">{controls.reason}</p>}
     </>
   )
 }

@@ -26,6 +26,10 @@ import (
 // history and job history, and the actions the API takes on the pool and on its failed jobs.
 type Provider interface {
 	Report() health.Report
+	// Capabilities is what the application said about itself at startup, and why it could not
+	// answer when it did not. It is published read-only so a client can gate what it offers
+	// (docs/adr/0014).
+	Capabilities() (adapter.Capabilities, error)
 	Buckets(ctx context.Context, resolution metrics.Resolution, queue string, from, to time.Time) ([]metrics.Bucket, error)
 	Jobs(ctx context.Context, query metrics.JobQuery) ([]metrics.Job, error)
 	Job(ctx context.Context, jobID string) (metrics.Job, error)
@@ -146,6 +150,10 @@ func NewRouter(provider Provider, log *slog.Logger, opts ...Option) http.Handler
 			// The failed store is read through the application, not from the history above,
 			// so the list and the two actions always name the same records.
 			r.Get("/failed", failedJobList(provider, log))
+			// What the application supports, read-only and unprivileged: it decides which
+			// controls a client may draw, so every signed-in role has to be able to ask
+			// (docs/adr/0014).
+			r.Get("/capabilities", capabilities(provider))
 		})
 	})
 

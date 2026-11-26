@@ -1,5 +1,7 @@
 import { useMemo, useState } from 'react'
-import type { FailedJob } from '../api'
+import type { Capabilities, FailedJob } from '../api'
+import { failedJobControls } from '../capabilities'
+import type { FailedJobControls } from '../capabilities'
 import { buildFailedJobsQuery, failedAtText, failedExceptionText, failedJobClass } from '../failed'
 import { firstTrail, trailCursor, trailNewer, trailOlder } from '../jobs'
 import type { Trail } from '../jobs'
@@ -7,9 +9,17 @@ import { useFailedJobs } from '../useFailedJobs'
 import FailedJobActions from '../components/FailedJobActions'
 
 // canAct is whether this deployment has administrative routes at all: a service started
-// without users mounts none, so its failed screen stays read-only rather than offering
-// controls that could not answer.
-export default function Failed({ canAct }: { canAct: boolean }) {
+// without users mounts none. capabilities is what the application supports, which decides
+// whether the two actions are offered; while it is still being read, the session alone
+// decides (docs/adr/0014).
+export default function Failed({
+  canAct,
+  capabilities = null,
+}: {
+  canAct: boolean
+  capabilities?: Capabilities | null
+}) {
+  const controls = failedJobControls(capabilities, canAct)
   const [trail, setTrail] = useState<Trail>(firstTrail)
   const [selected, setSelected] = useState<FailedJob | null>(null)
   // A retry or a delete changes the store, not the question the page asks, so the page is
@@ -107,17 +117,12 @@ export default function Failed({ canAct }: { canAct: boolean }) {
         <FailedJobDetail
           job={selected}
           onClose={() => setSelected(null)}
-          actions={canAct}
+          controls={controls}
           onStoreChanged={() => setRevision((current) => current + 1)}
         />
       )}
 
-      {!canAct && (
-        <p className="muted">
-          Read-only: this service was started without users, so it has no administrative routes to
-          retry or delete a failed job.
-        </p>
-      )}
+      {!controls.retry && !controls.delete && <p className="muted">{controls.reason}</p>}
     </>
   )
 }
@@ -128,12 +133,12 @@ export default function Failed({ canAct }: { canAct: boolean }) {
 function FailedJobDetail({
   job,
   onClose,
-  actions,
+  controls,
   onStoreChanged,
 }: {
   job: FailedJob
   onClose: () => void
-  actions: boolean
+  controls: FailedJobControls
   onStoreChanged: () => void
 }) {
   return (
@@ -166,7 +171,7 @@ function FailedJobDetail({
         </div>
       )}
 
-      {actions &&
+      {(controls.retry || controls.delete) &&
         (job.uuid === '' ? (
           <p className="muted">
             This failed record carries no uuid the application knows, so there is nothing to retry
@@ -175,7 +180,14 @@ function FailedJobDetail({
         ) : (
           // Keyed by the record, so opening another row does not inherit the answer the
           // previous one got.
-          <FailedJobActions key={job.id} job={job} onStoreChanged={onStoreChanged} />
+          <FailedJobActions
+            key={job.id}
+            job={job}
+            canRetry={controls.retry}
+            canDelete={controls.delete}
+            reason={controls.reason}
+            onStoreChanged={onStoreChanged}
+          />
         ))}
     </section>
   )

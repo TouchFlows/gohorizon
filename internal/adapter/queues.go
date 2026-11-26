@@ -13,7 +13,12 @@ import (
 
 // inspectTimeout bounds one inspection. The command asks the application's queue
 // contract for counts, so a slow answer means the application is unhealthy.
-const inspectTimeout = 10 * time.Second
+const (
+	inspectTimeout = 10 * time.Second
+	// inspectionSchema is the payload version `gohorizon:inspect --json` prints. It is its
+	// own version, independent of the capabilities and failed-list payloads.
+	inspectionSchema = 1
+)
 
 // QueueDepth is one queue as `gohorizon:inspect --json` reports it. A driver that cannot
 // answer a count omits it, so each count is a pointer: nil is "not reported", which is
@@ -82,9 +87,9 @@ func decodeInspection(out []byte) (Inspection, error) {
 	if err := json.Unmarshal([]byte(payloadLine(text)), &inspection); err != nil {
 		return Inspection{}, fmt.Errorf("decode gohorizon:inspect output: %w", err)
 	}
-	if inspection.Schema != schemaVersion {
+	if inspection.Schema != inspectionSchema {
 		return Inspection{}, fmt.Errorf("gohorizon:inspect reports schema %d; this GoHorizon understands schema %d",
-			inspection.Schema, schemaVersion)
+			inspection.Schema, inspectionSchema)
 	}
 	if len(inspection.Queues) == 0 {
 		return Inspection{}, errors.New("gohorizon:inspect reported no queues")

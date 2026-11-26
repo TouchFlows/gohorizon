@@ -51,9 +51,16 @@ type stubProvider struct {
 	failedNext  string
 	failedErr   error
 	failedQuery adapter.FailedJobQuery
+
+	// The application descriptor startup read, and why it could not answer when it did
+	// not.
+	caps    adapter.Capabilities
+	capsErr error
 }
 
 func (s *stubProvider) Report() health.Report { return s.report }
+
+func (s *stubProvider) Capabilities() (adapter.Capabilities, error) { return s.caps, s.capsErr }
 
 func (s *stubProvider) Buckets(_ context.Context, resolution metrics.Resolution, queue string, from, to time.Time) ([]metrics.Bucket, error) {
 	s.resolution, s.queue, s.from, s.to = resolution, queue, from, to

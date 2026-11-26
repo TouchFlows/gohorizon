@@ -19,7 +19,9 @@ import (
 )
 
 const (
-	schemaVersion = 1
+	// SchemaVersion is the capabilities schema this GoHorizon understands; a payload that
+	// names another is refused rather than read with fields that may not mean the same thing.
+	SchemaVersion = 1
 	// probeTimeout bounds the capabilities call. The command only reads
 	// configuration, so a slow answer means something is wrong with the application.
 	probeTimeout = 20 * time.Second
@@ -48,23 +50,45 @@ func (v *retryAfterValue) UnmarshalJSON(b []byte) error {
 	return nil
 }
 
-// Connection is one queue.connections entry. Only the reservation window is acted
-// on; the rest of the entry is ignored.
+// Connection is one queue.connections entry: the driver it names, and the reservation
+// window the startup preflight compares a worker's timeout against. The rest of the entry
+// is ignored.
 type Connection struct {
+	Driver     string          `json:"driver"`
 	RetryAfter retryAfterValue `json:"retry_after"`
 }
 
-// Capabilities is the part of `php artisan gohorizon:capabilities --json` that
-// GoHorizon acts on. Unknown fields are ignored.
+// Capabilities is `php artisan gohorizon:capabilities --json`: the identifiers the
+// application reports about itself, the connections GoHorizon acts on, and the runtime and
+// event facts its preflight reads. Unknown fields are ignored, so a package that adds one
+// does not break an older service (docs/adr/0014).
 type Capabilities struct {
-	Schema int `json:"schema"`
-	Queue  struct {
-		Connections map[string]Connection `json:"connections"`
+	Schema         int    `json:"schema"`
+	Package        string `json:"package"`
+	PackageVersion string `json:"package_version"`
+	Laravel        string `json:"laravel"`
+	PHP            string `json:"php"`
+	Application    string `json:"application"`
+	Environment    string `json:"environment"`
+	Queue          struct {
+		DefaultConnection string                `json:"default_connection"`
+		Connections       map[string]Connection `json:"connections"`
 	} `json:"queue"`
 	Runtime struct {
 		PCNTL bool `json:"pcntl"`
 	} `json:"runtime"`
+	Telemetry struct {
+		Stream string `json:"stream"`
+	} `json:"telemetry"`
+	// Events are the Laravel lifecycle events the application's version has, which is how a
+	// newer Laravel with a renamed event is visible instead of silently unobserved.
+	Events []string `json:"events"`
 }
+
+// Supported reports whether this GoHorizon understands the payload at all: a schema it does
+// not know is as unusable as one that never arrived, and the caller must not read the
+// fields it thinks it recognises as if they were meaningful.
+func (c Capabilities) Supported() bool { return c.Schema == SchemaVersion }
 
 // Probe executes the capabilities command in the application directory.
 type Probe struct {
@@ -147,9 +171,9 @@ func Check(caps *Capabilities, app *config.Application) error {
 	if caps == nil {
 		return errors.New("capabilities are unavailable")
 	}
-	if caps.Schema != schemaVersion {
+	if caps.Schema != SchemaVersion {
 		return fmt.Errorf("gohorizon/laravel reports capabilities schema %d; this GoHorizon understands schema %d",
-			caps.Schema, schemaVersion)
+			caps.Schema, SchemaVersion)
 	}
 
 	var problems []string

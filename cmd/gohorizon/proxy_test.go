@@ -24,6 +24,10 @@ type idleProvider struct{}
 
 func (idleProvider) Report() health.Report { return health.Report{Status: "ok"} }
 
+func (idleProvider) Capabilities() (adapter.Capabilities, error) {
+	return adapter.Capabilities{Schema: adapter.SchemaVersion}, nil
+}
+
 func (idleProvider) Buckets(context.Context, metrics.Resolution, string, time.Time, time.Time) ([]metrics.Bucket, error) {
 	return nil, nil
 }

@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import type { Route } from './routes'
 import { parseRoute, routeHref, routeLabel } from './routes'
 import { useHealth } from './useHealth'
+import { useCapabilities } from './useCapabilities'
 import { useSession } from './useSession'
 import SignIn from './components/SignIn'
 import Overview from './pages/Overview'
@@ -64,6 +65,9 @@ interface DashboardProps {
 
 function Dashboard({ route, user, onSignOut, onExpired }: DashboardProps) {
   const health = useHealth(onExpired)
+  // What the application supports decides which administrative controls are drawn; the
+  // session decides whether there are any at all (docs/adr/0014).
+  const capabilities = useCapabilities(onExpired)
   const report = health.report
   const warn = report !== null && (health.degraded || report.status !== 'ok')
 
@@ -105,11 +109,11 @@ function Dashboard({ route, user, onSignOut, onExpired }: DashboardProps) {
         ) : route === 'queues' ? (
           <Queues report={report} />
         ) : route === 'workers' ? (
-          <Workers report={report} canAct={user !== null} />
+          <Workers report={report} canAct={user !== null} capabilities={capabilities} />
         ) : route === 'jobs' ? (
           <Jobs report={report} />
         ) : route === 'failed' ? (
-          <Failed canAct={user !== null} />
+          <Failed canAct={user !== null} capabilities={capabilities} />
         ) : route === 'metrics' ? (
           <Metrics report={report} />
         ) : (
