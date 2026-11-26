@@ -30,6 +30,17 @@ export function failedJobClass(job: FailedJob): string {
   return job.job === '' ? 'unknown class' : job.job
 }
 
+// failedActionNotice is what the panel says after a retry or a delete. The queue is detail
+// history may not have — it is pruned, and a deployment without it names none — so an empty
+// one is dropped from the sentence rather than printed as "queued again on ".
+export function failedActionNotice(action: 'retry' | 'delete', queue: string): string {
+  const done = action === 'retry' ? 'queued again' : 'deleted'
+  if (queue === '') {
+    return done
+  }
+  return action === 'retry' ? `${done} on ${queue}` : `${done} from ${queue}`
+}
+
 // failedExceptionText is the one sanitised line the service sends. A record stored without an
 // exception says so instead of leaving the cell empty.
 export function failedExceptionText(job: FailedJob): string {

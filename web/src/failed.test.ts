@@ -1,6 +1,12 @@
 import { describe, expect, it } from 'vitest'
 import type { FailedJob } from './api'
-import { buildFailedJobsQuery, failedAtText, failedExceptionText, failedJobClass } from './failed'
+import {
+  buildFailedJobsQuery,
+  failedActionNotice,
+  failedAtText,
+  failedExceptionText,
+  failedJobClass,
+} from './failed'
 
 function record(overrides: Partial<FailedJob> = {}): FailedJob {
   return {
@@ -46,5 +52,22 @@ describe('failed rows', () => {
   it('shows the one sanitised exception line, and says when there is none', () => {
     expect(failedExceptionText(record())).toBe('RuntimeException: boom')
     expect(failedExceptionText(record({ exception: '' }))).toBe('no exception recorded')
+  })
+})
+
+describe('failedActionNotice', () => {
+  // History is pruned and can be disabled, so the answer carries no queue name in those
+  // cases; the sentence must still read as a finished action, without a dangling preposition.
+  it('says a retry happened without naming an unknown queue', () => {
+    expect(failedActionNotice('retry', '')).toBe('queued again')
+  })
+
+  it('says a delete happened without naming an unknown queue', () => {
+    expect(failedActionNotice('delete', '')).toBe('deleted')
+  })
+
+  it('names the queue when the answer carried one', () => {
+    expect(failedActionNotice('retry', 'default')).toBe('queued again on default')
+    expect(failedActionNotice('delete', 'default')).toBe('deleted from default')
   })
 })
