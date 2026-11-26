@@ -360,16 +360,8 @@ test.describe('the dashboard against the real binary', () => {
 
   test('an operator restarts a worker and the restart is recorded', async ({ page }) => {
     // The target is a worker on the idle pool rather than the one the smoke's jobs run
-    // through, so the restart interrupts nothing and the pool still has its other worker while
-    // the stopped one is replaced.
-    const report = await readHealth(page, `${base}/#/workers`)
-    const pool = (report.supervisors ?? []).find((supervisor) =>
-      (supervisor.workers ?? []).some((worker) => worker.queue === extraQueue),
-    )
-    const target = (pool?.workers ?? []).find((worker) => worker.queue === extraQueue)
-    if (pool === undefined || target === undefined) {
-      throw new Error(`the report lists no worker on the ${extraQueue} queue`)
-    }
+    // through, so the restart interrupts nothing.
+    const { pool, target } = idlePoolWorker(await readHealth(page, `${base}/#/workers`))
 
     const token = await csrfToken(page)
     const before = auditLines().length
@@ -382,28 +374,12 @@ test.describe('the dashboard against the real binary', () => {
     expect(response.status()).toBe(202)
     expect(await response.json()).toEqual({ worker: target.uuid, supervisor: pool.id })
 
-    // It is stopped gracefully and its replacement takes the same slot, so the pool returns to
-    // its size with a process the operator did not kill. A restart is a recycle: the worker
-    // keeps its uuid, which names the slot's process, and the pid is what changes.
-    await waitFor('replace the restarted worker', async () => {
-      const next = (await getJSON(`${base}/api/v1/health`)) as HealthReport
-      const supervisor = (next.supervisors ?? []).find((candidate) => candidate.id === pool.id)
-      const workers = (supervisor?.workers ?? []).filter((worker) => worker.queue === extraQueue)
-      const recycled = workers.find((worker) => worker.uuid === target.uuid)
-      return (
-        workers.length === pool.desired &&
-        recycled !== undefined &&
-        recycled.pid !== target.pid &&
-        workers.every((worker) => worker.state === 'running')
-      )
-    })
+    await waitFor('replace the restarted worker', () => recycled(pool, target))
 
     // The record is the one durable trace the action leaves, read from the service log where an
     // operator would find it.
-    await waitFor('write the restart audit record', async () => auditLines().length >= before + 1)
-    const record = auditLines()
-      .slice(before)
-      .find((line) => line.action === 'worker-restart')
+    await waitFor('write the restart audit record', async () => restartRecord(before) !== undefined)
+    const record = restartRecord(before)
     expect(record).toMatchObject({
       action: 'worker-restart',
       outcome: 'allowed',
@@ -415,16 +391,7 @@ test.describe('the dashboard against the real binary', () => {
   })
 
   test('an operator restarts a worker from its row', async ({ page }) => {
-    // The row is one of the idle pool's, so pressing its button interrupts nothing: the pool
-    // keeps its other worker while this one is stopped and replaced.
-    const report = await readHealth(page, `${base}/#/workers`)
-    const pool = (report.supervisors ?? []).find((supervisor) =>
-      (supervisor.workers ?? []).some((worker) => worker.queue === extraQueue),
-    )
-    const target = (pool?.workers ?? []).find((worker) => worker.queue === extraQueue)
-    if (pool === undefined || target === undefined) {
-      throw new Error(`the report lists no worker on the ${extraQueue} queue`)
-    }
+    const { pool, target } = idlePoolWorker(await readHealth(page, `${base}/#/workers`))
 
     // The row is found by the uuid it prints and the control by its label, so neither needs a
     // hook: a role and a name already pick them out.
@@ -435,28 +402,12 @@ test.describe('the dashboard against the real binary', () => {
     await row.getByRole('button', { name: 'Restart', exact: true }).click()
     await expect(row.getByText('restart requested')).toBeVisible()
 
-    // The supervisor stops the worker gracefully and starts its replacement in the same slot,
-    // so the uuid stays — it names the slot — and the pid is what changes.
-    await waitFor('replace the restarted worker', async () => {
-      const next = (await getJSON(`${base}/api/v1/health`)) as HealthReport
-      const supervisor = (next.supervisors ?? []).find((candidate) => candidate.id === pool.id)
-      const workers = (supervisor?.workers ?? []).filter((worker) => worker.queue === extraQueue)
-      const recycled = workers.find((worker) => worker.uuid === target.uuid)
-      return (
-        workers.length === pool.desired &&
-        recycled !== undefined &&
-        recycled.pid !== target.pid &&
-        workers.every((worker) => worker.state === 'running')
-      )
-    })
+    await waitFor('replace the restarted worker', () => recycled(pool, target))
 
     // The record is the one durable trace the button leaves, written by the service the page
     // asked rather than by this file.
-    await waitFor('write the restart audit record', async () => auditLines().length >= before + 1)
-    const record = auditLines()
-      .slice(before)
-      .find((line) => line.action === 'worker-restart')
-    expect(record).toMatchObject({
+    await waitFor('write the restart audit record', async () => restartRecord(before) !== undefined)
+    expect(restartRecord(before)).toMatchObject({
       action: 'worker-restart',
       outcome: 'allowed',
       user: smokeUser,
@@ -1855,6 +1806,44 @@ async function readHealth(page: Page, url: string): Promise<HealthReport> {
     page.goto(url),
   ])
   return (await response.json()) as HealthReport
+}
+
+// idlePoolWorker picks the pool the smoke's jobs do not run through, and one of its workers: a
+// restart there interrupts nothing, because the pool keeps its other worker while this one is
+// stopped and replaced.
+function idlePoolWorker(report: HealthReport): { pool: SupervisorReport; target: WorkerReport } {
+  const pool = (report.supervisors ?? []).find((supervisor) =>
+    (supervisor.workers ?? []).some((worker) => worker.queue === extraQueue),
+  )
+  const target = (pool?.workers ?? []).find((worker) => worker.queue === extraQueue)
+  if (pool === undefined || target === undefined) {
+    throw new Error(`the report lists no worker on the ${extraQueue} queue`)
+  }
+  return { pool, target }
+}
+
+// recycled reports whether the pool is whole again with the restarted slot running on a new
+// pid. A restart is a recycle: the worker keeps its uuid, which names the slot, and the pid is
+// what changes.
+async function recycled(pool: SupervisorReport, target: WorkerReport): Promise<boolean> {
+  const next = (await getJSON(`${base}/api/v1/health`)) as HealthReport
+  const supervisor = (next.supervisors ?? []).find((candidate) => candidate.id === pool.id)
+  const workers = (supervisor?.workers ?? []).filter((worker) => worker.queue === target.queue)
+  const slot = workers.find((worker) => worker.uuid === target.uuid)
+  return (
+    workers.length === pool.desired &&
+    slot !== undefined &&
+    slot.pid !== target.pid &&
+    workers.every((worker) => worker.state === 'running')
+  )
+}
+
+// restartRecord is the restart audit record written since `since`, which is the one durable
+// trace the action leaves.
+function restartRecord(since: number): AuditRecord | undefined {
+  return auditLines()
+    .slice(since)
+    .find((line) => line.action === 'worker-restart')
 }
 
 // readJobs opens the jobs screen and returns the page it was given, because the response the
