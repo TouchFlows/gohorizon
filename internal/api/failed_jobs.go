@@ -1,6 +1,7 @@
 package api
 
 import (
+	"errors"
 	"log/slog"
 	"net/http"
 	"strconv"
@@ -37,13 +38,19 @@ func failedJobList(provider Provider, log *slog.Logger) http.HandlerFunc {
 		}
 
 		before := strings.TrimSpace(query.Get("before"))
-		if before != "" && !digitsOnly(before) {
+		if before != "" && !cursorShaped(before) {
 			writeError(w, http.StatusBadRequest, "before must be the next_before cursor of a previous page")
 			return
 		}
 
 		page, err := provider.FailedJobs(r.Context(), adapter.FailedJobQuery{Limit: limit, Before: before})
 		if err != nil {
+			if errors.Is(err, adapter.ErrInvalidFailedJobCursor) {
+				// The cursor is one this service never issued: the caller's mistake, and not
+				// an application that could not answer.
+				writeError(w, http.StatusBadRequest, "before must be the next_before cursor of a previous page")
+				return
+			}
 			// The application is the only place that knows its failed store, so a command
 			// that could not run is the service being unavailable, not an empty list.
 			log.Error("read failed jobs", "error", err)
@@ -58,14 +65,17 @@ func failedJobList(provider Provider, log *slog.Logger) http.HandlerFunc {
 	}
 }
 
-// digitsOnly reports whether value is one or more decimal digits. A cursor becomes one
-// argument of the application's command, so nothing else may be sent as one.
-func digitsOnly(value string) bool {
+// cursorShaped reports whether value could be one of the command's base64url cursors. Whether
+// it decodes is the command's answer; this only keeps whitespace and separators off the
+// application's command line.
+func cursorShaped(value string) bool {
 	if value == "" {
 		return false
 	}
 	for _, r := range value {
-		if r < '0' || r > '9' {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '-', r == '_':
+		default:
 			return false
 		}
 	}

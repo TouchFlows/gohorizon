@@ -1,6 +1,5 @@
 import { useState } from 'react'
 import { AdminActionError, deleteFailedJob, retryFailedJob } from '../api'
-import type { Job } from '../api'
 import { mutationMessage } from '../view'
 
 type Verb = 'retry' | 'delete'
@@ -13,7 +12,7 @@ interface Notice {
 // FailedJobActions is the two controls the failed screen offers for one attempt, and the answer
 // to whichever was pressed. Both go through the service's own endpoints, which carry the CSRF
 // token from the cookie in the header and ask the application to act (docs/adr/0012).
-export default function FailedJobActions({ job }: { job: Job }) {
+export default function FailedJobActions({ job }: { job: { id: string; uuid: string } }) {
   const [busy, setBusy] = useState<Verb | null>(null)
   const [notice, setNotice] = useState<Notice | null>(null)
   // Whether the application still stores this failed record: a retry pushes it back and a

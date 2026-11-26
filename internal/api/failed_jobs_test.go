@@ -89,9 +89,10 @@ func TestFailedJobsRejectsAPageItCannotAskFor(t *testing.T) {
 		"/api/v1/failed?limit=0",
 		"/api/v1/failed?limit=201",
 		"/api/v1/failed?limit=abc",
-		"/api/v1/failed?before=abc",
-		"/api/v1/failed?before=-1",
+		// A cursor is opaque, so only its shape is rejected here; whether it decodes is the
+		// application's answer, read by the case below.
 		"/api/v1/failed?before=1.5",
+		"/api/v1/failed?before=a%20b",
 	}
 	for _, target := range targets {
 		provider := &stubProvider{}
@@ -101,6 +102,21 @@ func TestFailedJobsRejectsAPageItCannotAskFor(t *testing.T) {
 		if provider.failedQuery.Limit != 0 {
 			t.Errorf("%s reached the adapter with %+v", target, provider.failedQuery)
 		}
+	}
+}
+
+func TestFailedJobsAnswersAnUnreadableCursorWithABadRequest(t *testing.T) {
+	provider := &stubProvider{failedErr: adapter.ErrInvalidFailedJobCursor}
+
+	// A cursor this service never issued is the caller's mistake, not an application that
+	// could not answer.
+	recorder := get(t, provider, "/api/v1/failed?before=not-a-cursor")
+
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400 (body %s)", recorder.Code, recorder.Body)
+	}
+	if !strings.Contains(recorder.Body.String(), "next_before") {
+		t.Errorf("body = %s, want the cursor field named", recorder.Body.String())
 	}
 }
 

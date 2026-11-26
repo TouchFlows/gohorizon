@@ -1,31 +1,12 @@
 import { describe, expect, it } from 'vitest'
-import type { Job } from './api'
 import {
   buildJobsQuery,
-  exceptionText,
   firstTrail,
   formatDuration,
   trailCursor,
   trailNewer,
   trailOlder,
 } from './jobs'
-
-function job(overrides: Partial<Job> = {}): Job {
-  return {
-    id: '1774191600000-0',
-    job_id: '7',
-    uuid: '0b9b6f0a-1c1a-4c8a-9f0a-3f8b1d2e4c55',
-    class: 'App\\Jobs\\Marker',
-    queue: 'default',
-    connection: 'default',
-    outcome: 'processed',
-    attempts: 1,
-    duration_ms: 12,
-    finished_at: '2026-11-21T20:40:00Z',
-    exception: null,
-    ...overrides,
-  }
-}
 
 describe('buildJobsQuery', () => {
   it('leaves out a filter that is set to any', () => {
@@ -78,22 +59,6 @@ describe('trail', () => {
     const trail = firstTrail
     trailOlder(trail, 'c1')
     expect(trail.cursors).toEqual([null])
-  })
-})
-
-describe('exceptionText', () => {
-  it('is null when the attempt threw nothing, so the table can say none', () => {
-    expect(exceptionText(job())).toBeNull()
-  })
-
-  it('keeps the class when there is no message', () => {
-    expect(exceptionText(job({ exception: { class: 'RuntimeException', message: '' } }))).toBe('RuntimeException')
-  })
-
-  it('reads class and message as one line', () => {
-    expect(exceptionText(job({ exception: { class: 'RuntimeException', message: 'boom' } }))).toBe(
-      'RuntimeException: boom',
-    )
   })
 })
 

@@ -69,13 +69,14 @@ Milestones 1 and 2 implemented:
   `/api/v1/metrics`, drawn as inline SVG with no chart dependency and a window with no rows
   shown as "no data in this window", with the average duration of an attempt drawn under
   the outcome columns from the same bucket; jobs reads `/api/v1/jobs` with queue and outcome filters,
-  cursor paging and a detail panel, and failed jobs is the same table pinned to `failed` with
-  the exception in the row itself and `Retry` and `Delete` in the detail panel of an attempt
-  that failed. Those two go through the failed-job endpoints below, echoing the CSRF token
-  the page reads from its own cookie; a worker row's `Restart` posts the restart endpoint below
-  and the supervisor recycles the process in its slot, so the job in flight finishes instead of
-  being killed. Without `server.auth.users` there are no administrative routes to call, so both
-  screens stay read-only. The Vite bundle under `web/` is embedded in the binary, hashed assets are
+  cursor paging and a detail panel, and failed jobs reads the application's own store from
+  `/api/v1/failed` with the same cursor paging, the redacted exception in the row itself and
+  `Retry` and `Delete` in the record's detail panel. The two actions go through the failed-job
+  endpoints below, echoing the CSRF token the page reads from its own cookie; a worker row's
+  `Restart` posts the restart endpoint below and the supervisor recycles the process in its
+  slot, so the job in flight finishes instead of being killed. Without `server.auth.users`
+  there are no administrative routes to call, so the failed screen and the worker rows stay
+  read-only. The Vite bundle under `web/` is embedded in the binary, hashed assets are
   cached forever, `index.html` is not cached, and a client route falls back to it
   (docs/adr/0008).
 - `gohorizon/laravel` package: configuration, job lifecycle telemetry to a Redis Stream,

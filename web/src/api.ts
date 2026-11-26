@@ -343,6 +343,87 @@ export function isJobPage(value: unknown): value is JobPage {
   return typeof page.next_before === 'string' && Array.isArray(page.jobs) && page.jobs.every(isJob)
 }
 
+// One record of the application's own failed store, as /api/v1/failed returns it. The payload
+// never leaves the application: `job` is the class Laravel recorded and `exception` is the
+// redacted first line of the stored trace, never null. `id` is the record's own id — a row id
+// or, with the file failer, the job uuid — and `uuid` is the identity retry and delete take.
+export interface FailedJob {
+  id: string
+  uuid: string
+  connection: string
+  queue: string
+  job: string
+  failed_at: string
+  exception: string
+}
+
+export interface FailedJobPage {
+  failed_jobs: FailedJob[]
+  // next_before is an opaque cursor, empty on the last page.
+  next_before: string
+}
+
+// FailedJobsUnavailable is the 503 the service answers when the application could not list
+// its failed store. It is not an empty store, and the screen must not draw it as one.
+export class FailedJobsUnavailable extends Error {
+  constructor() {
+    super('failed jobs are unavailable')
+    this.name = 'FailedJobsUnavailable'
+  }
+}
+
+export async function fetchFailedJobs(query: string, signal?: AbortSignal): Promise<FailedJobPage> {
+  const response = await fetch(`/api/v1/failed?${query}`, {
+    signal,
+    headers: { Accept: 'application/json' },
+  })
+  if (response.status === 401) {
+    throw new Unauthorized()
+  }
+  if (response.status === 503) {
+    throw new FailedJobsUnavailable()
+  }
+  if (response.status !== 200) {
+    throw new Error(`/api/v1/failed returned ${response.status}`)
+  }
+  const payload: unknown = await response.json()
+  if (!isFailedJobPage(payload)) {
+    throw new Error('/api/v1/failed did not return a page of failed jobs')
+  }
+  return payload
+}
+
+function isFailedJob(value: unknown): value is FailedJob {
+  if (typeof value !== 'object' || value === null) {
+    return false
+  }
+  const job = value as Partial<FailedJob>
+  // Every field is required, exception included: an absent exception would otherwise read as
+  // a record that threw nothing, and the class and uuid are what the row and the two actions
+  // take.
+  return (
+    typeof job.id === 'string' &&
+    typeof job.uuid === 'string' &&
+    typeof job.connection === 'string' &&
+    typeof job.queue === 'string' &&
+    typeof job.job === 'string' &&
+    typeof job.failed_at === 'string' &&
+    typeof job.exception === 'string'
+  )
+}
+
+export function isFailedJobPage(value: unknown): value is FailedJobPage {
+  if (typeof value !== 'object' || value === null) {
+    return false
+  }
+  const page = value as Partial<FailedJobPage>
+  return (
+    typeof page.next_before === 'string' &&
+    Array.isArray(page.failed_jobs) &&
+    page.failed_jobs.every(isFailedJob)
+  )
+}
+
 // The double-submit token lives in a cookie the page is deliberately allowed to read
 // (docs/adr/0011).
 const csrfCookieName = 'gohorizon_csrf'

@@ -49,9 +49,14 @@ type FailedJobsPage struct {
 	NextBefore string      `json:"next_before"`
 }
 
+// ErrInvalidFailedJobCursor means the cursor the caller sent is not one the command issued.
+// It is the command's own invalid-argument status, kept distinct so the endpoint can answer
+// 400 instead of blaming the application.
+var ErrInvalidFailedJobCursor = errors.New("the failed job cursor is not one this service issued")
+
 // FailedJobQuery selects one page. Before is the NextBefore of a previous page and is empty
-// for the first page. The adapter only passes digits on, so a cursor can never become an
-// artisan option.
+// for the first page. It is an opaque value the command decodes; the adapter only checks its
+// shape, because the meaning of a cursor belongs to the application side that issued it.
 type FailedJobQuery struct {
 	Limit  int
 	Before string
@@ -64,8 +69,8 @@ func (p Probe) FailedJobs(ctx context.Context, query FailedJobQuery) (FailedJobs
 	if query.Limit < 1 || query.Limit > MaxFailedJobsLimit {
 		return FailedJobsPage{}, fmt.Errorf("failed job limit must be between 1 and %d", MaxFailedJobsLimit)
 	}
-	if query.Before != "" && !digits(query.Before) {
-		return FailedJobsPage{}, fmt.Errorf("failed job cursor must be a record id, got %q", query.Before)
+	if query.Before != "" && !cursorValue(query.Before) {
+		return FailedJobsPage{}, fmt.Errorf("failed job cursor is not a page cursor: %q", query.Before)
 	}
 
 	ctx, cancel := context.WithTimeout(ctx, failedListTimeout)
@@ -83,6 +88,12 @@ func (p Probe) FailedJobs(ctx context.Context, query FailedJobQuery) (FailedJobs
 	cmd.Stderr = &stderr
 
 	if err := cmd.Run(); err != nil {
+		// The command answers an unreadable cursor with its invalid-argument status. That is
+		// the caller's mistake, not the application's, so it keeps its own identity.
+		var exit *exec.ExitError
+		if errors.As(err, &exit) && exit.ExitCode() == 2 {
+			return FailedJobsPage{}, fmt.Errorf("%w: %s", ErrInvalidFailedJobCursor, summarise(stdout.String()+stderr.String()))
+		}
 		detail := summarise(stderr.String())
 		if detail == "" {
 			detail = summarise(stdout.String())
@@ -121,14 +132,18 @@ func decodeFailedJobs(out []byte) (FailedJobsPage, error) {
 	return FailedJobsPage{FailedJobs: payload.FailedJobs, NextBefore: payload.NextBefore}, nil
 }
 
-// digits reports whether value is one or more decimal digits. It is the only shape a cursor
-// may take, because it becomes one argument of the application's command.
-func digits(value string) bool {
+// cursorValue reports whether value has the shape of the command's cursor: unpadded
+// base64url. The characters are checked here so a cursor can never carry whitespace or an
+// option separator into the application's command line; whether it decodes is the command's
+// answer to give.
+func cursorValue(value string) bool {
 	if value == "" {
 		return false
 	}
 	for _, r := range value {
-		if r < '0' || r > '9' {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '-', r == '_':
+		default:
 			return false
 		}
 	}

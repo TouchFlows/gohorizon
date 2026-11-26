@@ -8,6 +8,7 @@ import Overview from './pages/Overview'
 import Queues from './pages/Queues'
 import Workers from './pages/Workers'
 import Jobs from './pages/Jobs'
+import Failed from './pages/Failed'
 import Metrics from './pages/Metrics'
 
 const navigation: Route[] = ['overview', 'queues', 'workers', 'jobs', 'failed', 'metrics']
@@ -108,7 +109,7 @@ function Dashboard({ route, user, onSignOut, onExpired }: DashboardProps) {
         ) : route === 'jobs' ? (
           <Jobs report={report} />
         ) : route === 'failed' ? (
-          <Jobs report={report} pinnedOutcome="failed" canAct={user !== null} />
+          <Failed canAct={user !== null} />
         ) : route === 'metrics' ? (
           <Metrics report={report} />
         ) : (

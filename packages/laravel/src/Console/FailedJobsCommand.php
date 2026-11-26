@@ -7,6 +7,7 @@ namespace GoHorizon\Laravel\Console;
 use GoHorizon\Laravel\Inspection\FailedJobLister;
 use GoHorizon\Laravel\Redis\Keys;
 use Illuminate\Console\Command;
+use InvalidArgumentException;
 
 /**
  * Prints the application's own failed jobs as JSON for the Go control plane.
@@ -19,7 +20,7 @@ final class FailedJobsCommand extends Command
 {
     protected $signature = 'gohorizon:failed:list
                             {--limit=50 : Records to return, 1-200}
-                            {--before= : Continue before this failed job id}
+                            {--before= : Continue after the next_before of a previous page}
                             {--json : Output JSON}';
 
     protected $description = "List the application's own failed jobs through Laravel's failer";
@@ -42,13 +43,14 @@ final class FailedJobsCommand extends Command
 
         $before = $this->option('before');
         $before = is_string($before) && trim($before) !== '' ? trim($before) : null;
-        if ($before !== null && ! ctype_digit($before)) {
+
+        try {
+            $page = $this->failedJobs->page((int) $rawLimit, $before);
+        } catch (InvalidArgumentException) {
             $this->error('before must be the next_before of a previous page');
 
             return self::INVALID;
         }
-
-        $page = $this->failedJobs->page((int) $rawLimit, $before);
 
         $payload = [
             'schema' => 1,

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { isHealthReport, isHistory, isJobPage } from './api'
+import { isFailedJobPage, isHealthReport, isHistory, isJobPage } from './api'
 
 const report = {
   status: 'ok',
@@ -91,6 +91,42 @@ describe('isJobPage', () => {
 
     expect(isJobPage({ jobs: [withoutUuid], next_before: '' })).toBe(false)
     expect(isJobPage({ jobs: [withoutJobID], next_before: '' })).toBe(false)
+  })
+})
+
+const failedPage = {
+  failed_jobs: [
+    {
+      id: 'e0a1c2d3-4b5f-4a6b-8c7d-9e0f1a2b3c4d',
+      uuid: 'e0a1c2d3-4b5f-4a6b-8c7d-9e0f1a2b3c4d',
+      connection: 'redis',
+      queue: 'default',
+      job: 'App\\Jobs\\AlwaysFails',
+      failed_at: '2026-11-26 09:30:00',
+      exception: 'RuntimeException: boom',
+    },
+  ],
+  next_before: '',
+}
+
+describe('isFailedJobPage', () => {
+  it('accepts a page of the application failed store', () => {
+    expect(isFailedJobPage(failedPage)).toBe(true)
+    expect(isFailedJobPage({ failed_jobs: [], next_before: 'cursor' })).toBe(true)
+  })
+
+  it('rejects a record missing what the row or the actions take', () => {
+    for (const field of ['id', 'uuid', 'queue', 'job', 'failed_at', 'exception']) {
+      const without: Record<string, unknown> = { ...failedPage.failed_jobs[0] }
+      delete without[field]
+      expect(isFailedJobPage({ failed_jobs: [without], next_before: '' }), field).toBe(false)
+    }
+  })
+
+  it('rejects a page without its cursor or record list', () => {
+    expect(isFailedJobPage({ failed_jobs: failedPage.failed_jobs })).toBe(false)
+    expect(isFailedJobPage({ ...failedPage, failed_jobs: null })).toBe(false)
+    expect(isFailedJobPage(null)).toBe(false)
   })
 })
 

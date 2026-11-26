@@ -12,24 +12,12 @@ import {
 } from '../jobs'
 import type { Trail } from '../jobs'
 import { useJobs } from '../useJobs'
-import FailedJobActions from '../components/FailedJobActions'
 import JobTable from '../components/JobTable'
 
-// canAct is whether this deployment has administrative routes at all: a service started
-// without users mounts none, so its failed screen stays read-only rather than offering
-// controls that could not answer.
-export default function Jobs({
-  report,
-  pinnedOutcome,
-  canAct = false,
-}: {
-  report: HealthReport
-  pinnedOutcome?: string
-  canAct?: boolean
-}) {
+export default function Jobs({ report }: { report: HealthReport }) {
   const queues = (report.queues.depths ?? []).map((depth) => depth.queue)
   const [queue, setQueue] = useState('')
-  const [outcome, setOutcome] = useState(pinnedOutcome ?? '')
+  const [outcome, setOutcome] = useState('')
   const [trail, setTrail] = useState<Trail>(firstTrail)
   const [selected, setSelected] = useState<Job | null>(null)
 
@@ -74,7 +62,7 @@ export default function Jobs({
 
   return (
     <>
-      <h1>{pinnedOutcome === undefined ? 'Jobs' : 'Failed jobs'}</h1>
+      <h1>Jobs</h1>
 
       <section className="controls">
         <label className="controls__field">
@@ -89,19 +77,17 @@ export default function Jobs({
           </select>
         </label>
 
-        {pinnedOutcome === undefined && (
-          <label className="controls__field">
-            Outcome
-            <select value={outcome} onChange={(event) => chooseOutcome(event.target.value)}>
-              <option value="">any</option>
-              {outcomes.map((name) => (
-                <option key={name} value={name}>
-                  {name}
-                </option>
-              ))}
-            </select>
-          </label>
-        )}
+        <label className="controls__field">
+          Outcome
+          <select value={outcome} onChange={(event) => chooseOutcome(event.target.value)}>
+            <option value="">any</option>
+            {outcomes.map((name) => (
+              <option key={name} value={name}>
+                {name}
+              </option>
+            ))}
+          </select>
+        </label>
 
         <div className="controls__group" role="group" aria-label="Paging">
           <button type="button" className="chip" disabled={newer === null} onClick={goNewer}>
@@ -128,47 +114,19 @@ export default function Jobs({
       {error !== null && <p className="banner">Could not read job history: {error}</p>}
       {page === null && !unavailable && error === null && <p className="muted">Reading job history…</p>}
 
-      {page !== null && (
-        <JobTable
-          jobs={page.jobs}
-          showException={pinnedOutcome !== undefined}
-          onSelect={(job) => setSelected(job)}
-        />
-      )}
+      {page !== null && <JobTable jobs={page.jobs} onSelect={(job) => setSelected(job)} />}
 
-      {selected !== null && (
-        <JobDetail
-          job={selected}
-          onClose={() => setSelected(null)}
-          actions={canAct && pinnedOutcome === 'failed'}
-        />
-      )}
+      {selected !== null && <JobDetail job={selected} onClose={() => setSelected(null)} />}
 
-      {pinnedOutcome === undefined && (
-        <p className="muted">
-          Read-only: retry and delete act on a failed job, from its detail panel on the failed jobs
-          screen.
-        </p>
-      )}
-      {pinnedOutcome !== undefined && !canAct && (
-        <p className="muted">
-          Read-only: this service was started without users, so it has no administrative routes to
-          retry or delete a failed job.
-        </p>
-      )}
+      <p className="muted">
+        Read-only: retry and delete act on a failed job, from its detail panel on the failed jobs
+        screen.
+      </p>
     </>
   )
 }
 
-function JobDetail({
-  job,
-  onClose,
-  actions,
-}: {
-  job: Job
-  onClose: () => void
-  actions: boolean
-}) {
+function JobDetail({ job, onClose }: { job: Job; onClose: () => void }) {
   return (
     <section className="panel detail jobs__detail" aria-label="Job detail">
       <div className="detail__head">
@@ -205,18 +163,6 @@ function JobDetail({
           <pre>{job.exception.message === '' ? 'no message' : job.exception.message}</pre>
         </div>
       )}
-
-      {actions &&
-        (job.uuid === '' ? (
-          <p className="muted">
-            This attempt carries no uuid the application knows, so there is nothing to retry or
-            delete.
-          </p>
-        ) : (
-          // Keyed by the attempt, so opening another row does not inherit the answer the
-          // previous one got.
-          <FailedJobActions key={job.id} job={job} />
-        ))}
     </section>
   )
 }

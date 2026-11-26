@@ -1,0 +1,176 @@
+import { useMemo, useState } from 'react'
+import type { FailedJob } from '../api'
+import { buildFailedJobsQuery, failedAtText, failedExceptionText, failedJobClass } from '../failed'
+import { firstTrail, trailCursor, trailNewer, trailOlder } from '../jobs'
+import type { Trail } from '../jobs'
+import { useFailedJobs } from '../useFailedJobs'
+import FailedJobActions from '../components/FailedJobActions'
+
+// canAct is whether this deployment has administrative routes at all: a service started
+// without users mounts none, so its failed screen stays read-only rather than offering
+// controls that could not answer.
+export default function Failed({ canAct }: { canAct: boolean }) {
+  const [trail, setTrail] = useState<Trail>(firstTrail)
+  const [selected, setSelected] = useState<FailedJob | null>(null)
+
+  const cursor = trailCursor(trail)
+  const query = useMemo(() => buildFailedJobsQuery(cursor), [cursor])
+  const { page, unavailable, error } = useFailedJobs(query)
+
+  // The panel describes one row, so leaving the page it is on closes it: otherwise the
+  // detail sits under a table that no longer lists what it describes.
+  const newer = trailNewer(trail)
+  const goNewer = () => {
+    if (newer !== null) {
+      setTrail(newer)
+      setSelected(null)
+    }
+  }
+  const goOlder = () => {
+    if (page !== null && page.next_before !== '') {
+      setTrail(trailOlder(trail, page.next_before))
+      setSelected(null)
+    }
+  }
+
+  return (
+    <>
+      <h1>Failed jobs</h1>
+
+      <section className="controls">
+        <div className="controls__group" role="group" aria-label="Paging">
+          <button type="button" className="chip" disabled={newer === null} onClick={goNewer}>
+            newer
+          </button>
+          <button
+            type="button"
+            className="chip"
+            disabled={page === null || page.next_before === ''}
+            onClick={goOlder}
+          >
+            older
+          </button>
+          <span className="muted">page {trail.cursors.length}</span>
+        </div>
+      </section>
+
+      {unavailable && (
+        <p className="banner">
+          Failed jobs are unavailable: the application could not list its failed store. The rest
+          of the dashboard keeps working.
+        </p>
+      )}
+      {error !== null && <p className="banner">Could not read failed jobs: {error}</p>}
+      {page === null && !unavailable && error === null && <p className="muted">Reading failed jobs…</p>}
+
+      {page !== null && (
+        <table className="table">
+          <thead>
+            <tr>
+              <th>Failed at</th>
+              <th>Class</th>
+              <th>Queue</th>
+              <th>Exception</th>
+              <th />
+            </tr>
+          </thead>
+          <tbody>
+            {page.failed_jobs.length === 0 ? (
+              <tr>
+                <td colSpan={5} className="muted">
+                  No failed jobs are stored by the application.
+                </td>
+              </tr>
+            ) : (
+              page.failed_jobs.map((job) => (
+                <tr key={job.id}>
+                  <td>{failedAtText(job.failed_at)}</td>
+                  <td className="mono">{failedJobClass(job)}</td>
+                  <td>{job.queue}</td>
+                  <td className="exception">{failedExceptionText(job)}</td>
+                  <td>
+                    <button type="button" className="chip" onClick={() => setSelected(job)}>
+                      details
+                    </button>
+                  </td>
+                </tr>
+              ))
+            )}
+          </tbody>
+        </table>
+      )}
+
+      {selected !== null && (
+        <FailedJobDetail
+          job={selected}
+          onClose={() => setSelected(null)}
+          actions={canAct}
+        />
+      )}
+
+      {!canAct && (
+        <p className="muted">
+          Read-only: this service was started without users, so it has no administrative routes to
+          retry or delete a failed job.
+        </p>
+      )}
+    </>
+  )
+}
+
+// FailedJobDetail is the record as the application stores it. There is no outcome, attempt
+// count or duration here: those belong to the attempt history, and this panel describes the
+// record the two actions act on.
+function FailedJobDetail({
+  job,
+  onClose,
+  actions,
+}: {
+  job: FailedJob
+  onClose: () => void
+  actions: boolean
+}) {
+  return (
+    <section className="panel detail jobs__detail" aria-label="Failed job detail">
+      <div className="detail__head">
+        <h2>{failedJobClass(job)}</h2>
+        <button type="button" className="chip" onClick={onClose}>
+          close
+        </button>
+      </div>
+
+      <dl className="detail__fields">
+        <dt>Queue</dt>
+        <dd>{job.queue}</dd>
+        <dt>Connection</dt>
+        <dd>{job.connection === '' ? 'unknown' : job.connection}</dd>
+        <dt>Failed</dt>
+        <dd>{failedAtText(job.failed_at)}</dd>
+        <dt>UUID</dt>
+        <dd className="mono">{job.uuid === '' ? 'none published' : job.uuid}</dd>
+        <dt>Failed job id</dt>
+        <dd className="mono">{job.id}</dd>
+      </dl>
+
+      {job.exception === '' ? (
+        <p className="muted">No exception was recorded for this failed job.</p>
+      ) : (
+        <div className="detail__exception">
+          <pre>{job.exception}</pre>
+        </div>
+      )}
+
+      {actions &&
+        (job.uuid === '' ? (
+          <p className="muted">
+            This failed record carries no uuid the application knows, so there is nothing to retry
+            or delete.
+          </p>
+        ) : (
+          // Keyed by the record, so opening another row does not inherit the answer the
+          // previous one got.
+          <FailedJobActions key={job.id} job={job} />
+        ))}
+    </section>
+  )
+}

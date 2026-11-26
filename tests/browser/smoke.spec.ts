@@ -37,10 +37,11 @@ import { expect, test, type BrowserContext, type Page, type Route } from '@playw
 // What follows is where the work lives, not where it ends.
 //
 // A state that needs the store itself to break is dressed in the browser: a health answer is
-// rewritten on its way through, /api/v1/jobs and /api/v1/metrics are answered on the way
-// through, and the answers the two history screens wait on are held at the socket until the
-// line they stand in for has been read. The pills, banners and waiting lines below are read
-// against payloads this file wrote rather than phrases the page carries. All of it goes through
+// rewritten on its way through, /api/v1/jobs, /api/v1/failed and /api/v1/metrics are answered
+// on the way through, and the answers the two history screens wait on are held at the socket
+// until the line they stand in for has been read. The pills, banners and waiting lines below
+// are read against payloads this file wrote rather than phrases the page carries. The failed
+// screen's waiting line is drawn and not read; its unavailable and failure lines are. All of it goes through
 // the one `dress` helper at the bottom: a case names the endpoints it is dressing and turns the
 // answer it wants read, so no case carries route plumbing of its own. The models behind them are
 // read in web/src/view.test.ts, and the poll loop in web/src/useHealth.test.ts under fake timers,
@@ -1200,7 +1201,10 @@ test.describe('the dashboard against the real binary', () => {
     await expect(page.getByText('Job history is unavailable:')).toHaveCount(0)
   })
 
-  test('the failed page renders the attempt with the exception it threw', async ({ page }) => {
+  test('the failed page renders the record with the exception it threw', async ({ page }) => {
+    // The row is the application's own failed record, read through the failer rather than from
+    // the attempt history: the class comes from the payload and the exception is the redacted
+    // first line without the file and line PHP appends.
     await page.goto(`${base}/#/failed`)
 
     await expect(page.getByRole('heading', { name: 'Failed jobs' })).toBeVisible()
@@ -1208,6 +1212,38 @@ test.describe('the dashboard against the real binary', () => {
     await expect(
       page.getByRole('cell', { name: 'RuntimeException: the acceptance fixture always fails' }),
     ).toBeVisible()
+  })
+
+  test('the failed screen says when the application cannot list its store', async ({ page }) => {
+    // Unlike history, this read can fail on the application rather than on the metrics
+    // database: a 503 means the store could not be listed, any other status is the failure the
+    // page was answered with. Neither is an empty store, so neither may draw the empty line.
+    const failed = await dress(page, '**/api/v1/failed*')
+    failed.answer({ kind: 'status', status: 503 })
+
+    const unavailable = page.getByText('Failed jobs are unavailable:')
+    const failure = page.getByText('Could not read failed jobs: /api/v1/failed returned 500')
+
+    await page.goto(`${base}/#/failed`)
+    await expect(unavailable).toBeVisible()
+    await expect(failure).toHaveCount(0)
+    await expect(page.getByText('No failed jobs are stored by the application.')).toHaveCount(0)
+
+    // Any other status is a failed read, and the line carries the status the page was answered
+    // with. This screen does not poll, so it is left and re-entered rather than waited on.
+    failed.answer({ kind: 'status', status: 500 })
+    await page.getByRole('link', { name: 'Overview', exact: true }).click()
+    await page.getByRole('link', { name: 'Failed', exact: true }).click()
+    await expect(failure).toBeVisible()
+    await expect(unavailable).toHaveCount(0)
+
+    // A read that answers again clears the line and draws the records it can now see.
+    failed.answer({ kind: 'through' })
+    await page.getByRole('link', { name: 'Overview', exact: true }).click()
+    await page.getByRole('link', { name: 'Failed', exact: true }).click()
+    await expect(failure).toHaveCount(0)
+    await expect(unavailable).toHaveCount(0)
+    await expect(page.getByRole('cell', { name: 'App\\Jobs\\AlwaysFails', exact: true })).toBeVisible()
   })
 
   test('the metrics chart draws the attempts in the minute they ran', async ({ page }) => {
@@ -1432,10 +1468,20 @@ test.describe('the dashboard against the real binary', () => {
     // Both controls are drawn for anyone signed in and the two routes gate the call, so a
     // viewer's press comes back refused: the panel has to repeat the service's wording in place
     // of the notice a success would leave, and neither control goes quiet over it.
+    //
+    // The operator cases before this one end by deleting the record they opened, and the store
+    // now lives in the application rather than in a history GoHorizon keeps, so this case makes
+    // a failed record of its own. A refusal does not care which record it is.
+    dispatch(php, 'fail')
+    await waitFor('store a failed job for the viewer case', async () => {
+      const store = (await getJSON(`${base}/api/v1/failed?limit=50`)) as FailedJobsPayload
+      return store.failed_jobs.some((job) => job.job === 'App\\Jobs\\AlwaysFails')
+    })
+
     await signInAsViewer(page, context)
 
-    // The panel acts on the attempt the screen lists first, which is the row a person would
-    // open; which attempt that is does not matter to a refusal.
+    // The panel acts on the record the screen lists first, which is the row a person would
+    // open; which record that is does not matter to a refusal.
     await page.goto(`${base}/#/failed`)
     const detail = page.locator('.jobs__detail')
     await page.getByRole('button', { name: 'details' }).first().click()
@@ -1862,6 +1908,13 @@ interface JobAttempt {
   duration_ms: number
   finished_at: string
   exception: { class: string; message: string } | null
+}
+
+// FailedJobsPayload is a page of the application's own failed store, which the direct waits
+// above read to know a record exists before a screen is opened.
+interface FailedJobsPayload {
+  failed_jobs: { id: string; uuid: string; queue: string; job: string; failed_at: string; exception: string }[]
+  next_before: string
 }
 
 // readHealth opens a screen and returns the report it rendered, because the response the page

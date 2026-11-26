@@ -1,5 +1,4 @@
-// Job history's filters, its cursor trail and the way a row reads, all away from React.
-import type { Job } from './api'
+// Job history's filters and its cursor trail, away from React.
 
 export interface JobFilters {
   // An empty queue or outcome means "any": the endpoint treats the same absence the same way.
@@ -51,16 +50,6 @@ export function trailOlder(trail: Trail, nextBefore: string): Trail {
 // trailNewer is null on the newest page: there is nowhere newer to go.
 export function trailNewer(trail: Trail): Trail | null {
   return trail.cursors.length <= 1 ? null : { cursors: trail.cursors.slice(0, -1) }
-}
-
-// exceptionText is the failure as one line, or null when the attempt threw nothing. The
-// null is what the table renders as "none" — an empty string would look like a failure with
-// no text instead of no failure at all.
-export function exceptionText(job: Job): string | null {
-  if (job.exception === null) {
-    return null
-  }
-  return job.exception.message === '' ? job.exception.class : `${job.exception.class}: ${job.exception.message}`
 }
 
 // formatDuration reads an attempt's duration: milliseconds when it was quick, seconds when

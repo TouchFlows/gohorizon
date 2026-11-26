@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace GoHorizon\Laravel\Tests;
 
 use GoHorizon\Laravel\Inspection\FailedJobLister;
+use InvalidArgumentException;
 use PHPUnit\Framework\TestCase;
 
 final class FailedJobsListerTest extends TestCase
@@ -16,14 +17,50 @@ final class FailedJobsListerTest extends TestCase
         $first = $lister->page(2);
 
         self::assertSame(['9', '8'], array_column($first['failed_jobs'], 'id'));
-        // The cursor is the last id on the page, so the next request continues before exactly
-        // that record.
-        self::assertSame('8', $first['next_before']);
+        // The cursor names the last record on the page, so the next request continues after
+        // exactly that record rather than after a position a changing store could shift.
+        self::assertNotNull($first['next_before']);
 
-        $second = $lister->page(2, '8');
+        $second = $lister->page(2, $first['next_before']);
 
         self::assertSame(['7'], array_column($second['failed_jobs'], 'id'));
         self::assertNull($second['next_before']);
+    }
+
+    public function test_it_pages_a_store_whose_ids_are_uuids(): void
+    {
+        // Laravel's file failer uses the job uuid as the record id, so numeric-id paging would
+        // drop every record of an application configured with it.
+        $records = [
+            (object) ['id' => 'ffffffff-0000-4000-8000-000000000003', 'failed_at_timestamp' => 1700000300, 'payload' => '{}'],
+            (object) ['id' => 'ffffffff-0000-4000-8000-000000000002', 'failed_at_timestamp' => 1700000200, 'payload' => '{}'],
+            (object) ['id' => 'ffffffff-0000-4000-8000-000000000001', 'failed_at_timestamp' => 1700000100, 'payload' => '{}'],
+        ];
+        $lister = new FailedJobLister(new FakeFailedJobs($records));
+
+        $first = $lister->page(2);
+        self::assertSame([
+            'ffffffff-0000-4000-8000-000000000003',
+            'ffffffff-0000-4000-8000-000000000002',
+        ], array_column($first['failed_jobs'], 'id'));
+
+        $second = $lister->page(2, $first['next_before']);
+        self::assertSame(['ffffffff-0000-4000-8000-000000000001'], array_column($second['failed_jobs'], 'id'));
+        self::assertNull($second['next_before']);
+    }
+
+    public function test_it_refuses_a_cursor_it_did_not_issue(): void
+    {
+        $lister = new FailedJobLister(new FakeFailedJobs($this->records()));
+
+        foreach (['not-a-cursor', 'MTIzNDU2Nzg5MA'] as $cursor) {
+            try {
+                $lister->page(10, $cursor);
+                self::fail("cursor {$cursor} was accepted");
+            } catch (InvalidArgumentException) {
+                self::assertTrue(true);
+            }
+        }
     }
 
     public function test_it_returns_the_record_without_the_payload(): void
@@ -33,6 +70,8 @@ final class FailedJobsListerTest extends TestCase
         $row = $lister->page(10)['failed_jobs'][0];
 
         self::assertSame('9', $row['id']);
+        // The file failer has no uuid column; the uuid the retry endpoint takes is the one in
+        // Laravel's payload.
         self::assertSame('e0a1c2d3-4b5f-4a6b-8c7d-9e0f1a2b3c4d', $row['uuid']);
         self::assertSame('redis', $row['connection']);
         self::assertSame('emails', $row['queue']);
@@ -48,12 +87,7 @@ final class FailedJobsListerTest extends TestCase
 
         $exception = $lister->page(10)['failed_jobs'][0]['exception'];
 
-        self::assertIsString($exception);
-        self::assertStringStartsWith('RuntimeException: could not reach', $exception);
-        self::assertStringNotContainsString("\n", $exception);
-        self::assertStringNotContainsString('#0 /srv/application', $exception);
-        self::assertStringNotContainsString('hunter2', $exception);
-        self::assertStringNotContainsString('shh', $exception);
+        self::assertSame('RuntimeException: could not reach https://***:***@example.test with password=***', $exception);
     }
 
     public function test_a_record_without_a_usable_id_is_left_out(): void
@@ -68,10 +102,13 @@ final class FailedJobsListerTest extends TestCase
     public function test_a_payload_that_is_not_json_reports_no_job_class(): void
     {
         $lister = new FailedJobLister(new FakeFailedJobs([
-            (object) ['id' => 3, 'queue' => 'default', 'payload' => 'not-json'],
+            (object) ['id' => 3, 'queue' => 'default', 'payload' => 'not-json', 'failed_at' => '2026-11-26 08:00:00'],
         ]));
 
-        self::assertSame('', $lister->page(10)['failed_jobs'][0]['job']);
+        $row = $lister->page(10)['failed_jobs'][0];
+
+        self::assertSame('', $row['job']);
+        self::assertSame('', $row['uuid']);
     }
 
     /**
@@ -82,21 +119,19 @@ final class FailedJobsListerTest extends TestCase
         return [
             (object) [
                 'id' => 9,
-                'uuid' => 'e0a1c2d3-4b5f-4a6b-8c7d-9e0f1a2b3c4d',
                 'connection' => 'redis',
                 'queue' => 'emails',
                 'payload' => json_encode([
+                    'uuid' => 'e0a1c2d3-4b5f-4a6b-8c7d-9e0f1a2b3c4d',
                     'displayName' => 'App\Jobs\SendInvoice',
                     'job' => 'Illuminate\Queue\CallQueuedHandler@call',
                     'data' => ['command' => 'payload-argument-that-must-not-leak'],
                 ]),
-                'exception' => "RuntimeException: could not reach https://user:hunter2@example.test with password=shh\n#0 /srv/application/vendor/laravel/framework/src/Queue/Worker.php(280)",
+                'exception' => "RuntimeException: could not reach https://user:hunter2@example.test with password=shh in /srv/application/vendor/laravel/framework/src/Queue/Worker.php:280\n#0 /srv/application/vendor/laravel/framework/src/Queue/Worker.php(280)",
                 'failed_at' => '2026-11-26 09:30:00',
             ],
             (object) [
                 'id' => 8,
-                'uuid' => '',
-                'connection' => 'redis',
                 'queue' => 'default',
                 'payload' => json_encode(['displayName' => 'App\Jobs\SyncOrders']),
                 'exception' => '',
@@ -104,8 +139,6 @@ final class FailedJobsListerTest extends TestCase
             ],
             (object) [
                 'id' => 7,
-                'uuid' => '',
-                'connection' => 'redis',
                 'queue' => 'default',
                 'payload' => json_encode(['displayName' => 'App\Jobs\PruneLogs']),
                 'exception' => 'RuntimeException: boom',

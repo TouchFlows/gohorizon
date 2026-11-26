@@ -25,7 +25,7 @@ final class FailedJobsCommandTest extends TestCase
     public function test_it_prints_one_page_of_the_applications_failed_jobs(): void
     {
         $this->app->instance('queue.failer', new FakeFailedJobs([
-            (object) ['id' => 9, 'queue' => 'emails', 'payload' => json_encode(['displayName' => 'App\Jobs\SendInvoice']), 'exception' => 'RuntimeException: boom', 'failed_at' => '2026-11-26 09:30:00'],
+            (object) ['id' => 9, 'queue' => 'emails', 'payload' => json_encode(['uuid' => 'job-9', 'displayName' => 'App\Jobs\SendInvoice']), 'exception' => 'RuntimeException: boom in /srv/app/Job.php:12', 'failed_at' => '2026-11-26 09:30:00'],
             (object) ['id' => 8, 'queue' => 'default', 'payload' => json_encode(['displayName' => 'App\Jobs\SyncOrders']), 'exception' => '', 'failed_at' => '2026-11-26 09:00:00'],
             (object) ['id' => 7, 'queue' => 'default', 'payload' => json_encode(['displayName' => 'App\Jobs\PruneLogs']), 'exception' => '', 'failed_at' => '2026-11-26 08:00:00'],
         ]));
@@ -39,36 +39,41 @@ final class FailedJobsCommandTest extends TestCase
         self::assertSame('my-application', $data['application']);
         self::assertSame('staging', $data['environment']);
         self::assertSame(['9', '8'], array_column($data['failed_jobs'], 'id'));
-        self::assertSame('8', $data['next_before']);
+        self::assertIsString($data['next_before']);
         self::assertSame('App\Jobs\SendInvoice', $data['failed_jobs'][0]['job']);
+        self::assertSame('job-9', $data['failed_jobs'][0]['uuid']);
         self::assertSame('RuntimeException: boom', $data['failed_jobs'][0]['exception']);
         self::assertNull($data['failed_jobs'][1]['exception']);
     }
 
-    public function test_it_continues_before_the_given_id(): void
+    public function test_it_continues_after_the_cursor_it_printed(): void
     {
         $this->app->instance('queue.failer', new FakeFailedJobs([
-            (object) ['id' => 9, 'queue' => 'default', 'payload' => '{}', 'exception' => '', 'failed_at' => ''],
-            (object) ['id' => 7, 'queue' => 'default', 'payload' => '{}', 'exception' => '', 'failed_at' => ''],
+            (object) ['id' => 9, 'queue' => 'default', 'payload' => '{}', 'exception' => '', 'failed_at' => '2026-11-26 09:30:00'],
+            (object) ['id' => 8, 'queue' => 'default', 'payload' => '{}', 'exception' => '', 'failed_at' => '2026-11-26 09:00:00'],
+            (object) ['id' => 7, 'queue' => 'default', 'payload' => '{}', 'exception' => '', 'failed_at' => '2026-11-26 08:00:00'],
         ]));
 
-        $exit = Artisan::call('gohorizon:failed:list', ['--json' => true, '--before' => '8']);
-        $data = json_decode(Artisan::output(), true, flags: JSON_THROW_ON_ERROR);
+        Artisan::call('gohorizon:failed:list', ['--json' => true, '--limit' => 2]);
+        $first = json_decode(Artisan::output(), true, flags: JSON_THROW_ON_ERROR);
+
+        $exit = Artisan::call('gohorizon:failed:list', ['--json' => true, '--before' => $first['next_before']]);
+        $second = json_decode(Artisan::output(), true, flags: JSON_THROW_ON_ERROR);
 
         self::assertSame(0, $exit);
-        self::assertSame(['7'], array_column($data['failed_jobs'], 'id'));
-        self::assertNull($data['next_before']);
+        self::assertSame(['7'], array_column($second['failed_jobs'], 'id'));
+        self::assertNull($second['next_before']);
     }
 
     public function test_it_refuses_a_page_it_cannot_ask_for(): void
     {
         $this->app->instance('queue.failer', new FakeFailedJobs([]));
 
-        // Both bounds mirror the endpoint's: the command is the last place that could turn a
-        // cursor into an artisan option or ask for an unbounded store.
+        // The limit mirrors the endpoint's; a cursor that is not one of ours is refused here
+        // rather than sent to the application as an argument.
         self::assertSame(2, Artisan::call('gohorizon:failed:list', ['--limit' => 0]));
         self::assertSame(2, Artisan::call('gohorizon:failed:list', ['--limit' => 201]));
-        self::assertSame(2, Artisan::call('gohorizon:failed:list', ['--before' => 'abc']));
+        self::assertSame(2, Artisan::call('gohorizon:failed:list', ['--before' => 'not-a-cursor']));
         self::assertSame(2, Artisan::call('gohorizon:failed:list', ['--before' => '--json']));
     }
 }

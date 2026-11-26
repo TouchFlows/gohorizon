@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"os"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -17,8 +18,9 @@ func TestFailedListHelperProcess(t *testing.T) {
 	}
 	os.Stdout.WriteString("args: " + strings.Join(os.Args, " ") + "\n")
 	os.Stdout.WriteString(os.Getenv("GOHORIZON_TEST_FAILED_JOBS"))
-	if os.Getenv("GOHORIZON_TEST_FAILED_JOBS_EXIT") == "1" {
-		os.Exit(1)
+	if raw := os.Getenv("GOHORIZON_TEST_FAILED_JOBS_EXIT"); raw != "" {
+		code, _ := strconv.Atoi(raw)
+		os.Exit(code)
 	}
 	os.Exit(0)
 }
@@ -95,12 +97,25 @@ func TestFailedJobsRejectsAPageItCannotAskFor(t *testing.T) {
 	for _, query := range []FailedJobQuery{
 		{Limit: 0},
 		{Limit: MaxFailedJobsLimit + 1},
-		{Limit: 10, Before: "-1"},
 		{Limit: 10, Before: "42; rm -rf /"},
+		{Limit: 10, Before: "a b"},
 	} {
 		if _, err := probe.FailedJobs(context.Background(), query); err == nil {
 			t.Errorf("FailedJobs(%+v) = nil, want a refusal", query)
 		}
+	}
+}
+
+func TestFailedJobsSeparatesAnUnreadableCursorFromAnUnavailableApplication(t *testing.T) {
+	// The command's invalid-argument status means the cursor did not decode. That is the
+	// caller's answer, not an application that could not list its store.
+	probe := failedListProbe(t)
+	t.Setenv("GOHORIZON_TEST_FAILED_JOBS_EXIT", "2")
+	t.Setenv("GOHORIZON_TEST_FAILED_JOBS", "before must be the next_before of a previous page\n")
+
+	_, err := probe.FailedJobs(context.Background(), FailedJobQuery{Limit: 10, Before: "not-a-cursor"})
+	if !errors.Is(err, ErrInvalidFailedJobCursor) {
+		t.Fatalf("error = %v, want ErrInvalidFailedJobCursor", err)
 	}
 }
 

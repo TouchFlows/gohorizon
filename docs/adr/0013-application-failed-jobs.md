@@ -1,6 +1,6 @@
 # ADR 0013 — Listing the application's own failed jobs
 
-**Status:** accepted (Milestone 3, sixth slice)
+**Status:** accepted (Milestone 3, sixth slice; extended by the seventh with the dashboard switch)
 **Implements:** handoff §11 (`GET …/failed`) and §13, continuing docs/adr/0001, docs/adr/0007 and
 docs/adr/0012.
 
@@ -24,15 +24,22 @@ the only possible answer was 404.
    the same way.
 2. **The payload never leaves the application.** A record is reported as
    `{id, uuid, connection, queue, job, failed_at, exception}`. `job` is the `displayName` (or
-   `job`) Laravel recorded inside its own payload envelope; the payload and its arguments are
-   not copied, returned or logged. `exception` is the first line of the stored trace, passed
-   through the same redaction as a telemetry message (ADR 0006) and truncated there.
-3. **Paging continues before a record id.** The interface offers no ordering or paging, so the
-   command orders records by their provider id, newest first, and a page continues before the
-   last id it returned. Both built-in failers allocate ids in increasing order. `--limit`
-   defaults to 50 and may not exceed 200; `--before` accepts decimal digits only, because it
-   becomes one argument of the command and must never be read as an option. `next_before` is
-   `null` on the last page, so a client knows there is no further page without a total.
+   `job`) and `uuid` is the job uuid Laravel recorded inside its own payload envelope — the
+   file failer stores no separate uuid column, and the database failer's payload is the only
+   place the uuid the retry endpoint takes is guaranteed to be. The payload and its arguments
+   are not copied, returned or logged. `exception` is the first line of the stored trace with
+   the ` in <file>:<line>` location removed, passed through the same redaction as a telemetry
+   message (ADR 0006) and truncated there.
+3. **Paging continues after an opaque record position.** The interface offers no ordering or
+   paging, so the command orders records by their failure time, newest first, then by id, and a
+   page continues after a cursor holding the last returned record's `failed_at` and id. Ids are
+   not assumed to be numbers: the file failer uses the job uuid as the record id, and the
+   database failer uses a row id, so a numeric-id cursor would drop every record in one of the
+   two. `--limit` defaults to 50 and may not exceed 200; `--before` is the previous page's
+   `next_before` and is only ever sent as the value of one option. An unreadable cursor is
+   refused with the command's invalid-argument status, which the adapter maps to a 400 rather
+   than to an unavailable application. `next_before` is `null` on the last page, so a client
+   knows there is no further page without a total.
 4. **One read endpoint: `GET /api/v1/failed?[limit=…][before=…]`.** It answers
    `{failed_jobs: [...], next_before}`, with `failed_jobs` empty rather than `null` when the
    application stores none. It is mounted with the other reads: a session is required, but any
@@ -44,19 +51,22 @@ the only possible answer was 404.
    unparseable command to its own unavailable error, which the endpoint answers with 503. A
    package without the command therefore degrades to "failed jobs unavailable" rather than to an
    empty list that would look like "nothing failed".
-6. **The dashboard is not switched in this slice.** The Failed screen still reads history until
-   a follow-up changes it; the endpoint exists so that change is a client change and not another
-   server one.
+6. **The dashboard reads this endpoint.** The Failed screen lists the application's own store,
+   pages it with the opaque cursor and keeps `Retry` and `Delete` in the record's detail panel.
+   It no longer reads `GET /api/v1/jobs?outcome=failed`; attempt history keeps its own role on
+   the Jobs screen. A record the store no longer holds therefore cannot be offered for an
+   action, which is the disagreement this ADR exists to remove.
 
 ## Consequences
 
 - The listing reads every record the failer returns and slices the page in PHP: `all()` is the
   whole interface. A store with very many failed jobs costs one full read per page. A future
   provider-specific pager would need a new interface or capability, and is not assumed here.
-- Ordering is by provider id. A custom failer that assigns ids out of order gets pages in its
-  own id order; the command does not invent a timestamp sort key the interface does not promise.
-- Until the dashboard switches, the two sources still disagree, and the screen keeps its current
-  caveat. After the switch, failed history remains useful as attempt history: it records what ran
-  and when, while this endpoint records what the application can still act on.
+- Ordering is by failure time and then id. A custom failer whose records carry neither gets
+  the epoch as a time, which groups them; the command does not invent a timestamp the record
+  does not have.
+- Failed history remains useful as attempt history: it records what ran and when, while this
+  endpoint records what the application can still act on. The two are expected to differ after a
+  retry or a delete, which is why the screen reads the store rather than the history.
 - The Go API has gained a read that shells out to the application per request. It is bounded
   (15 s command timeout) and read-only, and it is the same pattern queue depth already uses.
