@@ -55,8 +55,12 @@ type capabilitiesAnswer struct {
 		Driver     string `json:"driver"`
 		RetryAfter *int   `json:"retry_after"`
 	} `json:"connections"`
-	Operations map[string]bool `json:"operations"`
-	Error      string          `json:"error"`
+	Operations     map[string]bool `json:"operations"`
+	PayloadSchemas struct {
+		Inspect    int `json:"inspect"`
+		FailedJobs int `json:"failed_jobs"`
+	} `json:"payload_schemas"`
+	Error string `json:"error"`
 }
 
 func readCapabilities(t *testing.T, provider Provider) capabilitiesAnswer {
@@ -262,6 +266,31 @@ func TestUnreadableCapabilitiesRefuseTheActionsTheDashboardDrops(t *testing.T) {
 	}
 	if got := strings.Count(records.String(), `"outcome":"refused"`); got != len(cases) {
 		t.Errorf("refused audit records = %d, want %d", got, len(cases))
+	}
+}
+
+// TestCapabilitiesPublishesThePayloadSchemas pins the versions the descriptor advertises for the
+// application's other payloads: they are the ones the decoders enforce, published whether or not
+// the descriptor itself is usable, so a package upgrade of either payload is visible before it
+// is read (docs/adr/0014).
+func TestCapabilitiesPublishesThePayloadSchemas(t *testing.T) {
+	answer := readCapabilities(t, &stubProvider{caps: descriptor()})
+
+	if answer.PayloadSchemas.Inspect != adapter.InspectionSchema {
+		t.Errorf("payload_schemas.inspect = %d, want the version this service reads (%d)",
+			answer.PayloadSchemas.Inspect, adapter.InspectionSchema)
+	}
+	if answer.PayloadSchemas.FailedJobs != adapter.FailedJobsSchema {
+		t.Errorf("payload_schemas.failed_jobs = %d, want the version this service reads (%d)",
+			answer.PayloadSchemas.FailedJobs, adapter.FailedJobsSchema)
+	}
+
+	// An unusable descriptor still says which payloads this service reads: the client comparing
+	// them with its application is not helped by learning it only when everything works.
+	unavailable := readCapabilities(t, &stubProvider{capsErr: errors.New("the package is not installed")})
+	if unavailable.PayloadSchemas.Inspect == 0 || unavailable.PayloadSchemas.FailedJobs == 0 {
+		t.Errorf("payload_schemas = %+v, want the versions published with an unavailable descriptor",
+			unavailable.PayloadSchemas)
 	}
 }
 

@@ -76,7 +76,10 @@ Milestones 1 and 2 implemented:
   the descriptor is unavailable, so a caller that kept a control is refused it by the service.
   The state is also on `/api/v1/health` (`capabilities`) and in the scrape as
   `gohorizon_capabilities_available` / `gohorizon_capabilities_failed_reads`, so a read-only
-  deployment is alertable without reading the log.
+  deployment is alertable without reading the log. `payload_schemas` publishes the versions of
+  the queue-inspection and failed-list payloads this service reads; a payload declaring another
+  is refused with both numbers, so a package upgrade cannot change queue depth or the failed
+  store silently.
 - Read-only `GET /api/v1/health`, and `GET /metrics` for a Prometheus scrape of the same
   state: `gohorizon_up`, `gohorizon_lock_held`, `gohorizon_capabilities_available`,
   `gohorizon_capabilities_failed_reads`, telemetry counters by result, queue depth by state, and

@@ -66,6 +66,16 @@ operator and a refusal would be the 503 the action returns.
    so a deployment repaired and restarted gets its controls back without a page reload; a
    refresh that fails keeps the last descriptor, since falling back would put back a control
    the service would refuse.
+7. **The descriptor also publishes the versions of the application's other payloads this
+   service reads.** `payload_schemas` names the queue-inspection and failed-list versions
+   (`inspect`, `failed_jobs`) beside the `schema` of the capabilities payload itself. Both
+   decoders already refuse a payload that declares another version, naming both numbers; a
+   package that changes either payload therefore fails the read with the versions in the error
+   instead of being read with fields that may mean something else. Publishing the numbers makes
+   the contract visible before a payload is read, and makes drift testable: the acceptance test
+   compares them with what the fixture's own commands print, so a package bump cannot pass
+   unnoticed. They describe this service, not the application's claims, so they are published
+   even when the descriptor itself is unavailable.
 
 ## Consequences
 
@@ -132,6 +142,9 @@ operator and a refusal would be the 503 the action returns.
   already runs starts answering the probe — and asserts the controls come back on the page that
   was already open, which is the service's re-read plus the dashboard's refresh, with neither a
   restart nor a reload;   `internal/supervisor/service_test.go` covers the re-read, the loop that stops with the service
-  and the report's capabilities state; `internal/api/prometheus_test.go` and
-  `internal/api/router_test.go` cover the gauge and the health field. The second broker
+  and the report's capabilities state;   `internal/api/prometheus_test.go` and
+  `internal/api/router_test.go` cover the gauge and the health field;
+  `internal/adapter/payload_schema_test.go` pins the refusal behind each published payload
+  schema, and the acceptance contract test compares `payload_schemas` with the schemas the
+  fixture's `gohorizon:inspect` and `gohorizon:failed:list` actually print. The second broker
   adapter that would make the descriptor earn its keep is still deferred.

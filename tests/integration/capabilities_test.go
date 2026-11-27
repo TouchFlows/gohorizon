@@ -61,7 +61,12 @@ type capabilitiesAnswer struct {
 	} `json:"connections"`
 	Events     []string        `json:"events"`
 	Operations map[string]bool `json:"operations"`
-	Error      string          `json:"error"`
+	// PayloadSchemas are the versions this service reads of the application's other payloads.
+	PayloadSchemas struct {
+		Inspect    int `json:"inspect"`
+		FailedJobs int `json:"failed_jobs"`
+	} `json:"payload_schemas"`
+	Error string `json:"error"`
 }
 
 // capabilitiesPayload runs the documented command in the fixture, so the comparison is against
@@ -82,6 +87,44 @@ func (h *harness) capabilitiesPayload(t *testing.T) rawCapabilities {
 		t.Fatalf("decode the application's capabilities: %v\n%s", err, out)
 	}
 	return payload
+}
+
+// payloadSchema runs one of the application's documented commands and returns the schema its
+// payload declares, so a version the descriptor publishes can be compared with the one the
+// command actually prints rather than with a second Go constant.
+func (h *harness) payloadSchema(t *testing.T, command ...string) int {
+	t.Helper()
+
+	args := append([]string{"artisan"}, command...)
+	args = append(args, "--json")
+	cmd := exec.Command(h.php, args...)
+	cmd.Dir = h.fixture
+	cmd.Env = os.Environ()
+	out, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("%s: %v", strings.Join(args, " "), err)
+	}
+
+	// A command may print a line before its payload, so the payload is the last JSON line.
+	lines := strings.Split(strings.TrimSpace(string(out)), "\n")
+	for i := len(lines) - 1; i >= 0; i-- {
+		line := strings.TrimSpace(lines[i])
+		if !strings.HasPrefix(line, "{") {
+			continue
+		}
+		var payload struct {
+			Schema int `json:"schema"`
+		}
+		if err := json.Unmarshal([]byte(line), &payload); err != nil {
+			t.Fatalf("decode %s: %v", strings.Join(args, " "), err)
+		}
+		if payload.Schema == 0 {
+			t.Fatalf("%s printed no schema", strings.Join(args, " "))
+		}
+		return payload.Schema
+	}
+	t.Fatalf("%s printed no JSON payload", strings.Join(args, " "))
+	return 0
 }
 
 // refusingPHP writes a PHP executable that refuses the capabilities command with this reason
@@ -231,6 +274,17 @@ func TestCapabilitiesEndpointMatchesTheApplicationsPayload(t *testing.T) {
 	}
 	if answer.PCNTL != raw.Runtime.PCNTL {
 		t.Errorf("pcntl = %t, want the application's %t", answer.PCNTL, raw.Runtime.PCNTL)
+	}
+
+	// The other payloads this service reads are versioned too, and the descriptor publishes the
+	// versions it accepts: compare them with what the application's own commands print, so a
+	// package that bumps either payload cannot do it without this test naming the mismatch. The
+	// decoders refuse the payload at read time with those same two numbers.
+	if got, want := answer.PayloadSchemas.Inspect, h.payloadSchema(t, "gohorizon:inspect", "--connection="+testConnection, "--queue="+testQueue); got != want {
+		t.Errorf("payload_schemas.inspect = %d, want the application's %d", got, want)
+	}
+	if got, want := answer.PayloadSchemas.FailedJobs, h.payloadSchema(t, "gohorizon:failed:list", "--limit=1"); got != want {
+		t.Errorf("payload_schemas.failed_jobs = %d, want the application's %d", got, want)
 	}
 
 	// Drivers and reservation windows, per connection. A null retry_after is a driver with no

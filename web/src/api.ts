@@ -101,6 +101,10 @@ export interface Capabilities {
   pcntl?: boolean
   telemetry_stream?: string
   events?: string[]
+  // The versions this service reads of the application's queue-inspection and failed-list
+  // payloads; each read refuses one that declares another, so a package upgrade is visible here
+  // rather than misread.
+  payload_schemas?: { inspect: number; failed_jobs: number }
   operations: CapabilityOperations
   error?: string
 }

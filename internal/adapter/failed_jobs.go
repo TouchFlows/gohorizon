@@ -16,9 +16,11 @@ import (
 // store through its failer, so a slow answer means the application is unhealthy.
 const failedListTimeout = 15 * time.Second
 
-// failedJobsSchema is the payload version `gohorizon:failed:list --json` prints. It is
-// separate from the capabilities schema because the two payloads change independently.
-const failedJobsSchema = 1
+// FailedJobsSchema is the payload version `gohorizon:failed:list --json` prints and the only one
+// this service reads. It is separate from the capabilities schema because the two payloads
+// change independently, and it is published in the capabilities descriptor so a client can see
+// which failed-list payload this deployment accepts (docs/adr/0014).
+const FailedJobsSchema = 1
 
 // The listing page bounds: a size the dashboard can render without paging, and a ceiling
 // that keeps one request from asking the application for a whole failed store.
@@ -124,9 +126,9 @@ func decodeFailedJobs(out []byte) (FailedJobsPage, error) {
 	if err := json.Unmarshal([]byte(payloadLine(text)), &payload); err != nil {
 		return FailedJobsPage{}, fmt.Errorf("decode gohorizon:failed:list output: %w", err)
 	}
-	if payload.Schema != failedJobsSchema {
+	if payload.Schema != FailedJobsSchema {
 		return FailedJobsPage{}, fmt.Errorf("gohorizon:failed:list reports schema %d; this GoHorizon understands schema %d",
-			payload.Schema, failedJobsSchema)
+			payload.Schema, FailedJobsSchema)
 	}
 
 	return FailedJobsPage{FailedJobs: payload.FailedJobs, NextBefore: payload.NextBefore}, nil

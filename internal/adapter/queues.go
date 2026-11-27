@@ -15,9 +15,12 @@ import (
 // contract for counts, so a slow answer means the application is unhealthy.
 const (
 	inspectTimeout = 10 * time.Second
-	// inspectionSchema is the payload version `gohorizon:inspect --json` prints. It is its
-	// own version, independent of the capabilities and failed-list payloads.
-	inspectionSchema = 1
+	// InspectionSchema is the payload version `gohorizon:inspect --json` prints and the only one
+	// this service reads: a payload declaring another is refused rather than read with fields
+	// that may mean something else. It is its own version, independent of the capabilities and
+	// failed-list payloads, and it is published in the capabilities descriptor so a client can
+	// see which inspect payload this deployment accepts (docs/adr/0014).
+	InspectionSchema = 1
 )
 
 // QueueDepth is one queue as `gohorizon:inspect --json` reports it. A driver that cannot
@@ -87,9 +90,9 @@ func decodeInspection(out []byte) (Inspection, error) {
 	if err := json.Unmarshal([]byte(payloadLine(text)), &inspection); err != nil {
 		return Inspection{}, fmt.Errorf("decode gohorizon:inspect output: %w", err)
 	}
-	if inspection.Schema != inspectionSchema {
+	if inspection.Schema != InspectionSchema {
 		return Inspection{}, fmt.Errorf("gohorizon:inspect reports schema %d; this GoHorizon understands schema %d",
-			inspection.Schema, inspectionSchema)
+			inspection.Schema, InspectionSchema)
 	}
 	if len(inspection.Queues) == 0 {
 		return Inspection{}, errors.New("gohorizon:inspect reported no queues")

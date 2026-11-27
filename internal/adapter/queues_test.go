@@ -28,8 +28,8 @@ func TestProbeDecodesInspection(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Queues: %v", err)
 			}
-			if inspection.Schema != inspectionSchema || inspection.Connection != "redis" {
-				t.Errorf("inspection = %+v, want schema %d on redis", inspection, inspectionSchema)
+			if inspection.Schema != InspectionSchema || inspection.Connection != "redis" {
+				t.Errorf("inspection = %+v, want schema %d on redis", inspection, InspectionSchema)
 			}
 			if len(inspection.Queues) != 2 {
 				t.Fatalf("queues = %+v, want both asked-for queues", inspection.Queues)

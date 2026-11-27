@@ -30,8 +30,28 @@ type capabilitiesResponse struct {
 	PCNTL             bool                            `json:"pcntl"`
 	TelemetryStream   string                          `json:"telemetry_stream,omitempty"`
 	Events            []string                        `json:"events,omitempty"`
-	Operations        map[string]bool                 `json:"operations"`
-	Error             string                          `json:"error,omitempty"`
+	// PayloadSchemas are the versions of the application's other documented payloads this
+	// service reads. They describe this service, not the application, so they are published
+	// even when the descriptor is unavailable: a client comparing them with what the
+	// application's commands print can tell which side to upgrade.
+	PayloadSchemas payloadSchemas  `json:"payload_schemas"`
+	Operations     map[string]bool `json:"operations"`
+	Error          string          `json:"error,omitempty"`
+}
+
+// payloadSchemas names the versions of the queue-inspection and failed-list payloads this
+// service accepts. Each read refuses a payload that declares another version with both numbers
+// in the error, which is what keeps a package upgrade from being read as if nothing had changed
+// (docs/adr/0014).
+type payloadSchemas struct {
+	Inspect    int `json:"inspect"`
+	FailedJobs int `json:"failed_jobs"`
+}
+
+// payloadSchemaVersions is the one place those versions are read from, so the descriptor cannot
+// publish a number the decoders do not enforce.
+func payloadSchemaVersions() payloadSchemas {
+	return payloadSchemas{Inspect: adapter.InspectionSchema, FailedJobs: adapter.FailedJobsSchema}
 }
 
 // capabilityConnection is one queue connection as the descriptor reports it. RetryAfter is
@@ -65,8 +85,9 @@ func capabilities(provider Provider) http.HandlerFunc {
 		caps, err := provider.Capabilities()
 		available := err == nil && caps.Supported()
 		response := capabilitiesResponse{
-			Available:  available,
-			Operations: capabilityOperations(available),
+			Available:      available,
+			PayloadSchemas: payloadSchemaVersions(),
+			Operations:     capabilityOperations(available),
 		}
 		if !available {
 			// The same sentence the health report and a refused action publish, so a client
