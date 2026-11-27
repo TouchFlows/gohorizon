@@ -86,12 +86,9 @@ export default function Workers({
         </section>
       ))}
 
-      {!controls.restart && (
-        <div className="banner__row">
-          <p className="muted">{controls.reason}</p>
-          <RereadCapabilities reread={reread} canReread={canReread} />
-        </div>
-      )}
+      {/* Mounted whether or not a banner is drawn: a successful re-read removes the banner and has
+          to leave its answer on screen (docs/adr/0014). */}
+      <RereadCapabilities reason={controls.reason} reread={reread} canReread={canReread} />
     </>
   )
 }

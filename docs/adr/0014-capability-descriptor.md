@@ -157,9 +157,11 @@ operator and a refusal would be the 503 the action returns.
   `gohorizon_capabilities_last_success_timestamp_seconds` when it gets an answer. The dashboard
   draws it as `Re-read now` beside the read-only banner, for the administrator role only,
   disabled while the request is in flight, and says what the read found (`Readable: schema 1,
-  package gohorizon/laravel 0.1.0`, `Still read-only: …`, or the service's refusal). The banner
-  keeps its own line: the button is a sibling, so the sentence the alerting language is matched
-  on is not decorated.
+  package gohorizon/laravel 0.1.0`, `Still read-only: …`, or the service's refusal). That answer
+  outlives the banner: a successful read is what takes the banner away, so the notice is mounted
+  whether or not one is drawn, and the outcome stays on screen after the controls come back
+  instead of unmounting at the moment it became the answer. The banner keeps its own line: the
+  button is a sibling, so the sentence the alerting language is matched on is not decorated.
 - The state is alertable without the log. `GET /api/v1/health` carries a `capabilities` object
   (`available`, `schema`, `failed_reads`, `error`, `contradiction`, `last_read_at`,
   `read_only_since`) and `/metrics`

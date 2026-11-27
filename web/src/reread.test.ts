@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { AdminActionError } from './api'
 import type { Capabilities } from './api'
-import { idleReread, rereadFailed, rereadFinished, rereadStarted } from './reread'
+import { idleReread, noticeFor, rereadFailed, rereadFinished, rereadStarted } from './reread'
 
 const operations = {
   inspect_queues: true,
@@ -77,5 +77,48 @@ describe('the re-read control', () => {
     // and the control says what it was doing rather than showing a blank status.
     expect(rereadFailed(new Error('')).outcome).toBe('Could not re-read the descriptor.')
     expect(rereadFailed(undefined).outcome).toBe('Could not re-read the descriptor.')
+  })
+})
+
+describe('what the control area draws', () => {
+  const banner = 'Read-only for 5 minutes: could not open input file: artisan'
+
+  it('offers the button beside the banner while the controls are withheld', () => {
+    expect(noticeFor(banner, idleReread, true)).toEqual({
+      banner,
+      button: true,
+      outcome: '',
+    })
+  })
+
+  it('keeps what the read found after the banner it was drawn beside is gone', () => {
+    // The regression this guards: a successful read is what empties the banner, so an outcome
+    // drawn only inside the banner would unmount at the moment it became the answer. The control
+    // is mounted either way, and the notice still carries the outcome with no banner and no
+    // button to press.
+    expect(noticeFor('', rereadFinished(readable), true)).toEqual({
+      banner: '',
+      button: false,
+      outcome: 'Readable: schema 1, package gohorizon/laravel 0.1.0',
+    })
+  })
+
+  it('keeps the outcome beside the banner when the read found it still read-only', () => {
+    const notice = noticeFor(banner, rereadFinished(stillReadOnly), true)
+
+    expect(notice.banner).toBe(banner)
+    expect(notice.button).toBe(true)
+    expect(notice.outcome).toBe('Still read-only: could not open input file: artisan')
+  })
+
+  it('draws no control for a role that may not ask for the read', () => {
+    // A viewer and an operator get the banner and nothing else: the outcome belongs to the read
+    // they were never offered.
+    expect(noticeFor(banner, idleReread, false)).toEqual({ banner, button: false, outcome: '' })
+    expect(noticeFor('', rereadFinished(readable), false)).toEqual({
+      banner: '',
+      button: false,
+      outcome: '',
+    })
   })
 })
