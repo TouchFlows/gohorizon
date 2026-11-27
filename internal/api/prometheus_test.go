@@ -52,6 +52,7 @@ func TestMetricsExpositionServesTheOperationalState(t *testing.T) {
 		"# TYPE gohorizon_capabilities_available gauge\ngohorizon_capabilities_available 1\n",
 		"# TYPE gohorizon_capabilities_failed_reads gauge\ngohorizon_capabilities_failed_reads 0\n",
 		"# TYPE gohorizon_capabilities_contradiction gauge\ngohorizon_capabilities_contradiction 0\n",
+		"# TYPE gohorizon_capabilities_last_success_timestamp_seconds gauge\ngohorizon_capabilities_last_success_timestamp_seconds 0\n",
 		"# TYPE gohorizon_telemetry_events_total counter\n",
 		"gohorizon_telemetry_events_total{result=\"event\"} 42\n",
 		"gohorizon_telemetry_events_total{result=\"duplicate\"} 3\n",
@@ -82,6 +83,20 @@ func TestMetricsExpositionServesTheOperationalState(t *testing.T) {
 	// Queues are ordered by name, so a scrape of the same state is the same bytes.
 	if strings.Index(body, `queue="default"`) > strings.Index(body, `queue="reports"`) {
 		t.Errorf("queues are not in name order:\n%s", body)
+	}
+}
+
+// TestMetricsExpositionReportsWhenTheLoopLastAnswered is the staleness sample: a timestamp rather
+// than an age, so an alert is `time() - this > 3 * interval` and a loop that stopped is visible
+// while every other capabilities sample still looks healthy (docs/adr/0014).
+func TestMetricsExpositionReportsWhenTheLoopLastAnswered(t *testing.T) {
+	report := prometheusReport()
+	report.Capabilities.LastReadAt = 1763600000
+
+	body := get(t, &stubProvider{report: report}, "/metrics").Body.String()
+
+	if !strings.Contains(body, "\ngohorizon_capabilities_last_success_timestamp_seconds 1763600000\n") {
+		t.Errorf("body has no last-success sample:\n%s", body)
 	}
 }
 

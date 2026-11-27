@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -200,6 +201,27 @@ exec '%s' "$@"
 		h.t.Fatalf("write the file-answering php: %v", err)
 	}
 	return path
+}
+
+// lastSuccessTimestamp reads the re-read timestamp out of a scrape, failing when the sample is
+// missing rather than defaulting it to zero.
+func lastSuccessTimestamp(t *testing.T, body []byte) int64 {
+	t.Helper()
+
+	const family = "gohorizon_capabilities_last_success_timestamp_seconds "
+	for _, line := range strings.Split(string(body), "\n") {
+		value, ok := strings.CutPrefix(line, family)
+		if !ok {
+			continue
+		}
+		parsed, err := strconv.ParseInt(strings.TrimSpace(value), 10, 64)
+		if err != nil {
+			t.Fatalf("parse the last-success sample %q: %v", line, err)
+		}
+		return parsed
+	}
+	t.Fatalf("the scrape has no %s sample", family)
+	return 0
 }
 
 // capabilitiesAnswerWith is a schema-1 descriptor whose queue connection has this retry_after,
@@ -404,6 +426,29 @@ func TestCapabilitiesEndpointMatchesTheApplicationsPayload(t *testing.T) {
 		if !answer.Operations[operation] {
 			t.Errorf("operations[%q] = false although the application reports a payload this service reads", operation)
 		}
+	}
+
+	// The staleness field: the launch read is the first answer, so health already says when the
+	// loop last answered, and the scrape carries the same timestamp (docs/adr/0014).
+	healthNow, err := h.fetchReport(base)
+	if err != nil {
+		t.Fatalf("read health: %v", err)
+	}
+	if age := time.Now().Unix() - healthNow.Capabilities.LastReadAt; age < 0 || age > 120 {
+		t.Errorf("last_read_at = %d, want the launch read's time (age %ds)", healthNow.Capabilities.LastReadAt, age)
+	}
+	scrape, err := http.Get(base + "/metrics")
+	if err != nil {
+		t.Fatalf("GET /metrics: %v", err)
+	}
+	defer scrape.Body.Close()
+	body, err := io.ReadAll(scrape.Body)
+	if err != nil {
+		t.Fatalf("read the scrape: %v", err)
+	}
+	if got := lastSuccessTimestamp(t, body); got != healthNow.Capabilities.LastReadAt {
+		t.Errorf("gohorizon_capabilities_last_success_timestamp_seconds = %d, want health's %d",
+			got, healthNow.Capabilities.LastReadAt)
 	}
 
 	// Drivers and reservation windows, per connection. A null retry_after is a driver with no

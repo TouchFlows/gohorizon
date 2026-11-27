@@ -141,6 +141,10 @@ type Service struct {
 	// this is published rather than enforced (docs/adr/0014). Written under capsMu with the
 	// answer it belongs to.
 	contradiction string
+	// lastRead is when the loop last got an answer, zero when it never has. A re-read loop that
+	// stopped publishes a healthy-looking descriptor, so staleness needs its own field
+	// (docs/adr/0014). Written under capsMu with the answer it belongs to.
+	lastRead time.Time
 	// appID names the application in the re-read's log lines.
 	appID string
 
@@ -196,6 +200,14 @@ func New(ctx context.Context, cfg *config.Config, log *slog.Logger) (*Service, e
 		return nil, err
 	}
 
+	// The launch read is the first answer the loop has: without it health would report no
+	// re-read at all until the first interval, which is the state a stopped loop also looks
+	// like (docs/adr/0014).
+	var launchRead time.Time
+	if probeErr == nil {
+		launchRead = time.Now()
+	}
+
 	s := &Service{
 		cfg:           cfg,
 		log:           log,
@@ -210,6 +222,7 @@ func New(ctx context.Context, cfg *config.Config, log *slog.Logger) (*Service, e
 		appID:         app.ID,
 		probed:        caps,
 		probeErr:      probeErr,
+		lastRead:      launchRead,
 		queues:        configuredQueues(app),
 		queueInterval: defaultQueueInterval,
 		pruneInterval: defaultPruneInterval,
@@ -394,6 +407,12 @@ func (s *Service) probeOnce(ctx context.Context) {
 	}
 	if publish {
 		s.probed, s.probeErr = caps, err
+		// Any answer proves the loop is running, including one this service cannot read: a
+		// schema it does not understand is reported by `available`, and using it to withhold
+		// this timestamp would make two different failures look alike (docs/adr/0014).
+		if err == nil {
+			s.lastRead = time.Now()
+		}
 		// The preflight ran once, at launch. An application that lowers a retry_after under a
 		// worker's timeout while the pool runs is the same contradiction, found late: the
 		// answer is published with the new descriptor instead of waiting for a restart
@@ -450,6 +469,15 @@ func (s *Service) contradictionFor(caps adapter.Capabilities, err error) string 
 		return checkErr.Error()
 	}
 	return ""
+}
+
+// unixSeconds is a timestamp for the health body, 0 for a time that never happened so the field
+// stays out of the document.
+func unixSeconds(t time.Time) int64 {
+	if t.IsZero() {
+		return 0
+	}
+	return t.Unix()
 }
 
 // sameCapabilityAnswer reports whether two reads would be published identically, so a loop that
@@ -912,6 +940,7 @@ func (s *Service) Report() health.Report {
 	caps, capsErr := s.probed, s.probeErr
 	capsFailures := s.probeFailures
 	contradiction := s.contradiction
+	lastRead := s.lastRead
 	s.capsMu.RUnlock()
 
 	app := s.cfg.Application()
@@ -926,6 +955,7 @@ func (s *Service) Report() health.Report {
 			Schema:        caps.Schema,
 			FailedReads:   capsFailures,
 			Contradiction: contradiction,
+			LastReadAt:    unixSeconds(lastRead),
 		},
 	}
 	if !report.Capabilities.Available {

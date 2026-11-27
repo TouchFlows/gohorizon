@@ -180,6 +180,39 @@ func TestHealthPublishesAContradiction(t *testing.T) {
 	}
 }
 
+// TestHealthPublishesWhenTheLoopLastAnswered pins the staleness field an alert reads: the other
+// capabilities values describe the last answer, so a re-read loop that stopped would look
+// healthy without it. A loop that never answered omits the field rather than publishing a zero
+// time, which is the state after a failed launch probe (docs/adr/0014).
+func TestHealthPublishesWhenTheLoopLastAnswered(t *testing.T) {
+	const at = int64(1763600000)
+
+	recorder := getHealth(t, health.Report{
+		Status:       "ok",
+		Capabilities: health.Capabilities{Available: true, Schema: 1, LastReadAt: at},
+	})
+
+	var payload struct {
+		Capabilities struct {
+			LastReadAt int64 `json:"last_read_at"`
+		} `json:"capabilities"`
+	}
+	if err := json.Unmarshal(recorder.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode body: %v (%s)", err, recorder.Body)
+	}
+	if payload.Capabilities.LastReadAt != at {
+		t.Errorf("last_read_at = %d, want %d", payload.Capabilities.LastReadAt, at)
+	}
+
+	absent := getHealth(t, health.Report{
+		Status:       "ok",
+		Capabilities: health.Capabilities{Available: true, Schema: 1},
+	})
+	if strings.Contains(absent.Body.String(), "last_read_at") {
+		t.Errorf("body = %s, want no last_read_at before any read answered", absent.Body)
+	}
+}
+
 func TestHealthExposesTelemetryCounters(t *testing.T) {
 	recorder := getHealth(t, health.Report{
 		Status: "ok",

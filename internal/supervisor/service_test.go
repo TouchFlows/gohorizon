@@ -288,6 +288,49 @@ func TestProbePublishesConsecutiveFailures(t *testing.T) {
 	}
 }
 
+// TestReportPublishesWhenTheLoopLastAnswered is the staleness field: every other capabilities
+// value describes the last answer, so a loop that stopped looks healthy. The launch read counts
+// as the first answer, a failed read leaves the timestamp alone, and a read that answers with a
+// schema this service cannot read still counts as a read — that failure is `available`'s to
+// report (docs/adr/0014).
+func TestReportPublishesWhenTheLoopLastAnswered(t *testing.T) {
+	readable := adapter.Capabilities{Schema: adapter.SchemaVersion, Package: "gohorizon/laravel"}
+	probe := &scriptedProbe{answers: []probeAnswer{
+		{err: errors.New("exit status 1: could not open input file: artisan")}, // debounced
+		{caps: adapter.Capabilities{Schema: adapter.SchemaVersion + 1}},        // an answer
+	}}
+	service := &Service{
+		cfg:      preflightConfig(t, 60),
+		log:      slog.New(slog.NewTextHandler(io.Discard, nil)),
+		consumer: &telemetry.Consumer{},
+		appID:    "app",
+		probe:    probe,
+		probed:   readable,
+		started:  time.Now(),
+	}
+	service.lockHeld = true
+
+	if got := service.Report().Capabilities.LastReadAt; got != 0 {
+		t.Fatalf("last_read_at = %d, want 0 before any re-read answered", got)
+	}
+
+	// A read that failed answered nothing: moving the timestamp would hide a stopped loop.
+	service.probeOnce(context.Background())
+	if got := service.Report().Capabilities.LastReadAt; got != 0 {
+		t.Errorf("last_read_at = %d, want 0 while the only read failed", got)
+	}
+
+	before := time.Now().Unix()
+	service.probeOnce(context.Background())
+	report := service.Report()
+	if report.Capabilities.Available {
+		t.Error("available = true, want false for a schema this service cannot read")
+	}
+	if report.Capabilities.LastReadAt < before || report.Capabilities.LastReadAt > time.Now().Unix() {
+		t.Errorf("last_read_at = %d, want the answered read's time", report.Capabilities.LastReadAt)
+	}
+}
+
 // TestProbePublishesAContradictionTheLaunchWouldHaveRefused is the preflight's second life: it ran
 // once, at launch, so an application that lowers a retry_after under a worker's timeout while the
 // pool runs is the same contradiction found late. It is published for an operator and left

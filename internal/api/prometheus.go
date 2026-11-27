@@ -25,10 +25,13 @@ const (
 	// metricCapsContradiction is the late version of the launch preflight: 1 when the
 	// application's current answer contradicts the running configuration.
 	metricCapsContradiction = "gohorizon_capabilities_contradiction"
-	metricTelemetryEvents   = "gohorizon_telemetry_events_total"
-	metricQueueJobs         = "gohorizon_queue_jobs"
-	metricWorkers           = "gohorizon_workers"
-	metricCrashLooping      = "gohorizon_crash_looping_workers"
+	// metricCapsLastSuccess is when the re-read loop last got an answer, because every other
+	// capabilities sample describes the last answer and a loop that stopped looks healthy.
+	metricCapsLastSuccess = "gohorizon_capabilities_last_success_timestamp_seconds"
+	metricTelemetryEvents = "gohorizon_telemetry_events_total"
+	metricQueueJobs       = "gohorizon_queue_jobs"
+	metricWorkers         = "gohorizon_workers"
+	metricCrashLooping    = "gohorizon_crash_looping_workers"
 )
 
 // labelValueEscaper escapes a label value as the text format requires: a backslash, the
@@ -90,6 +93,13 @@ func exposition(report health.Report) string {
 	writeFamily(&b, metricCapsContradiction, "gauge",
 		"1 when the application's current answer contradicts the running configuration (a retry_after under a worker timeout, a --timeout without pcntl), 0 when it does not.")
 	writeSample(&b, metricCapsContradiction, contradiction)
+
+	// A timestamp rather than an age, so an alert is `time() - this > 3 * interval` and a scrape
+	// that stopped reporting is visible as the samples going stale. Zero means no read has
+	// answered since start, which is its own alert.
+	writeFamily(&b, metricCapsLastSuccess, "gauge",
+		"Unix seconds when the capabilities re-read loop last got an answer, 0 when it never has.")
+	writeSample(&b, metricCapsLastSuccess, int(report.Capabilities.LastReadAt))
 
 	// These are counters since start, so zero is a fact about the run and is always written.
 	// "error" is a Redis read, ack or sink failure that was retried, not a failed job.

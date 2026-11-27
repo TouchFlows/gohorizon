@@ -490,6 +490,7 @@ type report struct {
 		FailedReads   int    `json:"failed_reads"`
 		Error         string `json:"error"`
 		Contradiction string `json:"contradiction"`
+		LastReadAt    int64  `json:"last_read_at"`
 	} `json:"capabilities"`
 	// Queues is the depth the service last read; a read it refused leaves the reason here.
 	Queues struct {

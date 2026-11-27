@@ -33,6 +33,10 @@ type Capabilities struct {
 	// words the launch preflight refuses with. The pool is already running, so this is published
 	// and never enforced (docs/adr/0014).
 	Contradiction string `json:"contradiction,omitempty"`
+	// LastReadAt is when the re-read loop last got an answer, in unix seconds, 0 when it never
+	// has. Every other field here describes the last answer, so a loop that stopped looks like a
+	// healthy one; this is the field an alert on staleness reads (docs/adr/0014).
+	LastReadAt int64 `json:"last_read_at,omitempty"`
 }
 
 type Lock struct {

@@ -127,9 +127,15 @@ operator and a refusal would be the 503 the action returns.
   reason, that follow. The re-read is cheap but not free: it starts PHP once per interval per
   application, which is why the interval is slow and why the HTTP path still starts nothing.
 - The state is alertable without the log. `GET /api/v1/health` carries a `capabilities` object
-  (`available`, `schema`, `failed_reads`, `error`, `contradiction`) and `/metrics` carries
-  `gohorizon_capabilities_available`, `gohorizon_capabilities_failed_reads` and
-  `gohorizon_capabilities_contradiction`, all gauges. The
+  (`available`, `schema`, `failed_reads`, `error`, `contradiction`, `last_read_at`) and `/metrics`
+  carries `gohorizon_capabilities_available`, `gohorizon_capabilities_failed_reads` and
+  `gohorizon_capabilities_contradiction`, all gauges. A fourth sample,
+  `gohorizon_capabilities_last_success_timestamp_seconds`, is when the loop last got an answer:
+  every other value here describes the last answer, so a re-read loop that stopped would publish
+  a healthy descriptor forever, failed streak of zero and all. It is a timestamp rather than an
+  age, so the alert is `time() - it > 3 * interval`, the launch read counts as the first answer,
+  and an answer this service cannot read still counts as a read — that failure is `available`'s
+  to report. The
   report status is not degraded by either: this service still supervises a pool it cannot
   describe, and a health check that restarted it over that would take healthy workers down
   (docs/adr/0004 item 7). The failed-read streak is published so an alert can fire on a run of
