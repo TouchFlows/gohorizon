@@ -195,7 +195,6 @@ func TestProbeOncePublishesTheApplicationsNewAnswer(t *testing.T) {
 	probe := &scriptedProbe{answers: []probeAnswer{
 		{caps: readable},
 		{caps: unreadable},
-		{err: errors.New("php: could not open input file: artisan")},
 	}}
 	logs := &bytes.Buffer{}
 	service := &Service{
@@ -224,15 +223,94 @@ func TestProbeOncePublishesTheApplicationsNewAnswer(t *testing.T) {
 	if !strings.Contains(logs.String(), "schema not understood") {
 		t.Errorf("log = %q, want the schema change recorded", logs.String())
 	}
+}
 
-	// The package was removed: the probe's own reason is what the deployment presents.
-	service.probeOnce(context.Background())
-	_, err = service.Capabilities()
-	if err == nil || !strings.Contains(err.Error(), "artisan") {
-		t.Fatalf("error = %v, want the probe's own failure", err)
+// TestProbeKeepsTheLastAnswerThroughOneFailure is the debounce: a single failed re-read does not
+// withdraw a readable descriptor. PHP can fail to answer once because the machine is busy, and
+// the deployment that answered a moment ago is still the one being supervised.
+func TestProbeKeepsTheLastAnswerThroughOneFailure(t *testing.T) {
+	readable := adapter.Capabilities{Schema: adapter.SchemaVersion, Package: "gohorizon/laravel"}
+	probe := &scriptedProbe{answers: []probeAnswer{
+		{caps: readable},
+		{err: errors.New("php artisan gohorizon:capabilities: signal: killed")},
+	}}
+	logs := &bytes.Buffer{}
+	service := &Service{
+		log:    slog.New(slog.NewJSONHandler(logs, nil)),
+		appID:  "app",
+		probe:  probe,
+		probed: adapter.Capabilities{Schema: adapter.SchemaVersion + 1},
 	}
-	if !strings.Contains(logs.String(), "capabilities unavailable") {
-		t.Errorf("log = %q, want the failure recorded", logs.String())
+
+	service.probeOnce(context.Background()) // the repair
+	service.probeOnce(context.Background()) // the blip
+
+	caps, err := service.Capabilities()
+	if err != nil || !caps.Supported() || caps.Package != "gohorizon/laravel" {
+		t.Fatalf("descriptor = %+v, %v; want the last answer kept through one failure", caps, err)
+	}
+	if !strings.Contains(logs.String(), "keeping the last answer") {
+		t.Errorf("log = %q, want the kept answer recorded", logs.String())
+	}
+	if strings.Contains(logs.String(), "presented as read-only") {
+		t.Errorf("log = %q, want no read-only state for a single failure", logs.String())
+	}
+}
+
+// TestProbePublishesConsecutiveFailures is the other half of the debounce: an application that
+// stops answering is read-only, and two failures in a row is it failing rather than a blip.
+func TestProbePublishesConsecutiveFailures(t *testing.T) {
+	readable := adapter.Capabilities{Schema: adapter.SchemaVersion, Package: "gohorizon/laravel"}
+	probe := &scriptedProbe{answers: []probeAnswer{
+		{err: errors.New("first read failed")},
+		{err: errors.New("second read: could not open input file: artisan")},
+	}}
+	logs := &bytes.Buffer{}
+	service := &Service{
+		log:    slog.New(slog.NewJSONHandler(logs, nil)),
+		appID:  "app",
+		probe:  probe,
+		probed: readable,
+	}
+
+	service.probeOnce(context.Background())
+	if caps, err := service.Capabilities(); err != nil || !caps.Supported() {
+		t.Fatalf("descriptor = %+v, %v; want the first failure kept off the descriptor", caps, err)
+	}
+
+	service.probeOnce(context.Background())
+	caps, err := service.Capabilities()
+	if err == nil || !strings.Contains(err.Error(), "artisan") {
+		t.Fatalf("descriptor = %+v, %v; want the consecutive failure published", caps, err)
+	}
+	if !strings.Contains(logs.String(), "presented as read-only") {
+		t.Errorf("log = %q, want the read-only state recorded", logs.String())
+	}
+}
+
+// TestProbeFailureStreakNeedsConsecutiveReads pins "consecutive": an answer between two failures
+// resets the count, so an application that fails once in a while never goes read-only.
+func TestProbeFailureStreakNeedsConsecutiveReads(t *testing.T) {
+	readable := adapter.Capabilities{Schema: adapter.SchemaVersion, Package: "gohorizon/laravel"}
+	probe := &scriptedProbe{answers: []probeAnswer{
+		{err: errors.New("blip")},
+		{caps: readable},
+		{err: errors.New("another blip")},
+	}}
+	service := &Service{
+		log:    slog.New(slog.NewTextHandler(io.Discard, nil)),
+		appID:  "app",
+		probe:  probe,
+		probed: readable,
+	}
+
+	service.probeOnce(context.Background())
+	service.probeOnce(context.Background())
+	service.probeOnce(context.Background())
+
+	caps, err := service.Capabilities()
+	if err != nil || !caps.Supported() {
+		t.Fatalf("descriptor = %+v, %v; want the answer kept: the failures were not consecutive", caps, err)
 	}
 }
 

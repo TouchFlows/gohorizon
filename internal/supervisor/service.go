@@ -51,6 +51,13 @@ const (
 	// between two jobs, and every read starts PHP. It is a field on the service so a test can
 	// watch a re-read without waiting (docs/adr/0014).
 	defaultProbeInterval = 30 * time.Second
+
+	// probeFailureThreshold is how many consecutive failed re-reads replace a readable descriptor
+	// with the failure. One is a blip — a PHP run can time out because the machine is busy — and
+	// withdrawing every control for an interval over that is worse than waiting for the next
+	// read, which is the same reason the dashboard keeps the last descriptor it was given
+	// (docs/adr/0014).
+	probeFailureThreshold = 2
 )
 
 // ErrLocked is returned when another instance owns the supervisor lock. Startup
@@ -125,6 +132,10 @@ type Service struct {
 	probe         capabilityProbe
 	probeInterval time.Duration
 	capsMu        sync.RWMutex
+	// probeFailures counts the failed re-reads since the last one that answered, so a single
+	// blip cannot withdraw a readable descriptor. It is written under capsMu with the answer it
+	// belongs to.
+	probeFailures int
 	// appID names the application in the re-read's log lines.
 	appID string
 
@@ -354,21 +365,46 @@ func (s *Service) probeLoop(ctx context.Context) {
 // probeOnce re-reads the application's capabilities and publishes that answer in place of the
 // one it replaces. Only the descriptor changes: the launch preflight is a decision about workers
 // that are already running, so a contradiction found here is published, never enforced.
+//
+// A read that fails is debounced. One failure keeps the last answer, because a single PHP run
+// can fail for reasons that have nothing to do with the deployment, and taking every control
+// away over it would be a worse lie than the answer a moment ago; consecutive failures are the
+// application failing to answer, and those are published as the read-only state they are. A read
+// that answers at all — including one with a schema this service does not know — resets the
+// count, because the application is answering.
 func (s *Service) probeOnce(ctx context.Context) {
 	caps, err := s.probe.Capabilities(ctx)
 
 	s.capsMu.Lock()
 	before, beforeErr := s.probed, s.probeErr
-	s.probed, s.probeErr = caps, err
+	publish := true
+	if err != nil {
+		s.probeFailures++
+		// An already unreadable descriptor is republished with the newest reason: there is no
+		// good answer to protect, and the reason is the operator's only signal.
+		publish = beforeErr != nil || s.probeFailures >= probeFailureThreshold
+	} else {
+		s.probeFailures = 0
+	}
+	if publish {
+		s.probed, s.probeErr = caps, err
+	}
+	after, afterErr := s.probed, s.probeErr
+	failures := s.probeFailures
 	s.capsMu.Unlock()
 
-	if sameCapabilityAnswer(before, beforeErr, caps, err) {
+	if !publish {
+		s.log.Warn("application capabilities re-read failed; keeping the last answer",
+			"application", s.appID, "failures", failures, "threshold", probeFailureThreshold, "error", err)
+		return
+	}
+	if sameCapabilityAnswer(before, beforeErr, after, afterErr) {
 		return
 	}
 	switch {
 	case err != nil:
 		s.log.Warn("application capabilities unavailable; the deployment is presented as read-only",
-			"application", s.appID, "error", err)
+			"application", s.appID, "failures", failures, "error", err)
 	case !caps.Supported():
 		s.log.Warn("application capabilities schema not understood; the deployment is presented as read-only",
 			"application", s.appID, "schema", caps.Schema, "understood", adapter.SchemaVersion)

@@ -88,9 +88,13 @@ operator and a refusal would be the 503 the action returns.
   descriptor on an interval, so installing the package — or removing it — changes what the
   endpoint publishes within one interval, and the dashboard's refresh draws the controls, or the
   reason, that follow. The re-read is cheap but not free: it starts PHP once per interval per
-  application, which is why the interval is slow and why the HTTP path still starts nothing. A
-  re-read that fails is published as unavailable, exactly like one that never answered at
-  startup; the next successful read restores the controls.
+  application, which is why the interval is slow and why the HTTP path still starts nothing.
+- A failed re-read is debounced, because a PHP run that times out once is not a deployment that
+  lost its package. One failure keeps the last answer and only records that it could not be
+  refreshed; `probeFailureThreshold` (2) consecutive failures publish the read-only state, and
+  any read that answers — an unknown schema included — resets the count, so an application that
+  fails once in a while never loses its controls. The startup read has nothing to keep, so a
+  failure there is still published as read-only immediately, exactly as before.
 - The endpoint publishes what the application reports about itself, including its Laravel and
   PHP versions and event list. It does not publish payloads, credentials or keys; the package
   already omits `has_password` values, and the probe ignores them.
