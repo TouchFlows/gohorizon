@@ -51,6 +51,7 @@ func TestMetricsExpositionServesTheOperationalState(t *testing.T) {
 		"# TYPE gohorizon_lock_held gauge\ngohorizon_lock_held 1\n",
 		"# TYPE gohorizon_capabilities_available gauge\ngohorizon_capabilities_available 1\n",
 		"# TYPE gohorizon_capabilities_failed_reads gauge\ngohorizon_capabilities_failed_reads 0\n",
+		"# TYPE gohorizon_capabilities_contradiction gauge\ngohorizon_capabilities_contradiction 0\n",
 		"# TYPE gohorizon_telemetry_events_total counter\n",
 		"gohorizon_telemetry_events_total{result=\"event\"} 42\n",
 		"gohorizon_telemetry_events_total{result=\"duplicate\"} 3\n",
@@ -81,6 +82,20 @@ func TestMetricsExpositionServesTheOperationalState(t *testing.T) {
 	// Queues are ordered by name, so a scrape of the same state is the same bytes.
 	if strings.Index(body, `queue="default"`) > strings.Index(body, `queue="reports"`) {
 		t.Errorf("queues are not in name order:\n%s", body)
+	}
+}
+
+// TestMetricsExpositionReportsALateContradiction is the preflight's second life: a retry_after the
+// application lowered under a worker's timeout while the pool runs is a state to alert on, since
+// the launch it would have refused already happened (docs/adr/0014).
+func TestMetricsExpositionReportsALateContradiction(t *testing.T) {
+	report := prometheusReport()
+	report.Capabilities.Contradiction = "worker launch contradicts the application's capabilities: retry_after (30s) is below worker.timeout (60s)"
+
+	body := get(t, &stubProvider{report: report}, "/metrics").Body.String()
+
+	if !strings.Contains(body, "\ngohorizon_capabilities_contradiction 1\n") {
+		t.Errorf("body has no contradiction sample:\n%s", body)
 	}
 }
 

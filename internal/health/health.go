@@ -28,6 +28,11 @@ type Capabilities struct {
 	// did, so a run of them is visible before the deployment is presented as read-only.
 	FailedReads int    `json:"failed_reads"`
 	Error       string `json:"error,omitempty"`
+	// Contradiction is what the application's current answer contradicts in the running
+	// configuration — a retry_after below a worker's timeout, a --timeout without pcntl — in the
+	// words the launch preflight refuses with. The pool is already running, so this is published
+	// and never enforced (docs/adr/0014).
+	Contradiction string `json:"contradiction,omitempty"`
 }
 
 type Lock struct {

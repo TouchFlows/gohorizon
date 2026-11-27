@@ -288,6 +288,52 @@ func TestProbePublishesConsecutiveFailures(t *testing.T) {
 	}
 }
 
+// TestProbePublishesAContradictionTheLaunchWouldHaveRefused is the preflight's second life: it ran
+// once, at launch, so an application that lowers a retry_after under a worker's timeout while the
+// pool runs is the same contradiction found late. It is published for an operator and left
+// alone — the workers are running, and un-launching them is not something a health read may do
+// (docs/adr/0014).
+func TestProbePublishesAContradictionTheLaunchWouldHaveRefused(t *testing.T) {
+	healthy := adapter.Capabilities{Schema: adapter.SchemaVersion, Package: "gohorizon/laravel"}
+	healthy.Runtime.PCNTL = true // the retry_after is the contradiction this test is about
+	healthy.Queue.Connections = map[string]adapter.Connection{"redis": {Driver: "redis", RetryAfter: 90}}
+	contradicting := healthy
+	contradicting.Queue.Connections = map[string]adapter.Connection{"redis": {Driver: "redis", RetryAfter: 30}}
+
+	probe := &scriptedProbe{answers: []probeAnswer{{caps: contradicting}, {caps: healthy}}}
+	service := &Service{
+		cfg:      preflightConfig(t, 60),
+		log:      slog.New(slog.NewTextHandler(io.Discard, nil)),
+		consumer: &telemetry.Consumer{},
+		appID:    "app",
+		probe:    probe,
+		probed:   healthy,
+		started:  time.Now(),
+	}
+	service.lockHeld = true
+
+	service.probeOnce(context.Background())
+
+	report := service.Report()
+	if report.Status != "ok" {
+		t.Errorf("status = %q, want ok: the pool is still supervised", report.Status)
+	}
+	if !report.Capabilities.Available {
+		t.Error("available = false, want the readable answer with a contradiction beside it")
+	}
+	for _, want := range []string{"retry_after", "worker.timeout", "30"} {
+		if !strings.Contains(report.Capabilities.Contradiction, want) {
+			t.Errorf("contradiction = %q, want it to name %q", report.Capabilities.Contradiction, want)
+		}
+	}
+
+	// The window widened again: the contradiction clears without a restart.
+	service.probeOnce(context.Background())
+	if report := service.Report(); report.Capabilities.Contradiction != "" {
+		t.Errorf("contradiction = %q, want it cleared by the next answer", report.Capabilities.Contradiction)
+	}
+}
+
 // TestProbeFailureStreakNeedsConsecutiveReads pins "consecutive": an answer between two failures
 // resets the count, so an application that fails once in a while never goes read-only.
 func TestProbeFailureStreakNeedsConsecutiveReads(t *testing.T) {

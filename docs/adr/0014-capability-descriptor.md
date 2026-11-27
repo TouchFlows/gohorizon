@@ -127,13 +127,22 @@ operator and a refusal would be the 503 the action returns.
   reason, that follow. The re-read is cheap but not free: it starts PHP once per interval per
   application, which is why the interval is slow and why the HTTP path still starts nothing.
 - The state is alertable without the log. `GET /api/v1/health` carries a `capabilities` object
-  (`available`, `schema`, `failed_reads`, `error`) and `/metrics` carries
-  `gohorizon_capabilities_available` and `gohorizon_capabilities_failed_reads`, both gauges. The
+  (`available`, `schema`, `failed_reads`, `error`, `contradiction`) and `/metrics` carries
+  `gohorizon_capabilities_available`, `gohorizon_capabilities_failed_reads` and
+  `gohorizon_capabilities_contradiction`, all gauges. The
   report status is not degraded by either: this service still supervises a pool it cannot
   describe, and a health check that restarted it over that would take healthy workers down
   (docs/adr/0004 item 7). The failed-read streak is published so an alert can fire on a run of
   failures before the debounce presents the deployment as read-only, and the reason is the same
   sentence the endpoint and a refused action publish.
+- The launch preflight has a second life. Every re-read runs `adapter.Check` again, so an
+  application that lowers a `retry_after` under a worker's timeout, or loses pcntl under a
+  `--timeout`, is the contradiction the launch would have been refused over — found after the
+  launch. It is published in `capabilities.contradiction` and as
+  `gohorizon_capabilities_contradiction`, logged once when it appears, changes or clears, and
+  never enforced: the workers are already running, and a health read must not stop a pool that is
+  doing its job (docs/adr/0004 item 7). A descriptor this service cannot read claims nothing and
+  is not a contradiction, so it clears the field rather than inventing one.
 - A failed re-read is debounced, because a PHP run that times out once is not a deployment that
   lost its package. One failure keeps the last answer and only records that it could not be
   refreshed; `probeFailureThreshold` (2) consecutive failures publish the read-only state, and

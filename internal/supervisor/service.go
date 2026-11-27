@@ -136,6 +136,11 @@ type Service struct {
 	// blip cannot withdraw a readable descriptor. It is written under capsMu with the answer it
 	// belongs to.
 	probeFailures int
+	// contradiction is what the current answer contradicts in the launch configuration, in the
+	// words the preflight refuses with. A pool that is already running cannot be un-launched, so
+	// this is published rather than enforced (docs/adr/0014). Written under capsMu with the
+	// answer it belongs to.
+	contradiction string
 	// appID names the application in the re-read's log lines.
 	appID string
 
@@ -377,6 +382,7 @@ func (s *Service) probeOnce(ctx context.Context) {
 
 	s.capsMu.Lock()
 	before, beforeErr := s.probed, s.probeErr
+	beforeContradiction := s.contradiction
 	publish := true
 	if err != nil {
 		s.probeFailures++
@@ -388,15 +394,29 @@ func (s *Service) probeOnce(ctx context.Context) {
 	}
 	if publish {
 		s.probed, s.probeErr = caps, err
+		// The preflight ran once, at launch. An application that lowers a retry_after under a
+		// worker's timeout while the pool runs is the same contradiction, found late: the
+		// answer is published with the new descriptor instead of waiting for a restart
+		// (docs/adr/0014).
+		s.contradiction = s.contradictionFor(caps, err)
 	}
 	after, afterErr := s.probed, s.probeErr
 	failures := s.probeFailures
+	contradiction := s.contradiction
 	s.capsMu.Unlock()
 
 	if !publish {
 		s.log.Warn("application capabilities re-read failed; keeping the last answer",
 			"application", s.appID, "failures", failures, "threshold", probeFailureThreshold, "error", err)
 		return
+	}
+	if contradiction != beforeContradiction {
+		if contradiction == "" {
+			s.log.Info("worker launch contradiction cleared; the pool keeps running", "application", s.appID)
+		} else {
+			s.log.Warn("worker launch contradicts the application's capabilities; the pool keeps running",
+				"application", s.appID, "contradiction", contradiction)
+		}
 	}
 	if sameCapabilityAnswer(before, beforeErr, after, afterErr) {
 		return
@@ -412,6 +432,24 @@ func (s *Service) probeOnce(ctx context.Context) {
 		s.log.Info("application capabilities re-read; the controls follow the application",
 			"application", s.appID, "schema", caps.Schema, "package", caps.Package)
 	}
+}
+
+// contradictionFor is what the current answer contradicts in the launch configuration, or "" when
+// it contradicts nothing. It is the launch preflight's own check, so the sentence a monitor reads
+// is the one a refused launch would have printed; an answer this service cannot read claims
+// nothing and is not a contradiction (docs/adr/0014).
+func (s *Service) contradictionFor(caps adapter.Capabilities, err error) string {
+	if err != nil || !caps.Supported() || s.cfg == nil {
+		return ""
+	}
+	app := s.cfg.Application()
+	if app == nil {
+		return ""
+	}
+	if checkErr := adapter.Check(&caps, app); checkErr != nil {
+		return checkErr.Error()
+	}
+	return ""
 }
 
 // sameCapabilityAnswer reports whether two reads would be published identically, so a loop that
@@ -873,6 +911,7 @@ func (s *Service) Report() health.Report {
 	s.capsMu.RLock()
 	caps, capsErr := s.probed, s.probeErr
 	capsFailures := s.probeFailures
+	contradiction := s.contradiction
 	s.capsMu.RUnlock()
 
 	app := s.cfg.Application()
@@ -883,9 +922,10 @@ func (s *Service) Report() health.Report {
 		Lock:          health.Lock{Held: held, Degraded: lockErr != "", LastError: lockErr},
 		Queues:        queues,
 		Capabilities: health.Capabilities{
-			Available:   capsErr == nil && caps.Supported(),
-			Schema:      caps.Schema,
-			FailedReads: capsFailures,
+			Available:     capsErr == nil && caps.Supported(),
+			Schema:        caps.Schema,
+			FailedReads:   capsFailures,
+			Contradiction: contradiction,
 		},
 	}
 	if !report.Capabilities.Available {

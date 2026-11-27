@@ -22,10 +22,13 @@ const (
 	metricLockHeld        = "gohorizon_lock_held"
 	metricCapsAvailable   = "gohorizon_capabilities_available"
 	metricCapsFailedReads = "gohorizon_capabilities_failed_reads"
-	metricTelemetryEvents = "gohorizon_telemetry_events_total"
-	metricQueueJobs       = "gohorizon_queue_jobs"
-	metricWorkers         = "gohorizon_workers"
-	metricCrashLooping    = "gohorizon_crash_looping_workers"
+	// metricCapsContradiction is the late version of the launch preflight: 1 when the
+	// application's current answer contradicts the running configuration.
+	metricCapsContradiction = "gohorizon_capabilities_contradiction"
+	metricTelemetryEvents   = "gohorizon_telemetry_events_total"
+	metricQueueJobs         = "gohorizon_queue_jobs"
+	metricWorkers           = "gohorizon_workers"
+	metricCrashLooping      = "gohorizon_crash_looping_workers"
 )
 
 // labelValueEscaper escapes a label value as the text format requires: a backslash, the
@@ -77,6 +80,16 @@ func exposition(report health.Report) string {
 	writeFamily(&b, metricCapsFailedReads, "gauge",
 		"Consecutive failed capabilities re-reads since the last one that answered.")
 	writeSample(&b, metricCapsFailedReads, report.Capabilities.FailedReads)
+
+	// The launch preflight only runs once. A contradiction found by a later re-read is the same
+	// state, so it gets the same treatment: a gauge to alert on, with the sentence in health.
+	contradiction := 0
+	if report.Capabilities.Contradiction != "" {
+		contradiction = 1
+	}
+	writeFamily(&b, metricCapsContradiction, "gauge",
+		"1 when the application's current answer contradicts the running configuration (a retry_after under a worker timeout, a --timeout without pcntl), 0 when it does not.")
+	writeSample(&b, metricCapsContradiction, contradiction)
 
 	// These are counters since start, so zero is a fact about the run and is always written.
 	// "error" is a Redis read, ack or sink failure that was retried, not a failed job.

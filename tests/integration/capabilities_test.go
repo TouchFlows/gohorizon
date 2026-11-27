@@ -180,6 +180,99 @@ exec '%s' "$@"
 	return path
 }
 
+// fileAnsweringPHP writes a PHP executable that answers the capabilities command with the
+// contents of answerPath, so a test can change the application's answer while the service runs,
+// and passes every other command through to the fixture's own interpreter.
+func (h *harness) fileAnsweringPHP(answerPath string) string {
+	h.t.Helper()
+
+	path := filepath.Join(h.dir, "php-file-answer")
+	script := fmt.Sprintf(`#!/bin/sh
+for arg in "$@"; do
+  if [ "$arg" = "gohorizon:capabilities" ]; then
+    cat '%s'
+    exit 0
+  fi
+done
+exec '%s' "$@"
+`, answerPath, h.php)
+	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
+		h.t.Fatalf("write the file-answering php: %v", err)
+	}
+	return path
+}
+
+// capabilitiesAnswerWith is a schema-1 descriptor whose queue connection has this retry_after,
+// with pcntl present so the retry_after is the only thing the preflight can object to.
+func capabilitiesAnswerWith(retryAfter int) string {
+	return fmt.Sprintf(`{"schema":1,"package":"gohorizon/laravel","laravel":"13.0.0","php":"8.4.0",`+
+		`"queue":{"connections":{"redis":{"driver":"redis","retry_after":%d}}},`+
+		`"runtime":{"pcntl":true},"telemetry":{"stream":"gohorizon:events"},"events":[]}`, retryAfter)
+}
+
+// TestContradictionAppearsWhenTheApplicationLowersRetryAfter is the preflight's second life: it
+// ran at launch, and the pool it approved keeps running. An application that lowers retry_after
+// under the worker's timeout while the pool runs is the same contradiction found late, so it is
+// published in health and the scrape instead of waiting for the next restart (docs/adr/0014).
+func TestContradictionAppearsWhenTheApplicationLowersRetryAfter(t *testing.T) {
+	h := newHarness(t)
+	answer := filepath.Join(h.dir, "capabilities.json")
+	if err := os.WriteFile(answer, []byte(capabilitiesAnswerWith(10)), 0o644); err != nil {
+		t.Fatalf("write the application's answer: %v", err)
+	}
+
+	configPath, base := h.writeConfigWithPHP(h.fileAnsweringPHP(answer))
+	h.startBinary(h.buildBinary(), configPath)
+	awaitRunning(h, base)
+
+	// The launch the preflight approved: a window above the worker's timeout, nothing to report.
+	report, err := h.fetchReport(base)
+	if err != nil {
+		t.Fatalf("read health: %v", err)
+	}
+	if report.Capabilities.Contradiction != "" {
+		t.Fatalf("contradiction = %q, want none while retry_after is above the timeout",
+			report.Capabilities.Contradiction)
+	}
+
+	if err := os.WriteFile(answer, []byte(capabilitiesAnswerWith(2)), 0o644); err != nil {
+		t.Fatalf("rewrite the application's answer: %v", err)
+	}
+
+	eventually(t, 60*time.Second, "the contradiction in health", func() error {
+		payload, err := h.fetchReport(base)
+		if err != nil {
+			return err
+		}
+		if payload.Status != "ok" {
+			return fmt.Errorf("status = %q, want ok: the pool is still supervised", payload.Status)
+		}
+		if !payload.Capabilities.Available {
+			return fmt.Errorf("available = false, want the readable answer with a contradiction beside it")
+		}
+		for _, want := range []string{"retry_after", "worker.timeout"} {
+			if !strings.Contains(payload.Capabilities.Contradiction, want) {
+				return fmt.Errorf("contradiction = %q, want it to name %q", payload.Capabilities.Contradiction, want)
+			}
+		}
+		return nil
+	})
+
+	// The scrape carries the same state, so an alert needs no log and no JSON field.
+	resp, err := http.Get(base + "/metrics")
+	if err != nil {
+		t.Fatalf("GET /metrics: %v", err)
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read the scrape: %v", err)
+	}
+	if !strings.Contains(string(body), "\ngohorizon_capabilities_contradiction 1\n") {
+		t.Errorf("scrape has no contradiction sample:\n%s", body)
+	}
+}
+
 // startupWarning returns the WARN line whose message contains fragment and its structured
 // fields, once the service has written it. A degraded start is announced in the log and
 // nowhere else, so that line is the whole signal an operator has: the test reads it the way

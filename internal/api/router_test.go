@@ -147,6 +147,39 @@ func TestHealthPublishesTheCapabilitiesState(t *testing.T) {
 	}
 }
 
+// TestHealthPublishesAContradiction pins the sentence beside the gauge: the metric says a
+// contradiction exists, and the report says which one, so an operator does not have to read the
+// log for the numbers (docs/adr/0014).
+func TestHealthPublishesAContradiction(t *testing.T) {
+	const contradiction = "worker launch contradicts the application's capabilities: retry_after (30s) is below worker.timeout (60s)"
+
+	recorder := getHealth(t, health.Report{
+		Status: "ok",
+		Capabilities: health.Capabilities{
+			Available:     true,
+			Schema:        1,
+			Contradiction: contradiction,
+		},
+	})
+
+	var payload struct {
+		Status       string `json:"status"`
+		Capabilities struct {
+			Contradiction string `json:"contradiction"`
+		} `json:"capabilities"`
+	}
+	if err := json.Unmarshal(recorder.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode body: %v (%s)", err, recorder.Body)
+	}
+	// Published, not enforced: the pool is supervised, so the status stays ok.
+	if payload.Status != "ok" {
+		t.Errorf("status = %q, want ok", payload.Status)
+	}
+	if payload.Capabilities.Contradiction != contradiction {
+		t.Errorf("contradiction = %q, want %q", payload.Capabilities.Contradiction, contradiction)
+	}
+}
+
 func TestHealthExposesTelemetryCounters(t *testing.T) {
 	recorder := getHealth(t, health.Report{
 		Status: "ok",

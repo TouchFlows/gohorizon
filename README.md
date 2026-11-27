@@ -91,7 +91,9 @@ Milestones 1 and 2 implemented:
   change queue depth or the failed store silently.
 - Read-only `GET /api/v1/health`, and `GET /metrics` for a Prometheus scrape of the same
   state: `gohorizon_up`, `gohorizon_lock_held`, `gohorizon_capabilities_available`,
-  `gohorizon_capabilities_failed_reads`, telemetry counters by result, queue depth by state, and
+  `gohorizon_capabilities_failed_reads`, `gohorizon_capabilities_contradiction` (a re-read that
+  contradicts the running configuration, such as a `retry_after` lowered under a worker's
+  timeout, with the sentence in health), telemetry counters by result, queue depth by state, and
   workers by state and crash loops per supervisor.
 - Dashboard served at `/`: overview, queues, workers, jobs, failed jobs and metrics screens.
   The first three read `/api/v1/health` every 5 s, where a 503 is shown as a degraded service
