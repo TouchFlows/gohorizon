@@ -58,7 +58,11 @@ operator and a refusal would be the 503 the action returns.
    session still decides first: without users there are no administrative routes at all
    (docs/adr/0011). A descriptor read that has not answered — still in flight, or a transient
    failure — leaves the controls as the session alone decides, because a blip must not hide a
-   control the service still offers, and the service refuses what it cannot do.
+   control the service still offers, and the service refuses what it cannot do. The dashboard
+   refreshes the descriptor on the health poll's interval instead of reading it once at mount,
+   so a deployment repaired and restarted gets its controls back without a page reload; a
+   refresh that fails keeps the last descriptor, since falling back would put back a control
+   the service would refuse.
 
 ## Consequences
 
@@ -77,6 +81,10 @@ operator and a refusal would be the 503 the action returns.
   token checks — so a caller refused for its role is told that, not that the deployment is
   read-only. Nothing is asked of the pool or the application first: the refusal is not an action
   that happened and was then explained.
+- A repaired deployment recovers on its own. Because the descriptor is a startup snapshot
+  (decision 2), the only way it changes is a restarted service — which is exactly what an
+  operator does after installing the package. The dashboard's refresh then picks the new answer
+  up within one poll, and the read-only banner and the withheld controls leave with it.
 - The endpoint publishes what the application reports about itself, including its Laravel and
   PHP versions and event list. It does not publish payloads, credentials or keys; the package
   already omits `has_password` values, and the probe ignores them.
@@ -93,9 +101,12 @@ operator and a refusal would be the 503 the action returns.
   package's `events` list replaces the illustrative `operations` array in the fixture: the
   operations map is this service's derivation, not a field the package sends.
 - Tests: `internal/api/capabilities_test.go` covers the published descriptor, the unavailable
-  adapter, the unknown schema, the session/read-only rules and the refusal of all three actions
-  when the descriptor is unreadable (the same role, token and report succeed when it is not); `web/src/capabilities.test.ts`
-  covers the gating, including the transient-failure and per-action cases; `tests/integration`
+    adapter, the unknown schema, the session/read-only rules and the refusal of all three actions
+  when the descriptor is unreadable (the same role, token and report succeed when it is not);
+  `web/src/capabilities.test.ts` covers the gating, including the transient-failure and
+  per-action cases, and `web/src/useCapabilities.test.ts` the refresh — the interval, a
+  descriptor that becomes readable, a failed refresh keeping the last answer, and the 401 that
+  ends the session; `tests/integration`
   drives the real binary through the endpoint against the application's own payload, against a
   PHP that refuses the probe, and against one that answers an unknown schema — where a signed-in
   operator's retry, delete and restart are refused and the worker is still the one running. The second broker

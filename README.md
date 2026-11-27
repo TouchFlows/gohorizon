@@ -69,9 +69,11 @@ Milestones 1 and 2 implemented:
   drivers and `retry_after`, `pcntl`, the telemetry stream and the lifecycle events — together
   with an `operations` map saying which actions this deployment can actually offer. The
   dashboard gates `Retry`, `Delete` and `Restart` on that map, so an application that cannot
-  answer offers no action it could not perform and says why (docs/adr/0014). The page is not the
-  only gate: the retry, delete and restart routes answer 503 with that same reason when the
-  descriptor is unavailable, so a caller that kept a control is refused it by the service.
+  answer offers no action it could not perform and says why (docs/adr/0014). The descriptor is
+  refreshed with the health poll, so a deployment repaired and restarted gets its controls back
+  without a page reload. The page is not the only gate: the retry, delete and restart routes
+  answer 503 with that same reason when the descriptor is unavailable, so a caller that kept a
+  control is refused it by the service.
 - Read-only `GET /api/v1/health`, and `GET /metrics` for a Prometheus scrape of the same
   state: `gohorizon_up`, `gohorizon_lock_held`, telemetry counters by result, queue depth
   by state, and workers by state and crash loops per supervisor.
