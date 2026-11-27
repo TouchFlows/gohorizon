@@ -330,12 +330,23 @@ func requireCapability(provider Provider, operation, action string, store *auth.
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			caps, err := provider.Capabilities()
-			if err == nil && caps.Supported() && capabilityOperations(true)[operation] {
+			available := err == nil && caps.Supported()
+			unavailable := ""
+			if !available {
+				unavailable = caps.Reason(err)
+			}
+			// The same derivation the descriptor publishes, so a caller refused here is told
+			// exactly what the dashboard would have said about the missing control.
+			operations, reasons := capabilityOperations(caps, available, unavailable)
+			if operations[operation] {
 				next.ServeHTTP(w, r)
 				return
 			}
 
-			reason := caps.Reason(err)
+			reason := reasons[operation]
+			if reason == "" {
+				reason = unavailable
+			}
 			me, _ := store.Current(r)
 			auditor.Record(r, audit.Event{
 				Action:  action,

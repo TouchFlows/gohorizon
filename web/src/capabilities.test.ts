@@ -57,6 +57,20 @@ describe('failedJobControls', () => {
     expect(controls.reason).toContain('could not open input file')
   })
 
+  it("prefers the operation's own reason over the descriptor error", () => {
+    // A readable descriptor can withhold one screen without the deployment being read-only, so
+    // the reason names the fact that withheld it (docs/adr/0014).
+    const caps = descriptor({
+      operation_reasons: { failed_job_retry: 'the application reports no failed store' },
+    })
+    caps.operations.failed_job_retry = false
+    caps.operations.failed_job_delete = false
+
+    expect(failedJobControls(caps, true).reason).toBe(
+      'Read-only: the application reports no failed store',
+    )
+  })
+
   it('explains an unsupported action without inventing a reason', () => {
     const caps = descriptor()
     caps.operations.failed_job_retry = false

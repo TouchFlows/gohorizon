@@ -55,8 +55,9 @@ type capabilitiesAnswer struct {
 		Driver     string `json:"driver"`
 		RetryAfter *int   `json:"retry_after"`
 	} `json:"connections"`
-	Operations     map[string]bool `json:"operations"`
-	PayloadSchemas struct {
+	Operations       map[string]bool   `json:"operations"`
+	OperationReasons map[string]string `json:"operation_reasons"`
+	PayloadSchemas   struct {
 		Inspect    int `json:"inspect"`
 		FailedJobs int `json:"failed_jobs"`
 	} `json:"payload_schemas"`
@@ -127,6 +128,12 @@ func TestCapabilitiesOffersNothingWhenTheApplicationCannotAnswer(t *testing.T) {
 	} {
 		if answer.Operations[operation] {
 			t.Errorf("operations[%q] = true although the application never answered", operation)
+		}
+		// And every one of them carries the reason, so a client that only reads the per-op
+		// map is told as much as one that reads `error`.
+		if answer.OperationReasons[operation] != answer.Error {
+			t.Errorf("operation_reasons[%q] = %q, want the descriptor's reason %q",
+				operation, answer.OperationReasons[operation], answer.Error)
 		}
 	}
 }
@@ -266,6 +273,83 @@ func TestUnreadableCapabilitiesRefuseTheActionsTheDashboardDrops(t *testing.T) {
 	}
 	if got := strings.Count(records.String(), `"outcome":"refused"`); got != len(cases) {
 		t.Errorf("refused audit records = %d, want %d", got, len(cases))
+	}
+}
+
+// TestCapabilitiesWithholdWhatThePayloadCannotSupport is the derivation behind the operations
+// map: a readable descriptor is not a promise that every screen has something to show, so an
+// application with no telemetry stream and a connection that runs jobs inline withholds exactly
+// those two and says why. Everything else stays offered, because withholding one screen must
+// not present a readable deployment as read-only (docs/adr/0014).
+func TestCapabilitiesWithholdWhatThePayloadCannotSupport(t *testing.T) {
+	caps := descriptor()
+	caps.Telemetry.Stream = ""
+	caps.Queue.Connections = map[string]adapter.Connection{"sync": {Driver: "sync"}}
+
+	answer := readCapabilities(t, &stubProvider{caps: caps})
+
+	if !answer.Available {
+		t.Fatalf("available = false (%q), want the descriptor read", answer.Error)
+	}
+	for _, operation := range []string{"telemetry", "inspect_queues"} {
+		if answer.Operations[operation] {
+			t.Errorf("operations[%q] = true although the payload cannot support it", operation)
+		}
+		if answer.OperationReasons[operation] == "" {
+			t.Errorf("operation_reasons[%q] is empty, so the control would vanish without saying why", operation)
+		}
+	}
+	if reason := answer.OperationReasons["inspect_queues"]; !strings.Contains(reason, "sync") {
+		t.Errorf("operation_reasons[inspect_queues] = %q, want the connection's driver named", reason)
+	}
+	for _, operation := range []string{"failed_jobs_list", "failed_job_retry", "failed_job_delete", "restart_workers"} {
+		if !answer.Operations[operation] {
+			t.Errorf("operations[%q] = false, want what a readable descriptor still offers", operation)
+		}
+	}
+
+	// Every offered operation has no reason and every withheld one has a reason: a client can
+	// gate on the map alone and never draw a control it cannot explain.
+	for operation, offered := range answer.Operations {
+		reason := answer.OperationReasons[operation]
+		if offered && reason != "" {
+			t.Errorf("operation_reasons[%q] = %q for an offered operation", operation, reason)
+		}
+		if !offered && reason == "" {
+			t.Errorf("operation_reasons[%q] is empty for a withheld operation", operation)
+		}
+	}
+}
+
+// TestCapabilitiesWithholdDepthWhenNoConnectionHasAQueue covers the other half of the rule: a
+// payload that names no connections, or only ones that run jobs inline, has no depth to count,
+// and the reason says which connections it saw rather than repeating the rule.
+func TestCapabilitiesWithholdDepthWhenNoConnectionHasAQueue(t *testing.T) {
+	cases := []struct {
+		name        string
+		connections map[string]adapter.Connection
+		want        string
+	}{
+		{"none", nil, "defines no queue connections"},
+		{"sync and null", map[string]adapter.Connection{
+			"sync": {Driver: "sync"},
+			"null": {Driver: "null"},
+		}, "null, sync"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			caps := descriptor()
+			caps.Queue.Connections = tc.connections
+
+			answer := readCapabilities(t, &stubProvider{caps: caps})
+
+			if answer.Operations["inspect_queues"] {
+				t.Error("operations[inspect_queues] = true although no connection has a queue")
+			}
+			if reason := answer.OperationReasons["inspect_queues"]; !strings.Contains(reason, tc.want) {
+				t.Errorf("operation_reasons[inspect_queues] = %q, want it to contain %q", reason, tc.want)
+			}
+		})
 	}
 }
 

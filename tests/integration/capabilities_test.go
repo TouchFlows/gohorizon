@@ -66,7 +66,9 @@ type capabilitiesAnswer struct {
 		Inspect    int `json:"inspect"`
 		FailedJobs int `json:"failed_jobs"`
 	} `json:"payload_schemas"`
-	Error string `json:"error"`
+	// OperationReasons says why a withheld operation is withheld.
+	OperationReasons map[string]string `json:"operation_reasons"`
+	Error            string            `json:"error"`
 }
 
 // capabilitiesPayload runs the documented command in the fixture, so the comparison is against
@@ -394,6 +396,44 @@ func TestCapabilitiesReportTheApplicationsRefusal(t *testing.T) {
 	}
 	if fmt.Sprint(answer.Operations) != fmt.Sprint(wantOperations) {
 		t.Errorf("operations = %v, want %v", answer.Operations, wantOperations)
+	}
+}
+
+// TestCapabilitiesWithholdWhatTheDescriptorCannotSupport runs the real binary against an
+// application that answers schema 1 but reports no telemetry stream. The descriptor is readable,
+// so the deployment is not read-only; only the screen the payload cannot fill is withheld, and
+// the reason names the fact that withheld it rather than the rule.
+func TestCapabilitiesWithholdWhatTheDescriptorCannotSupport(t *testing.T) {
+	h := newHarness(t)
+	payload := `{"schema":1,"package":"gohorizon/laravel","laravel":"13.0.0","php":"8.4.0",` +
+		`"queue":{"connections":{"redis":{"driver":"redis","retry_after":90}}},` +
+		`"runtime":{"pcntl":true},"telemetry":{"stream":""},"events":[]}`
+
+	configPath, base := h.writeConfigWithPHP(h.answeringPHP(payload))
+	h.startBinary(h.buildBinary(), configPath)
+	awaitRunning(h, base)
+
+	answer := h.fetchCapabilities(t, base)
+	if !answer.Available {
+		t.Fatalf("available = false (%q), want the descriptor the application answered", answer.Error)
+	}
+
+	if answer.Operations["telemetry"] {
+		t.Error("operations[telemetry] = true although the application reports no stream")
+	}
+	if reason := answer.OperationReasons["telemetry"]; !strings.Contains(reason, "no telemetry stream") {
+		t.Errorf("operation_reasons[telemetry] = %q, want the missing stream named", reason)
+	}
+
+	// Everything the payload does support is still offered: withholding one screen is not the
+	// read-only state, and must not be published as one.
+	for _, operation := range []string{"inspect_queues", "failed_jobs_list", "failed_job_retry", "failed_job_delete", "restart_workers"} {
+		if !answer.Operations[operation] {
+			t.Errorf("operations[%q] = false, want what a readable descriptor offers", operation)
+		}
+		if reason, ok := answer.OperationReasons[operation]; ok {
+			t.Errorf("operation_reasons[%q] = %q, want no reason for an offered operation", operation, reason)
+		}
 	}
 }
 

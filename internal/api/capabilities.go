@@ -1,8 +1,10 @@
 package api
 
 import (
+	"fmt"
 	"net/http"
 	"sort"
+	"strings"
 
 	"github.com/gohorizon/gohorizon/internal/adapter"
 )
@@ -36,7 +38,11 @@ type capabilitiesResponse struct {
 	// application's commands print can tell which side to upgrade.
 	PayloadSchemas payloadSchemas  `json:"payload_schemas"`
 	Operations     map[string]bool `json:"operations"`
-	Error          string          `json:"error,omitempty"`
+	// OperationReasons says why each withheld operation is withheld, in the words a refused
+	// action returns. A false entry without one would be a control that disappears with no
+	// explanation, which is the failure the descriptor exists to avoid (docs/adr/0014).
+	OperationReasons map[string]string `json:"operation_reasons,omitempty"`
+	Error            string            `json:"error,omitempty"`
 }
 
 // payloadSchemas names the versions of the queue-inspection and failed-list payloads this
@@ -61,20 +67,113 @@ type capabilityConnection struct {
 	RetryAfter *int   `json:"retry_after"`
 }
 
-// capabilityOperations names what this service offers against the application. Every entry is
-// offered only when the probe answered with a schema this service understands: a deployment
-// whose descriptor cannot be read is presented as read-only until it is repaired, restart
-// included, so the dashboard never offers an action beside an unexplained failure
-// (docs/adr/0014).
-func capabilityOperations(understood bool) map[string]bool {
-	return map[string]bool{
-		"inspect_queues":    understood,
-		"telemetry":         understood,
-		"failed_jobs_list":  understood,
-		"failed_job_retry":  understood,
-		"failed_job_delete": understood,
-		"restart_workers":   understood,
+// capabilityOperationNames is every operation the descriptor publishes, so the set a client
+// sees does not depend on which of them happen to be offered.
+var capabilityOperationNames = []string{
+	"inspect_queues",
+	"telemetry",
+	"failed_jobs_list",
+	"failed_job_retry",
+	"failed_job_delete",
+	"restart_workers",
+}
+
+// capabilityOperations is what this service offers against the application, derived from what
+// the descriptor says rather than only from whether it could be read, together with the reason
+// for each operation it withholds.
+//
+// A descriptor that cannot be read is read-only as a whole, restart included: the dashboard
+// must never offer an action beside an unexplained failure (docs/adr/0014). A descriptor that
+// can be read is still not a promise that everything works — an application with no telemetry
+// stream has no events to show, and a connection whose driver runs jobs inline or drops them
+// has no queue to count — so those two follow the facts the payload carries. The rest follow
+// the descriptor being readable, because the payload does not describe anything narrower.
+func capabilityOperations(caps adapter.Capabilities, available bool, unavailable string) (map[string]bool, map[string]string) {
+	operations := make(map[string]bool, len(capabilityOperationNames))
+	reasons := make(map[string]string, len(capabilityOperationNames))
+
+	withhold := func(operation, reason string) {
+		operations[operation] = false
+		reasons[operation] = reason
 	}
+
+	if !available {
+		for _, operation := range capabilityOperationNames {
+			withhold(operation, unavailable)
+		}
+		return operations, reasons
+	}
+
+	// Restarting is the supervisor's own action, so the payload cannot withhold it.
+	operations["restart_workers"] = true
+
+	if caps.Telemetry.Stream == "" {
+		withhold("telemetry", "the application reports no telemetry stream, so there are no events to show")
+	} else {
+		operations["telemetry"] = true
+	}
+
+	if inspectableDrivers(caps) == nil {
+		withhold("inspect_queues", noInspectableQueue(caps))
+	} else {
+		operations["inspect_queues"] = true
+	}
+
+	// The failed store is the application's own failer, which the payload describes only
+	// through the connection it rides on, so these follow the descriptor being readable.
+	for _, operation := range []string{"failed_jobs_list", "failed_job_retry", "failed_job_delete"} {
+		operations[operation] = true
+	}
+
+	return operations, reasons
+}
+
+// inspectableDrivers lists the drivers of the application's queue connections that have a queue
+// to inspect, in name order, or nil when none has. `sync` runs a job inline and `null` drops it,
+// so neither has a queue, a backlog or a depth. An unknown driver is assumed inspectable: the
+// inspect payload already omits a count its driver cannot answer instead of inventing one.
+func inspectableDrivers(caps adapter.Capabilities) []string {
+	seen := make(map[string]bool, len(caps.Queue.Connections))
+	var drivers []string
+	for _, conn := range caps.Queue.Connections {
+		switch conn.Driver {
+		case "", "sync", "null":
+			continue
+		}
+		if seen[conn.Driver] {
+			continue
+		}
+		seen[conn.Driver] = true
+		drivers = append(drivers, conn.Driver)
+	}
+	sort.Strings(drivers)
+	return drivers
+}
+
+// noInspectableQueue is why queue depth is withheld, naming the connections the application
+// reported so the reason describes this deployment rather than the rule.
+func noInspectableQueue(caps adapter.Capabilities) string {
+	if len(caps.Queue.Connections) == 0 {
+		return "the application defines no queue connections, so there is no queue to inspect"
+	}
+
+	seen := make(map[string]bool, len(caps.Queue.Connections))
+	var drivers []string
+	for _, conn := range caps.Queue.Connections {
+		driver := conn.Driver
+		if driver == "" {
+			driver = "unnamed"
+		}
+		if seen[driver] {
+			continue
+		}
+		seen[driver] = true
+		drivers = append(drivers, driver)
+	}
+	sort.Strings(drivers)
+
+	return fmt.Sprintf("the application's queue connections (%s) have no queue to inspect, so queue depth cannot be counted",
+		strings.Join(drivers, ", "))
 }
 
 // capabilities publishes the descriptor. A payload whose schema this service does not
@@ -84,16 +183,21 @@ func capabilities(provider Provider) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		caps, err := provider.Capabilities()
 		available := err == nil && caps.Supported()
-		response := capabilitiesResponse{
-			Available:      available,
-			PayloadSchemas: payloadSchemaVersions(),
-			Operations:     capabilityOperations(available),
-		}
+		// The same sentence the health report and a refused action publish, so a client cannot
+		// read two different stories about one deployment.
+		unavailable := ""
 		if !available {
-			// The same sentence the health report and a refused action publish, so a client
-			// cannot read two different stories about one deployment.
-			response.Error = caps.Reason(err)
-		} else {
+			unavailable = caps.Reason(err)
+		}
+		operations, reasons := capabilityOperations(caps, available, unavailable)
+		response := capabilitiesResponse{
+			Available:        available,
+			PayloadSchemas:   payloadSchemaVersions(),
+			Operations:       operations,
+			OperationReasons: reasons,
+			Error:            unavailable,
+		}
+		if available {
 			response.Schema = caps.Schema
 			response.Package = caps.Package
 			response.PackageVersion = caps.PackageVersion
@@ -106,7 +210,6 @@ func capabilities(provider Provider) http.HandlerFunc {
 			response.PCNTL = caps.Runtime.PCNTL
 			response.TelemetryStream = caps.Telemetry.Stream
 			response.Events = caps.Events
-			response.Operations = capabilityOperations(true)
 		}
 		w.Header().Set("Cache-Control", "no-store")
 		writeJSON(w, http.StatusOK, response)

@@ -42,14 +42,22 @@ operator and a refusal would be the 503 the action returns.
    published unchanged when it is true and omitted when it is not: a field this service thinks
    it recognises is not meaningful in another schema. `retry_after` is null for a driver with no
    reservation window, never an invented zero.
-4. **`operations` is a map of booleans, and each entry says what this service offers against
-   this deployment.** `inspect_queues`, `telemetry`, `failed_jobs_list`, `failed_job_retry` and
-   `failed_job_delete` all run the package's own artisan commands, so they follow `available`.
-   `restart_workers` is the supervisor's own action, but it follows `available` as well: a
-   deployment whose descriptor could not be read is presented as read-only until it is
-   repaired, so the dashboard never offers an action beside an unexplained failure. The
-   supervisor can still restart a process it owns — the operator just is not offered that
-   control from a page that cannot say what the deployment is.
+4. **`operations` is derived from what the descriptor says, and `operation_reasons` says why a
+   withheld entry is withheld.** A descriptor that cannot be read is read-only as a whole:
+   every entry false, restart included, because a deployment whose descriptor could not be read
+   is presented as read-only until it is repaired, so the dashboard never offers an action
+   beside an unexplained failure. The supervisor can still restart a process it owns — the
+   operator just is not offered that control from a page that cannot say what the deployment
+   is. A descriptor that *can* be read is still not a promise that every screen has something
+   to show, so two entries follow the facts the payload carries: `telemetry` follows
+   `telemetry.stream` (no stream, no events to show), and `inspect_queues` follows the
+   connections' drivers (`sync` runs a job inline and `null` drops it, so neither has a queue,
+   a backlog or a depth; an unknown driver is assumed inspectable, because the inspect payload
+   omits a count its driver cannot answer instead of inventing one). `failed_jobs_list`,
+   `failed_job_retry`, `failed_job_delete` and `restart_workers` follow `available`, because the
+   payload describes nothing narrower about the failed store and restarting is the supervisor's
+   own action. Every withheld entry carries its reason in the service's words, so a control that
+   disappears says why instead of only disappearing.
 5. **An unavailable or unreadable adapter is a 200, not a 503.** "This deployment cannot do
    that" is the answer the caller asked for; a 503 would describe a failed read and invite a
    retry of a fact that does not change until the service restarts.
@@ -87,8 +95,10 @@ operator and a refusal would be the 503 the action returns.
   an unavailable descriptor is "this deployment is read-only, and here is what to repair", which
   is only coherent if every control obeys it. The descriptor, not the screen, still decides,
   which is the seam a later external-worker integration needs.
-- The refusal is the service's, not only the page's. `requireCapability` answers 503 with the
-  descriptor's own `error` for `POST /api/v1/workers/{worker}/restart`,
+- The refusal is the service's, not only the page's. `requireCapability` derives the same
+  operations the descriptor publishes and answers 503 with the withheld entry's own reason (the
+  descriptor's `error` when the whole descriptor could not be read) for
+  `POST /api/v1/workers/{worker}/restart`,
   `POST /api/v1/failed/{job}/retry` and `DELETE /api/v1/failed/{job}` whenever the descriptor is
   unavailable, records the refusal under that action's audit entry, and runs after the role and
   token checks — so a caller refused for its role is told that, not that the deployment is
@@ -143,7 +153,9 @@ operator and a refusal would be the 503 the action returns.
   was already open, which is the service's re-read plus the dashboard's refresh, with neither a
   restart nor a reload;   `internal/supervisor/service_test.go` covers the re-read, the loop that stops with the service
   and the report's capabilities state;   `internal/api/prometheus_test.go` and
-  `internal/api/router_test.go` cover the gauge and the health field;
+  `internal/api/router_test.go` cover the gauge and the health field, and
+  `TestCapabilitiesWithholdWhatThePayloadCannotSupport` / `...WhenNoConnectionHasAQueue` cover
+  the derivation and the invariant that every withheld entry has a reason;
   `internal/adapter/payload_schema_test.go` pins the refusal behind each published payload
   schema, and the acceptance contract test compares `payload_schemas` with the schemas the
   fixture's `gohorizon:inspect` and `gohorizon:failed:list` actually print. The second broker

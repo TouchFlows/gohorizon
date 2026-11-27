@@ -106,6 +106,9 @@ export interface Capabilities {
   // rather than misread.
   payload_schemas?: { inspect: number; failed_jobs: number }
   operations: CapabilityOperations
+  // Why a withheld operation is withheld, in the service's own words. A false entry without one
+  // would be a control that disappears without saying why.
+  operation_reasons?: Partial<Record<keyof CapabilityOperations, string>>
   error?: string
 }
 

@@ -72,8 +72,12 @@ Milestones 1 and 2 implemented:
   answer offers no action it could not perform and says why (docs/adr/0014). The service re-reads
   the descriptor every 30 s and the dashboard refreshes it with the health poll, so a deployment
   repaired while it runs gets its controls back without a restart or a page reload. The page is
-  not the only gate: the retry, delete and restart routes answer 503 with that same reason when
+  not the only gate: the retry, delete and restart routes   answer 503 with that same reason when
   the descriptor is unavailable, so a caller that kept a control is refused it by the service.
+  The map is derived from what the payload says, not only from whether it parsed: `telemetry`
+  follows the reported stream and `inspect_queues` follows the connections' drivers, and every
+  withheld entry carries its reason in `operation_reasons`, so a screen the deployment cannot
+  fill is withheld with the fact that withheld it rather than as a read-only deployment.
   The state is also on `/api/v1/health` (`capabilities`) and in the scrape as
   `gohorizon_capabilities_available` / `gohorizon_capabilities_failed_reads`, so a read-only
   deployment is alertable without reading the log. `payload_schemas` publishes the versions of
