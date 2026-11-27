@@ -3,8 +3,18 @@
 # They pin the decisions the rule file argues for, which a syntax check cannot see: a deployment
 # the service presents as read-only fires, a loop that has never had an answer does not fire the
 # stale alert (it is read-only, and `last_success > 0` is what keeps the two apart), an instant
-# old enough fires only after the hold, and the read-only age rule ignores the zero it writes
-# while the deployment is readable (docs/adr/0014).
+# old enough fires only after the hold, the read-only age rule ignores the zero it writes while
+# the deployment is readable, and the age threshold is pinned from both sides of its 30 minutes
+# (docs/adr/0014).
+#
+# exp_annotations has to repeat the rule's wording: promtool compares the annotation set exactly,
+# so an expectation without them means "this alert carries no annotations" and every positive case
+# would fail. The wording is not maintained by hand here — internal/api/prometheus_rules_test.go
+# compares each expectation with the annotations the rule file declares, so a summary edited in
+# one place and not the other fails the build.
+#
+# The promtool version is pinned in CI, so an expression that only a newer Prometheus accepts
+# fails the build rather than an operator's rule load.
 rule_files:
   - gohorizon.rules.yml
 
@@ -101,16 +111,24 @@ tests:
         alertname: GoHorizonCapabilitiesReadOnlyTooLong
         exp_alerts: []
 
-  # A real instant fires once it is old enough, which is the alert nobody acted on.
+  # The threshold itself, from both sides. The deployment went read-only at the first second of
+  # the window, so at 30m the age is 1799s — just below the 1800s threshold — and at 31m it is
+  # 1859s — just above it. Nothing fires at 35m, which is what a threshold that had moved earlier
+  # would produce: it would have been pending since before 31m and fired by 35m. It fires at 36m,
+  # the five-minute hold measured from the first evaluation above the threshold. A threshold moved
+  # by a minute in either direction fails one of these three.
   - interval: 1m
     input_series:
       - series: gohorizon_capabilities_read_only_since_timestamp_seconds
         values: "1x45"
     alert_rule_test:
-      - eval_time: 10m
+      - eval_time: 30m
         alertname: GoHorizonCapabilitiesReadOnlyTooLong
         exp_alerts: []
-      - eval_time: 40m
+      - eval_time: 35m
+        alertname: GoHorizonCapabilitiesReadOnlyTooLong
+        exp_alerts: []
+      - eval_time: 36m
         alertname: GoHorizonCapabilitiesReadOnlyTooLong
         exp_alerts:
           - exp_labels:

@@ -1,6 +1,7 @@
 package api
 
 import (
+	"maps"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -33,6 +34,17 @@ type alertingRule struct {
 	Severity string
 	Summary  string
 	Runbook  string
+	// Annotations are all of them, because the promtool cases have to repeat the whole set:
+	// promtool compares annotations exactly, so the two files are kept in step by a test rather
+	// than by whoever edits a summary next.
+	Annotations map[string]string
+}
+
+// promtoolCase is one alert_rule_test entry: the alert it names and the annotation sets it expects
+// from the alerts that fire. An empty set is a "nothing fires" case, which pins nothing here.
+type promtoolCase struct {
+	Alert       string
+	Expectation []map[string]string
 }
 
 // loadAlertingRules reads the shipped rule file. YAML decoding goes through the parser the
@@ -56,12 +68,13 @@ func loadAlertingRules(t *testing.T) []alertingRule {
 			labels := asMap(t, rule["labels"])
 			annotations := asMap(t, rule["annotations"])
 			rules = append(rules, alertingRule{
-				Alert:    asString(t, rule["alert"]),
-				Expr:     asString(t, rule["expr"]),
-				For:      asString(t, rule["for"]),
-				Severity: asString(t, labels["severity"]),
-				Summary:  asString(t, annotations["summary"]),
-				Runbook:  asString(t, annotations["runbook"]),
+				Alert:       asString(t, rule["alert"]),
+				Expr:        asString(t, rule["expr"]),
+				For:         asString(t, rule["for"]),
+				Severity:    asString(t, labels["severity"]),
+				Summary:     asString(t, annotations["summary"]),
+				Runbook:     asString(t, annotations["runbook"]),
+				Annotations: stringMap(t, annotations),
 			})
 		}
 	}
@@ -224,6 +237,79 @@ func TestAlertingRulesHavePromtoolCases(t *testing.T) {
 			t.Errorf("%s has no promtool case for %s", alertingRulesTestPath, rule.Alert)
 		}
 	}
+}
+
+// TestPromtoolCasesRepeatTheRuleAnnotations keeps the one unavoidable duplication honest.
+// promtool compares an alert's annotations exactly, so an expectation without them means "this
+// alert has none" and every positive case fails; the wording therefore appears in both files.
+// It cannot drift: a summary or runbook link edited in one file and not the other fails here
+// before CI gets as far as promtool (docs/adr/0014).
+func TestPromtoolCasesRepeatTheRuleAnnotations(t *testing.T) {
+	annotations := map[string]map[string]string{}
+	for _, rule := range loadAlertingRules(t) {
+		annotations[rule.Alert] = rule.Annotations
+	}
+
+	checked := 0
+	for _, testCase := range loadPromtoolCases(t) {
+		expected, known := annotations[testCase.Alert]
+		if !known {
+			t.Errorf("%s: a case names %q, which %s does not declare", alertingRulesTestPath, testCase.Alert, alertingRulesPath)
+			continue
+		}
+		for _, expectation := range testCase.Expectation {
+			checked++
+			if !maps.Equal(expectation, expected) {
+				t.Errorf("%s: %s expects annotations %v, want the rule's %v", alertingRulesTestPath, testCase.Alert, expectation, expected)
+			}
+		}
+	}
+	if checked == 0 {
+		t.Fatalf("%s expects no alert to fire anywhere", alertingRulesTestPath)
+	}
+}
+
+// loadPromtoolCases reads the alert_rule_test entries of the shipped promtool file. The cases with
+// no expected alerts are kept with an empty set: they pin that nothing fires, which is a claim of
+// its own but carries no annotations to compare.
+func loadPromtoolCases(t *testing.T) []promtoolCase {
+	t.Helper()
+
+	data, err := os.ReadFile(alertingRulesTestPath)
+	if err != nil {
+		t.Fatalf("read %s: %v", alertingRulesTestPath, err)
+	}
+	document, err := yaml.Parser().Unmarshal(data)
+	if err != nil {
+		t.Fatalf("parse %s: %v", alertingRulesTestPath, err)
+	}
+
+	var cases []promtoolCase
+	for _, test := range asSlice(t, document["tests"]) {
+		for _, entry := range asSlice(t, asMap(t, test)["alert_rule_test"]) {
+			rule := asMap(t, entry)
+			testCase := promtoolCase{Alert: asString(t, rule["alertname"])}
+			for _, alert := range asSlice(t, rule["exp_alerts"]) {
+				testCase.Expectation = append(testCase.Expectation,
+					stringMap(t, asMap(t, asMap(t, alert)["exp_annotations"])))
+			}
+			cases = append(cases, testCase)
+		}
+	}
+	if len(cases) == 0 {
+		t.Fatalf("%s has no alert_rule_test entries", alertingRulesTestPath)
+	}
+	return cases
+}
+
+func stringMap(t *testing.T, value map[string]any) map[string]string {
+	t.Helper()
+
+	out := make(map[string]string, len(value))
+	for key, entry := range value {
+		out[key] = asString(t, entry)
+	}
+	return out
 }
 
 func readRunbook(t *testing.T) string {
