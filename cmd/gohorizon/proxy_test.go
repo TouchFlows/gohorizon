@@ -58,6 +58,10 @@ func (idleProvider) FailedJobs(context.Context, adapter.FailedJobQuery) (adapter
 	return adapter.FailedJobsPage{}, nil
 }
 
+func (idleProvider) ReprobeCapabilities(context.Context) (adapter.Capabilities, error) {
+	return adapter.Capabilities{}, errors.New("this test computes nothing")
+}
+
 // TestTrustedProxyCarriesTheClientAndTheTLS is the proxy path with nothing replaced: the
 // configuration an operator writes, the store newAuthStore builds from it, the router the
 // service serves, and real HTTP requests whose peer is the proxy it trusts. The test client
