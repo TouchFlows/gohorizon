@@ -110,6 +110,43 @@ func getHealth(t *testing.T, report health.Report) *httptest.ResponseRecorder {
 	return get(t, &stubProvider{report: report}, "/api/v1/health")
 }
 
+// TestHealthPublishesTheCapabilitiesState pins the field a monitor reads instead of the log. The
+// deployment can be presented as read-only while the service is healthy, so the answer is a 200
+// with the state in the body: a degraded status would let a health check restart a supervisor
+// whose workers are fine (docs/adr/0004, docs/adr/0014).
+func TestHealthPublishesTheCapabilitiesState(t *testing.T) {
+	recorder := getHealth(t, health.Report{
+		Status: "ok",
+		Capabilities: health.Capabilities{
+			Available:   false,
+			Schema:      2,
+			FailedReads: 2,
+			Error:       "the application reports capabilities schema 2; this GoHorizon understands schema 1",
+		},
+	})
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 while only the descriptor is unreadable", recorder.Code)
+	}
+
+	var payload struct {
+		Capabilities struct {
+			Available   bool   `json:"available"`
+			Schema      int    `json:"schema"`
+			FailedReads int    `json:"failed_reads"`
+			Error       string `json:"error"`
+		} `json:"capabilities"`
+	}
+	if err := json.Unmarshal(recorder.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode body: %v (%s)", err, recorder.Body)
+	}
+	if payload.Capabilities.Available || payload.Capabilities.Schema != 2 || payload.Capabilities.FailedReads != 2 {
+		t.Errorf("capabilities = %+v, want the read-only state and the streak", payload.Capabilities)
+	}
+	if !strings.Contains(payload.Capabilities.Error, "schema 2") {
+		t.Errorf("error = %q, want the reason a monitor can read", payload.Capabilities.Error)
+	}
+}
+
 func TestHealthExposesTelemetryCounters(t *testing.T) {
 	recorder := getHealth(t, health.Report{
 		Status: "ok",

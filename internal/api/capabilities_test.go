@@ -206,7 +206,7 @@ func TestUnreadableCapabilitiesRefuseTheActionsTheDashboardDrops(t *testing.T) {
 
 	// The refusal is the descriptor's own reason, so a caller learns which side to upgrade
 	// rather than only that the action did not happen.
-	reason := capabilityReason(caps, nil)
+	reason := caps.Reason(nil)
 	for _, want := range []string{"schema 2", "schema 1"} {
 		if !strings.Contains(reason, want) {
 			t.Fatalf("reason = %q, want it to name %q", reason, want)

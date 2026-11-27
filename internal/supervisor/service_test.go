@@ -422,6 +422,59 @@ func TestReportSurfacesFailingTelemetryIngestion(t *testing.T) {
 	}
 }
 
+// TestReportPublishesTheCapabilitiesState pins what a monitor reads instead of the log: the
+// deployment can be presented as read-only while the service is healthy, so the state is a
+// field of the report and never a degraded status (docs/adr/0014).
+func TestReportPublishesTheCapabilitiesState(t *testing.T) {
+	service := &Service{
+		cfg:      preflightConfig(t, 60),
+		log:      slog.New(slog.NewTextHandler(io.Discard, nil)),
+		consumer: &telemetry.Consumer{},
+		started:  time.Now(),
+		probed:   adapter.Capabilities{Schema: adapter.SchemaVersion, Package: "gohorizon/laravel"},
+	}
+	// The lock is the only condition that may degrade the status.
+	service.lockHeld = true
+
+	report := service.Report()
+	if !report.Capabilities.Available || report.Capabilities.Error != "" || report.Capabilities.Schema != adapter.SchemaVersion {
+		t.Fatalf("capabilities = %+v, want the readable descriptor", report.Capabilities)
+	}
+
+	// A run of failed re-reads is visible while the last answer is still published, which is the
+	// debounce the gauge is meant to show before the deployment goes read-only.
+	service.probeFailures = 1
+	report = service.Report()
+	if !report.Capabilities.Available || report.Capabilities.FailedReads != 1 {
+		t.Errorf("capabilities = %+v, want the streak visible with the answer kept", report.Capabilities)
+	}
+
+	// An unreadable schema is published as read-only, with both versions as the reason.
+	service.probeFailures = 0
+	service.probed = adapter.Capabilities{Schema: adapter.SchemaVersion + 1}
+	report = service.Report()
+	if report.Capabilities.Available || report.Capabilities.Schema != adapter.SchemaVersion+1 {
+		t.Fatalf("capabilities = %+v, want the unreadable schema published", report.Capabilities)
+	}
+	for _, want := range []string{"schema 2", "schema 1"} {
+		if !strings.Contains(report.Capabilities.Error, want) {
+			t.Errorf("error = %q, want it to name %q", report.Capabilities.Error, want)
+		}
+	}
+	if report.Status != "ok" {
+		t.Errorf("status = %q, want ok: a read-only deployment still supervises its pool", report.Status)
+	}
+
+	// A probe that could not answer at all carries its own reason and no schema.
+	service.probed = adapter.Capabilities{}
+	service.probeErr = errors.New("php: could not open input file: artisan")
+	report = service.Report()
+	if report.Capabilities.Available || report.Capabilities.Schema != 0 ||
+		!strings.Contains(report.Capabilities.Error, "artisan") {
+		t.Errorf("capabilities = %+v, want the probe's own failure", report.Capabilities)
+	}
+}
+
 // stubInspector answers the queue-depth probe without an application and counts how
 // often it was asked.
 type stubInspector struct {

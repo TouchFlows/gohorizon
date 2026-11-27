@@ -20,6 +20,8 @@ const prometheusContentType = "text/plain; version=0.0.4; charset=utf-8"
 const (
 	metricUp              = "gohorizon_up"
 	metricLockHeld        = "gohorizon_lock_held"
+	metricCapsAvailable   = "gohorizon_capabilities_available"
+	metricCapsFailedReads = "gohorizon_capabilities_failed_reads"
 	metricTelemetryEvents = "gohorizon_telemetry_events_total"
 	metricQueueJobs       = "gohorizon_queue_jobs"
 	metricWorkers         = "gohorizon_workers"
@@ -59,6 +61,22 @@ func exposition(report health.Report) string {
 	writeFamily(&b, metricLockHeld, "gauge",
 		"1 when this instance holds the supervisor lock, 0 when it has lost it or cannot confirm it.")
 	writeSample(&b, metricLockHeld, held)
+
+	// A read-only deployment is a state to alert on, not a failed scrape: the service still
+	// supervises its pool, so this is the gauge rather than the health status (docs/adr/0014).
+	available := 0
+	if report.Capabilities.Available {
+		available = 1
+	}
+	writeFamily(&b, metricCapsAvailable, "gauge",
+		"1 when the application's capabilities are readable, 0 when the deployment is presented as read-only.")
+	writeSample(&b, metricCapsAvailable, available)
+
+	// The re-read is debounced, so a run of failures is what shows before the deployment goes
+	// read-only; an alert on this rising is earlier than one on the gauge above.
+	writeFamily(&b, metricCapsFailedReads, "gauge",
+		"Consecutive failed capabilities re-reads since the last one that answered.")
+	writeSample(&b, metricCapsFailedReads, report.Capabilities.FailedReads)
 
 	// These are counters since start, so zero is a fact about the run and is always written.
 	// "error" is a Redis read, ack or sink failure that was retried, not a failed job.

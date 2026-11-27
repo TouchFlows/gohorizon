@@ -482,6 +482,14 @@ type report struct {
 		Failing   bool   `json:"failing"`
 		LastError string `json:"last_error"`
 	} `json:"telemetry"`
+	// Capabilities is the state the dashboard's controls and the administrative routes follow,
+	// published here so a monitor can alert on it without reading the log (docs/adr/0014).
+	Capabilities struct {
+		Available   bool   `json:"available"`
+		Schema      int    `json:"schema"`
+		FailedReads int    `json:"failed_reads"`
+		Error       string `json:"error"`
+	} `json:"capabilities"`
 	Supervisors []reportSupervisor `json:"supervisors"`
 }
 

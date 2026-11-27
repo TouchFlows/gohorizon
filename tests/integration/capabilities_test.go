@@ -458,4 +458,14 @@ func TestCapabilitiesReportASchemaThisServiceDoesNotUnderstand(t *testing.T) {
 	if got := after.supervisor(t).Workers[0].UUID; got != worker.UUID {
 		t.Errorf("worker = %q, want %q still running: the refused restart recycled it", got, worker.UUID)
 	}
+
+	// The same state on the report, which is what a monitor reads instead of the log.
+	if after.Capabilities.Available {
+		t.Error("health reports the deployment as available, want the read-only state")
+	}
+	for _, want := range []string{"schema 2", "schema 1"} {
+		if !strings.Contains(after.Capabilities.Error, want) {
+			t.Errorf("health capabilities error = %q, want it to name %q", after.Capabilities.Error, want)
+		}
+	}
 }

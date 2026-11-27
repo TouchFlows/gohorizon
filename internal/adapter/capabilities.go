@@ -90,6 +90,18 @@ type Capabilities struct {
 // fields it thinks it recognises as if they were meaningful.
 func (c Capabilities) Supported() bool { return c.Schema == SchemaVersion }
 
+// Reason is why this answer cannot be used, in the words the endpoint, the health report and a
+// refused action all publish: the probe's own error when it could not answer, and both schema
+// numbers when it answered one this service does not understand. It is empty for an answer that
+// can be used, and the caller decides whether it can (Supported).
+func (c Capabilities) Reason(err error) string {
+	if err != nil {
+		return err.Error()
+	}
+	return fmt.Sprintf("the application reports capabilities schema %d; this GoHorizon understands schema %d",
+		c.Schema, SchemaVersion)
+}
+
 // Probe executes the capabilities command in the application directory.
 type Probe struct {
 	PHP     string

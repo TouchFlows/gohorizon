@@ -89,6 +89,14 @@ operator and a refusal would be the 503 the action returns.
   endpoint publishes within one interval, and the dashboard's refresh draws the controls, or the
   reason, that follow. The re-read is cheap but not free: it starts PHP once per interval per
   application, which is why the interval is slow and why the HTTP path still starts nothing.
+- The state is alertable without the log. `GET /api/v1/health` carries a `capabilities` object
+  (`available`, `schema`, `failed_reads`, `error`) and `/metrics` carries
+  `gohorizon_capabilities_available` and `gohorizon_capabilities_failed_reads`, both gauges. The
+  report status is not degraded by either: this service still supervises a pool it cannot
+  describe, and a health check that restarted it over that would take healthy workers down
+  (docs/adr/0004 item 7). The failed-read streak is published so an alert can fire on a run of
+  failures before the debounce presents the deployment as read-only, and the reason is the same
+  sentence the endpoint and a refused action publish.
 - A failed re-read is debounced, because a PHP run that times out once is not a deployment that
   lost its package. One failure keeps the last answer and only records that it could not be
   refreshed; `probeFailureThreshold` (2) consecutive failures publish the read-only state, and
@@ -123,6 +131,7 @@ operator and a refusal would be the 503 the action returns.
   `tests/browser/smoke.spec.ts` repairs a refusing deployment in place — the executable it
   already runs starts answering the probe — and asserts the controls come back on the page that
   was already open, which is the service's re-read plus the dashboard's refresh, with neither a
-  restart nor a reload; `internal/supervisor/service_test.go` covers the re-read and the loop
-  that stops with the service. The second broker
+  restart nor a reload;   `internal/supervisor/service_test.go` covers the re-read, the loop that stops with the service
+  and the report's capabilities state; `internal/api/prometheus_test.go` and
+  `internal/api/router_test.go` cover the gauge and the health field. The second broker
   adapter that would make the descriptor earn its keep is still deferred.

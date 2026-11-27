@@ -11,7 +11,23 @@ type Report struct {
 	Lock          Lock         `json:"lock"`
 	Telemetry     Telemetry    `json:"telemetry"`
 	Queues        Queues       `json:"queues"`
+	Capabilities  Capabilities `json:"capabilities"`
 	Supervisors   []Supervisor `json:"supervisors"`
+}
+
+// Capabilities is what the application said about itself and whether this service can act on
+// it, which is the state the dashboard's controls and the administrative routes follow
+// (docs/adr/0014). It is body-only: a deployment presented as read-only still supervises its
+// pool, so it never degrades the report status — an alert reads this field or the gauge, never
+// the health check an orchestrator would restart on.
+type Capabilities struct {
+	Available bool `json:"available"`
+	// Schema is the version the application reported, 0 when it could not answer at all.
+	Schema int `json:"schema,omitempty"`
+	// FailedReads counts the consecutive re-reads that did not answer since the last one that
+	// did, so a run of them is visible before the deployment is presented as read-only.
+	FailedReads int    `json:"failed_reads"`
+	Error       string `json:"error,omitempty"`
 }
 
 type Lock struct {

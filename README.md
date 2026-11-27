@@ -71,12 +71,16 @@ Milestones 1 and 2 implemented:
   dashboard gates `Retry`, `Delete` and `Restart` on that map, so an application that cannot
   answer offers no action it could not perform and says why (docs/adr/0014). The service re-reads
   the descriptor every 30 s and the dashboard refreshes it with the health poll, so a deployment
-  repaired while it runs gets its controls back without a restart or a page reload. The page is not the only gate: the retry, delete and restart routes
-  answer 503 with that same reason when the descriptor is unavailable, so a caller that kept a
-  control is refused it by the service.
+  repaired while it runs gets its controls back without a restart or a page reload. The page is
+  not the only gate: the retry, delete and restart routes answer 503 with that same reason when
+  the descriptor is unavailable, so a caller that kept a control is refused it by the service.
+  The state is also on `/api/v1/health` (`capabilities`) and in the scrape as
+  `gohorizon_capabilities_available` / `gohorizon_capabilities_failed_reads`, so a read-only
+  deployment is alertable without reading the log.
 - Read-only `GET /api/v1/health`, and `GET /metrics` for a Prometheus scrape of the same
-  state: `gohorizon_up`, `gohorizon_lock_held`, telemetry counters by result, queue depth
-  by state, and workers by state and crash loops per supervisor.
+  state: `gohorizon_up`, `gohorizon_lock_held`, `gohorizon_capabilities_available`,
+  `gohorizon_capabilities_failed_reads`, telemetry counters by result, queue depth by state, and
+  workers by state and crash loops per supervisor.
 - Dashboard served at `/`: overview, queues, workers, jobs, failed jobs and metrics screens.
   The first three read `/api/v1/health` every 5 s, where a 503 is shown as a degraded service
   rather than an error page and a count the driver could not report reads `unknown`, not `0`;

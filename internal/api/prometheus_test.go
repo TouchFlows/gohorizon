@@ -14,9 +14,10 @@ import (
 func prometheusReport() health.Report {
 	pending, reserved := 5, 0
 	return health.Report{
-		Status:    "ok",
-		Lock:      health.Lock{Held: true},
-		Telemetry: health.Telemetry{Events: 42, Duplicates: 3, Invalid: 1, Errors: 2},
+		Status:       "ok",
+		Lock:         health.Lock{Held: true},
+		Capabilities: health.Capabilities{Available: true, Schema: 1},
+		Telemetry:    health.Telemetry{Events: 42, Duplicates: 3, Invalid: 1, Errors: 2},
 		Queues: health.Queues{
 			Depths: []health.QueueDepth{
 				{Queue: "reports", Pending: &pending}, // only one of its three counts is known
@@ -48,6 +49,8 @@ func TestMetricsExpositionServesTheOperationalState(t *testing.T) {
 	for _, want := range []string{
 		"# TYPE gohorizon_up gauge\ngohorizon_up 1\n",
 		"# TYPE gohorizon_lock_held gauge\ngohorizon_lock_held 1\n",
+		"# TYPE gohorizon_capabilities_available gauge\ngohorizon_capabilities_available 1\n",
+		"# TYPE gohorizon_capabilities_failed_reads gauge\ngohorizon_capabilities_failed_reads 0\n",
 		"# TYPE gohorizon_telemetry_events_total counter\n",
 		"gohorizon_telemetry_events_total{result=\"event\"} 42\n",
 		"gohorizon_telemetry_events_total{result=\"duplicate\"} 3\n",
@@ -78,6 +81,35 @@ func TestMetricsExpositionServesTheOperationalState(t *testing.T) {
 	// Queues are ordered by name, so a scrape of the same state is the same bytes.
 	if strings.Index(body, `queue="default"`) > strings.Index(body, `queue="reports"`) {
 		t.Errorf("queues are not in name order:\n%s", body)
+	}
+}
+
+// TestMetricsExpositionReportsAnUnreadableDescriptor is the alertable state: a deployment the
+// service presents as read-only is a zero on the gauge with the failed-re-read streak beside it,
+// so an alert fires without anyone reading the log (docs/adr/0014).
+func TestMetricsExpositionReportsAnUnreadableDescriptor(t *testing.T) {
+	provider := &stubProvider{report: health.Report{
+		Status: "ok",
+		Capabilities: health.Capabilities{
+			Available:   false,
+			Schema:      2,
+			FailedReads: 2,
+			Error:       "the application reports capabilities schema 2; this GoHorizon understands schema 1",
+		},
+	}}
+
+	body := get(t, provider, "/metrics").Body.String()
+	for _, want := range []string{
+		"gohorizon_capabilities_available 0\n",
+		"gohorizon_capabilities_failed_reads 2\n",
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("body has no %q\n%s", want, body)
+		}
+	}
+	// The sample itself, not the HELP line that also begins with the metric name.
+	if strings.Contains(body, "\ngohorizon_capabilities_available 1\n") {
+		t.Errorf("body reports an unreadable descriptor as available:\n%s", body)
 	}
 }
 

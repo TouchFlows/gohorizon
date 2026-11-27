@@ -842,6 +842,13 @@ func (s *Service) Report() health.Report {
 	queues := s.queueDepth
 	s.mu.Unlock()
 
+	// The same answer the endpoint publishes, read once so a scrape cannot report a descriptor
+	// and a streak from different reads.
+	s.capsMu.RLock()
+	caps, capsErr := s.probed, s.probeErr
+	capsFailures := s.probeFailures
+	s.capsMu.RUnlock()
+
 	app := s.cfg.Application()
 	report := health.Report{
 		Status:        "ok",
@@ -849,6 +856,14 @@ func (s *Service) Report() health.Report {
 		UptimeSeconds: int64(time.Since(s.started).Seconds()),
 		Lock:          health.Lock{Held: held, Degraded: lockErr != "", LastError: lockErr},
 		Queues:        queues,
+		Capabilities: health.Capabilities{
+			Available:   capsErr == nil && caps.Supported(),
+			Schema:      caps.Schema,
+			FailedReads: capsFailures,
+		},
+	}
+	if !report.Capabilities.Available {
+		report.Capabilities.Error = caps.Reason(capsErr)
 	}
 	if app != nil {
 		report.Application = app.ID

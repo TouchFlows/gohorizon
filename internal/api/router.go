@@ -335,7 +335,7 @@ func requireCapability(provider Provider, operation, action string, store *auth.
 				return
 			}
 
-			reason := capabilityReason(caps, err)
+			reason := caps.Reason(err)
 			me, _ := store.Current(r)
 			auditor.Record(r, audit.Event{
 				Action:  action,
