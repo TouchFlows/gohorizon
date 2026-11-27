@@ -28,10 +28,14 @@ const (
 	// metricCapsLastSuccess is when the re-read loop last got an answer, because every other
 	// capabilities sample describes the last answer and a loop that stopped looks healthy.
 	metricCapsLastSuccess = "gohorizon_capabilities_last_success_timestamp_seconds"
-	metricTelemetryEvents = "gohorizon_telemetry_events_total"
-	metricQueueJobs       = "gohorizon_queue_jobs"
-	metricWorkers         = "gohorizon_workers"
-	metricCrashLooping    = "gohorizon_crash_looping_workers"
+	// metricCapsReadOnlySince is when the deployment was first presented as read-only, so an
+	// alert can fire on how long it has been that way instead of on a log search. It is zero
+	// while the deployment is readable, and the alert compares only above zero.
+	metricCapsReadOnlySince = "gohorizon_capabilities_read_only_since_timestamp_seconds"
+	metricTelemetryEvents   = "gohorizon_telemetry_events_total"
+	metricQueueJobs         = "gohorizon_queue_jobs"
+	metricWorkers           = "gohorizon_workers"
+	metricCrashLooping      = "gohorizon_crash_looping_workers"
 )
 
 // labelValueEscaper escapes a label value as the text format requires: a backslash, the
@@ -100,6 +104,13 @@ func exposition(report health.Report) string {
 	writeFamily(&b, metricCapsLastSuccess, "gauge",
 		"Unix seconds when the capabilities re-read loop last got an answer, 0 when it never has.")
 	writeSample(&b, metricCapsLastSuccess, int(report.Capabilities.LastReadAt))
+
+	// The age of the read-only state, not of the loop: a timestamp so a rule says "read-only for
+	// half an hour" without searching the log for the transition. Zero while readable, which is
+	// why the shipped rule compares it only above zero (docs/adr/0014).
+	writeFamily(&b, metricCapsReadOnlySince, "gauge",
+		"Unix seconds when the deployment was first presented as read-only, 0 while its capabilities are readable.")
+	writeSample(&b, metricCapsReadOnlySince, int(report.Capabilities.ReadOnlySince))
 
 	// These are counters since start, so zero is a fact about the run and is always written.
 	// "error" is a Redis read, ack or sink failure that was retried, not a failed job.

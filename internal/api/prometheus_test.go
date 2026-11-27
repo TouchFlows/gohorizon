@@ -53,6 +53,7 @@ func TestMetricsExpositionServesTheOperationalState(t *testing.T) {
 		"# TYPE gohorizon_capabilities_failed_reads gauge\ngohorizon_capabilities_failed_reads 0\n",
 		"# TYPE gohorizon_capabilities_contradiction gauge\ngohorizon_capabilities_contradiction 0\n",
 		"# TYPE gohorizon_capabilities_last_success_timestamp_seconds gauge\ngohorizon_capabilities_last_success_timestamp_seconds 0\n",
+		"# TYPE gohorizon_capabilities_read_only_since_timestamp_seconds gauge\ngohorizon_capabilities_read_only_since_timestamp_seconds 0\n",
 		"# TYPE gohorizon_telemetry_events_total counter\n",
 		"gohorizon_telemetry_events_total{result=\"event\"} 42\n",
 		"gohorizon_telemetry_events_total{result=\"duplicate\"} 3\n",
@@ -103,6 +104,25 @@ func TestMetricsExpositionReportsWhenTheLoopLastAnswered(t *testing.T) {
 // TestMetricsExpositionReportsALateContradiction is the preflight's second life: a retry_after the
 // application lowered under a worker's timeout while the pool runs is a state to alert on, since
 // the launch it would have refused already happened (docs/adr/0014).
+// TestMetricsExpositionReportsHowLongTheDeploymentHasBeenReadOnly is the age: the same instant
+// health publishes, so a rule can fire on a state nobody acted on without searching the log for
+// the transition. A readable deployment writes zero rather than a stale instant.
+func TestMetricsExpositionReportsHowLongTheDeploymentHasBeenReadOnly(t *testing.T) {
+	report := prometheusReport()
+	report.Capabilities.ReadOnlySince = 1763600000
+
+	body := get(t, &stubProvider{report: report}, "/metrics").Body.String()
+	if !strings.Contains(body, "\ngohorizon_capabilities_read_only_since_timestamp_seconds 1763600000\n") {
+		t.Errorf("body has no read-only-since sample:\n%s", body)
+	}
+
+	report.Capabilities.ReadOnlySince = 0
+	readable := get(t, &stubProvider{report: report}, "/metrics").Body.String()
+	if !strings.Contains(readable, "\ngohorizon_capabilities_read_only_since_timestamp_seconds 0\n") {
+		t.Errorf("body = %s, want a zero instant for a readable deployment", readable)
+	}
+}
+
 func TestMetricsExpositionReportsALateContradiction(t *testing.T) {
 	report := prometheusReport()
 	report.Capabilities.Contradiction = "worker launch contradicts the application's capabilities: retry_after (30s) is below worker.timeout (60s)"

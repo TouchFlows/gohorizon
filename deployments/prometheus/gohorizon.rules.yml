@@ -1,0 +1,53 @@
+# Alerting rules for the capability descriptor (docs/adr/0014).
+#
+# Scrape /metrics from each GoHorizon instance, then load this file:
+#
+#   rule_files:
+#     - gohorizon.rules.yml
+#
+# Every expression uses only the samples this service writes, and every alert names a section of
+# docs/runbook.md that says what the state means and what to do about it. That agreement is
+# checked by internal/api/prometheus_rules_test.go, so a renamed alert or a retired metric fails
+# the build instead of leaving a rule nobody can act on.
+#
+# A read-only deployment still supervises its pool: these are states to look at, not a scrape to
+# treat as down. That is why none of them sets the severity of an outage except an age nobody
+# acted on.
+groups:
+  - name: gohorizon-capabilities
+    rules:
+      - alert: GoHorizonCapabilitiesReadOnly
+        expr: gohorizon_capabilities_available == 0
+        for: 1m
+        labels:
+          severity: warning
+        annotations:
+          summary: "The deployment is presented as read-only: its capability descriptor cannot be read."
+          runbook: "docs/runbook.md#gohorizoncapabilitiesreadonly"
+
+      - alert: GoHorizonCapabilitiesReadOnlyTooLong
+        expr: gohorizon_capabilities_read_only_since_timestamp_seconds > 0 and time() - gohorizon_capabilities_read_only_since_timestamp_seconds > 1800
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "The deployment has been read-only for more than 30 minutes."
+          runbook: "docs/runbook.md#gohorizoncapabilitiesreadonlytoolong"
+
+      - alert: GoHorizonCapabilitiesContradiction
+        expr: gohorizon_capabilities_contradiction == 1
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "The application's current answer contradicts the running configuration (a retry_after under a worker timeout, a --timeout without pcntl)."
+          runbook: "docs/runbook.md#gohorizoncapabilitiescontradiction"
+
+      - alert: GoHorizonCapabilitiesLoopStale
+        expr: gohorizon_capabilities_last_success_timestamp_seconds > 0 and time() - gohorizon_capabilities_last_success_timestamp_seconds > 120
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "The capabilities re-read loop has not got an answer for more than two intervals."
+          runbook: "docs/runbook.md#gohorizoncapabilitiesloopstale"
