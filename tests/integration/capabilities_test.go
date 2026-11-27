@@ -12,6 +12,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 )
 
 // rawCapabilities mirrors `php artisan gohorizon:capabilities --json` itself, not the
@@ -124,6 +125,38 @@ exec '%s' "$@"
 		h.t.Fatalf("write the answering php: %v", err)
 	}
 	return path
+}
+
+// startupWarning returns the WARN line whose message contains fragment and its structured
+// fields, once the service has written it. A degraded start is announced in the log and
+// nowhere else, so that line is the whole signal an operator has: the test reads it the way
+// an operator would, and asserts the fields instead of the sentence they are glued into.
+func (i *instance) startupWarning(t *testing.T, fragment string) (map[string]any, error) {
+	t.Helper()
+
+	var record map[string]any
+	eventually(t, 10*time.Second, "the startup warning in the supervisor log", func() error {
+		data, err := os.ReadFile(i.logPath)
+		if err != nil {
+			return err
+		}
+		for _, line := range strings.Split(string(data), "\n") {
+			var candidate map[string]any
+			if err := json.Unmarshal([]byte(line), &candidate); err != nil {
+				continue
+			}
+			msg, _ := candidate["msg"].(string)
+			if candidate["level"] == "WARN" && strings.Contains(msg, fragment) {
+				record = candidate
+				break
+			}
+		}
+		if record == nil {
+			return fmt.Errorf("no WARN line containing %q yet", fragment)
+		}
+		return nil
+	})
+	return record, nil
 }
 
 func (h *harness) fetchCapabilities(t *testing.T, base string) capabilitiesAnswer {
@@ -315,10 +348,29 @@ func TestCapabilitiesReportASchemaThisServiceDoesNotUnderstand(t *testing.T) {
 		`"events":[]}`
 
 	configPath, base := h.writeConfigWithPHP(h.answeringPHP(payload))
-	h.startBinary(h.buildBinary(), configPath)
+	inst := h.startBinary(h.buildBinary(), configPath)
 	// Supervision comes up although the launch checks could not run, which is what keeps the
 	// deployment repairable instead of an unexplained failed start.
 	awaitRunning(h, base)
+
+	// The skipped preflight is not in the descriptor alone: an operator reading the log has
+	// to see why the launch checks were abandoned, and which side to upgrade. Both schema
+	// numbers are the reason, so a warning that names one of them is not enough.
+	warning, err := inst.startupWarning(t, "capabilities schema not understood")
+	if err != nil {
+		t.Fatalf("read the startup warning: %v", err)
+	}
+	schema, schemaOK := warning["schema"].(float64)
+	understood, understoodOK := warning["understood"].(float64)
+	if !schemaOK || schema != 2 {
+		t.Errorf("warning schema = %v, want the application's 2", warning["schema"])
+	}
+	if !understoodOK || understood != 1 {
+		t.Errorf("warning understood = %v, want this service's 1", warning["understood"])
+	}
+	if !strings.Contains(fmt.Sprint(warning["msg"]), "preflight skipped") {
+		t.Errorf("warning msg = %v, want it to say the preflight was skipped", warning["msg"])
+	}
 
 	answer := h.fetchCapabilities(t, base)
 
