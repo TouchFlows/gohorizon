@@ -264,6 +264,19 @@ a {
   color: var(--warn);
 }
 
+/* A withheld control's reason with the action that can change it: the banner keeps its own
+   line, so the sentence a monitor or a test matches is not decorated by the button. */
+.banner__row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.6rem;
+}
+
+.banner__row p {
+  margin: 0;
+}
+
 .table {
   width: 100%;
   border-collapse: collapse;

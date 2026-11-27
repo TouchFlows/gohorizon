@@ -11,6 +11,9 @@ export type SessionStatus = 'checking' | 'signed-out' | 'signed-in' | 'open'
 export interface SessionControl {
   status: SessionStatus
   user: string | null
+  // role is the signed-in user's role, empty when nobody is signed in: it decides between the
+  // screens everyone reads and the controls an administrator owns (docs/adr/0011).
+  role: string
   // signIn mirrors the service's answer: it resolves once the cookie is set, and rejects with
   // the wording the form shows.
   signIn: (name: string, password: string) => Promise<void>
@@ -25,6 +28,7 @@ export interface SessionControl {
 export function useSession(): SessionControl {
   const [status, setStatus] = useState<SessionStatus>('checking')
   const [user, setUser] = useState<string | null>(null)
+  const [role, setRole] = useState('')
 
   useEffect(() => {
     const controller = new AbortController()
@@ -36,6 +40,7 @@ export function useSession(): SessionControl {
         }
         if (lookup.kind === 'signed-in') {
           setUser(lookup.user)
+          setRole(lookup.role)
           setStatus('signed-in')
           return
         }
@@ -56,6 +61,7 @@ export function useSession(): SessionControl {
   const signIn = useCallback(async (name: string, password: string) => {
     const session = await startSession(name, password)
     setUser(session.user)
+    setRole(session.role ?? '')
     setStatus('signed-in')
   }, [])
 
@@ -66,14 +72,16 @@ export function useSession(): SessionControl {
       // The browser drops the cookie on the answer, but reaching the form does not depend on
       // that having arrived: nothing is served to a page here that needs the cookie.
       setUser(null)
+      setRole('')
       setStatus('signed-out')
     }
   }, [])
 
   const expire = useCallback(() => {
     setUser(null)
+    setRole('')
     setStatus('signed-out')
   }, [])
 
-  return { status, user, signIn, signOut, expire }
+  return { status, user, role, signIn, signOut, expire }
 }

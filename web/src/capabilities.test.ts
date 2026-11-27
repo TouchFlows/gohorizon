@@ -1,6 +1,12 @@
 import { describe, expect, it } from 'vitest'
 import type { Capabilities } from './api'
-import { failedJobControls, readOnlyFor, workerControls } from './capabilities'
+import {
+  failedJobControls,
+  mayReread,
+  readOnlyFor,
+  readResult,
+  workerControls,
+} from './capabilities'
 
 function descriptor(overrides: Partial<Capabilities> = {}): Capabilities {
   return {
@@ -158,5 +164,45 @@ describe('workerControls', () => {
   it('offers nothing without users, and leaves the descriptor alone until it arrives', () => {
     expect(workerControls(descriptor(), false).reason).toContain('without users')
     expect(workerControls(null, true).restart).toBe(true)
+  })
+})
+
+describe('readResult', () => {
+  it('says what a readable descriptor reports, so a repair is confirmed in words', () => {
+    expect(
+      readResult(
+        descriptor({ schema: 1, package: 'gohorizon/laravel', package_version: '0.1.0' }),
+      ),
+    ).toBe('Readable: schema 1, package gohorizon/laravel 0.1.0')
+  })
+
+  it('names a package once when the application reports no version', () => {
+    expect(readResult(descriptor({ schema: 1, package: 'gohorizon/laravel' }))).toBe(
+      'Readable: schema 1, package gohorizon/laravel',
+    )
+  })
+
+  it('repeats the reason when the read found the deployment still unreadable', () => {
+    // A read that answered "still broken" is an answer about the deployment, not a failure of
+    // the call: the control repeats the service's sentence rather than inventing a status.
+    expect(
+      readResult(descriptor({ available: false, error: 'could not open input file: artisan' })),
+    ).toBe('Still read-only: could not open input file: artisan')
+  })
+
+  it('does not invent a reason the descriptor did not carry', () => {
+    expect(readResult(descriptor({ available: false }))).toBe('Still read-only.')
+  })
+})
+
+describe('mayReread', () => {
+  it("is the administrator's control, the role the service requires of the call", () => {
+    expect(mayReread('administrator')).toBe(true)
+    expect(mayReread('operator')).toBe(false)
+    expect(mayReread('viewer')).toBe(false)
+    // A service started without users has nobody to hold the role, and an older service answers
+    // no role at all.
+    expect(mayReread('')).toBe(false)
+    expect(mayReread(null)).toBe(false)
   })
 })

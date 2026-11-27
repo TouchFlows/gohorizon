@@ -119,6 +119,18 @@ export interface Capabilities {
 	error?: string
 }
 
+// rereadCapabilities asks the service to read the descriptor again now instead of at its next
+// interval, and answers with the document that read published. The service records the call and
+// only an administrator may make it, so a refusal carries its own `error` wording in an
+// AdminActionError, and an ended session is the 401 it always is (docs/adr/0014).
+export async function rereadCapabilities(): Promise<Capabilities> {
+  const answer = await adminAction('POST', '/api/v1/capabilities/refresh')
+  if (!isCapabilities(answer)) {
+    throw new Error('/api/v1/capabilities/refresh did not return a capability descriptor')
+  }
+  return answer
+}
+
 export async function fetchCapabilities(signal?: AbortSignal): Promise<Capabilities> {
   const response = await fetch('/api/v1/capabilities', {
     signal,
@@ -168,9 +180,12 @@ export class Unauthorized extends Error {
   }
 }
 
-// Session is who the service says this browser is.
+// Session is who the service says this browser is. In a deployment that has users the answer
+// also carries the role, which is what decides between a screen a viewer may read and the
+// controls an administrator owns (docs/adr/0011).
 export interface Session {
   user: string
+  role?: string
   expires_at: string
 }
 
@@ -178,7 +193,7 @@ export interface Session {
 // is a service started without users: there is nobody to sign in as, and the pages are drawn
 // exactly as they were before authentication existed.
 export type SessionLookup =
-  | { kind: 'signed-in'; user: string }
+  | { kind: 'signed-in'; user: string; role: string }
   | { kind: 'signed-out' }
   | { kind: 'open' }
 
@@ -201,7 +216,9 @@ export async function readSession(signal?: AbortSignal): Promise<SessionLookup> 
   if (!isSession(payload)) {
     throw new Error('/api/v1/session did not return a session')
   }
-  return { kind: 'signed-in', user: payload.user }
+  // A service older than roles answers no role; empty is a viewer, which draws the screens
+  // and none of the administrator's controls.
+  return { kind: 'signed-in', user: payload.user, role: payload.role ?? '' }
 }
 
 // startSession exchanges a name and password for a session cookie. The refusals carry the

@@ -1,5 +1,5 @@
-import { useEffect, useRef, useState } from 'react'
-import { fetchCapabilities, Unauthorized } from './api'
+import { useCallback, useEffect, useRef, useState } from 'react'
+import { fetchCapabilities, rereadCapabilities, Unauthorized } from './api'
 import type { Capabilities } from './api'
 import { pollInterval } from './useHealth'
 
@@ -60,10 +60,20 @@ export function pollCapabilities(
   }
 }
 
+// CapabilityControl is the descriptor and the one action a page can take on it.
+export interface CapabilityControl {
+  capabilities: Capabilities | null
+  // reread asks the service to read the descriptor again now instead of waiting for the poll,
+  // and publishes the answer into the same state the poll feeds, so the controls follow a
+  // repair immediately. It rejects when the call did not answer at all — a refusal, a 401, a
+  // failed request — and the caller says so beside the banner (docs/adr/0014).
+  reread: () => Promise<Capabilities>
+}
+
 // useCapabilities is what the application supports, refreshed alongside the health poll. It
 // decides which administrative controls are drawn; the session decides whether there are any at
 // all (docs/adr/0014).
-export function useCapabilities(onUnauthorized?: () => void): Capabilities | null {
+export function useCapabilities(onUnauthorized?: () => void): CapabilityControl {
   const [capabilities, setCapabilities] = useState<Capabilities | null>(null)
 
   // Held in a ref so the loop keeps one identity: a callback rebuilt on every render would
@@ -81,5 +91,20 @@ export function useCapabilities(onUnauthorized?: () => void): Capabilities | nul
     )
   }, [])
 
-  return capabilities
+  const reread = useCallback(async () => {
+    try {
+      const answer = await rereadCapabilities()
+      setCapabilities(answer)
+      return answer
+    } catch (failure) {
+      // The read is the session's request like any other: a 401 sends the shell back to the
+      // sign-in screen rather than reporting a failed re-read nobody could have avoided.
+      if (failure instanceof Unauthorized) {
+        expired.current?.()
+      }
+      throw failure
+    }
+  }, [])
+
+  return { capabilities, reread }
 }

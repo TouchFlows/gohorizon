@@ -225,6 +225,12 @@ the application's host, it is recorded under `capability-refresh` with what the 
 deployment presented as read-only is exactly the one worth re-reading. A read that fails is
 still a 200 with `available: false` and the reason (docs/adr/0014).
 
+The dashboard draws that call as `Re-read now` beside the read-only banner on the workers and
+failed-jobs screens: an administrator sees it, it is disabled while the request is in flight,
+and the outcome sits beside it (`Readable: schema 1, package gohorizon/laravel 0.1.0`,
+`Still read-only: …`, or the refusal). The controls on the page then follow the answer without a
+reload.
+
 `GET /metrics` serves the state `/api/v1/health` reports in the Prometheus text format
 (`text/plain; version=0.0.4; charset=utf-8`), without a client library:
 `gohorizon_up`, `gohorizon_lock_held`,

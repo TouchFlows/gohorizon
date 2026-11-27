@@ -1,11 +1,14 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
+  AdminActionError,
+  Unauthorized,
   deleteFailedJob,
   isCapabilities,
   isFailedJobPage,
   isHealthReport,
   isHistory,
   isJobPage,
+  rereadCapabilities,
   retryFailedJob,
 } from './api'
 
@@ -215,5 +218,78 @@ describe('isHealthReport', () => {
   it('rejects what is not an object', () => {
     expect(isHealthReport(null)).toBe(false)
     expect(isHealthReport('ok')).toBe(false)
+  })
+})
+
+// rereadAnswer stubs the one request the control makes and answers it with this status and
+// body, so the test reads the call the page sends as well as what it does with the reply.
+function rereadAnswer(status: number, body: unknown) {
+  const fetchMock = vi.fn(async (_url: RequestInfo | URL, _init?: RequestInit) => {
+    return { status, json: async () => body } as Response
+  })
+  vi.stubGlobal('fetch', fetchMock)
+  return fetchMock
+}
+
+const rereadDescriptor = {
+  available: true,
+  schema: 1,
+  package: 'gohorizon/laravel',
+  operations: {
+    inspect_queues: true,
+    telemetry: true,
+    failed_jobs_list: true,
+    failed_job_retry: true,
+    failed_job_delete: true,
+    restart_workers: true,
+  },
+}
+
+describe('rereadCapabilities', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
+  it('asks for a read now, carrying the token a mutation has to echo', async () => {
+    vi.stubGlobal('document', { cookie: 'gohorizon_csrf=token-1' })
+    const fetchMock = rereadAnswer(200, rereadDescriptor)
+
+    await expect(rereadCapabilities()).resolves.toMatchObject({ available: true })
+
+    const call = fetchMock.mock.calls[0]
+    expect(call[0]).toBe('/api/v1/capabilities/refresh')
+    expect(call[1]?.method).toBe('POST')
+    const headers = (call[1]?.headers ?? {}) as Record<string, string>
+    expect(headers['X-CSRF-Token']).toBe('token-1')
+  })
+
+  it('rejects an answer that is not a descriptor instead of publishing it', async () => {
+    // A refresh that answered something else would otherwise replace the descriptor the controls
+    // are gated on with fields that are not there.
+    vi.stubGlobal('document', { cookie: '' })
+    rereadAnswer(200, { available: true })
+
+    await expect(rereadCapabilities()).rejects.toThrow(
+      '/api/v1/capabilities/refresh did not return a capability descriptor',
+    )
+  })
+
+  it("carries the service's refusal wording and the status that said it", async () => {
+    vi.stubGlobal('document', { cookie: '' })
+    rereadAnswer(403, { error: 'administrator role required' })
+
+    const failure = rereadCapabilities()
+    await expect(failure).rejects.toBeInstanceOf(AdminActionError)
+    await expect(failure).rejects.toMatchObject({
+      status: 403,
+      message: 'administrator role required',
+    })
+  })
+
+  it('reports an ended session as the 401 it is', async () => {
+    vi.stubGlobal('document', { cookie: '' })
+    rereadAnswer(401, { error: 'authentication required' })
+
+    await expect(rereadCapabilities()).rejects.toBeInstanceOf(Unauthorized)
   })
 })

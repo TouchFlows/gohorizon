@@ -154,7 +154,12 @@ operator and a refusal would be the 503 the action returns.
   published, so a contradiction found here is reported and never enforced. Reads are serialized,
   so the loop and the operator cannot publish each other's answer out of order, and a manual
   read counts as the loop's last answer because it is one: it updates
-  `gohorizon_capabilities_last_success_timestamp_seconds` when it gets an answer.
+  `gohorizon_capabilities_last_success_timestamp_seconds` when it gets an answer. The dashboard
+  draws it as `Re-read now` beside the read-only banner, for the administrator role only,
+  disabled while the request is in flight, and says what the read found (`Readable: schema 1,
+  package gohorizon/laravel 0.1.0`, `Still read-only: …`, or the service's refusal). The banner
+  keeps its own line: the button is a sibling, so the sentence the alerting language is matched
+  on is not decorated.
 - The state is alertable without the log. `GET /api/v1/health` carries a `capabilities` object
   (`available`, `schema`, `failed_reads`, `error`, `contradiction`, `last_read_at`,
   `read_only_since`) and `/metrics`

@@ -3,6 +3,7 @@ import type { Route } from './routes'
 import { parseRoute, routeHref, routeLabel } from './routes'
 import { useHealth } from './useHealth'
 import { useCapabilities } from './useCapabilities'
+import { mayReread } from './capabilities'
 import { useSession } from './useSession'
 import SignIn from './components/SignIn'
 import Overview from './pages/Overview'
@@ -46,6 +47,7 @@ export default function App() {
     <Dashboard
       route={route}
       user={session.user}
+      role={session.role}
       onSignOut={session.signOut}
       onExpired={session.expire}
     />
@@ -57,17 +59,22 @@ interface DashboardProps {
   // user is the signed-in operator, and null on a service started without users, where
   // there is nobody to sign out.
   user: string | null
+  // role is that user's role, empty when nobody is signed in. Re-reading the descriptor is an
+  // administrator's call, so the control beside a read-only banner is drawn for that role only
+  // (docs/adr/0011, docs/adr/0014).
+  role: string
   onSignOut: () => void
   // onExpired drops to the sign-in screen: the health poll answers 401 when the session
   // ended, and a stale report is worse than asking again.
   onExpired: () => void
 }
 
-function Dashboard({ route, user, onSignOut, onExpired }: DashboardProps) {
+function Dashboard({ route, user, role, onSignOut, onExpired }: DashboardProps) {
   const health = useHealth(onExpired)
   // What the application supports decides which administrative controls are drawn; the
   // session decides whether there are any at all (docs/adr/0014).
-  const capabilities = useCapabilities(onExpired)
+  const { capabilities, reread } = useCapabilities(onExpired)
+  const canReread = mayReread(role)
   const report = health.report
   const warn = report !== null && (health.degraded || report.status !== 'ok')
 
@@ -109,11 +116,22 @@ function Dashboard({ route, user, onSignOut, onExpired }: DashboardProps) {
         ) : route === 'queues' ? (
           <Queues report={report} />
         ) : route === 'workers' ? (
-          <Workers report={report} canAct={user !== null} capabilities={capabilities} />
+          <Workers
+            report={report}
+            canAct={user !== null}
+            capabilities={capabilities}
+            reread={reread}
+            canReread={canReread}
+          />
         ) : route === 'jobs' ? (
           <Jobs report={report} />
         ) : route === 'failed' ? (
-          <Failed canAct={user !== null} capabilities={capabilities} />
+          <Failed
+            canAct={user !== null}
+            capabilities={capabilities}
+            reread={reread}
+            canReread={canReread}
+          />
         ) : route === 'metrics' ? (
           <Metrics report={report} />
         ) : (

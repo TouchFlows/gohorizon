@@ -7,6 +7,7 @@ import { firstTrail, trailCursor, trailNewer, trailOlder } from '../jobs'
 import type { Trail } from '../jobs'
 import { useFailedJobs } from '../useFailedJobs'
 import FailedJobActions from '../components/FailedJobActions'
+import RereadCapabilities from '../components/RereadCapabilities'
 
 // canAct is whether this deployment has administrative routes at all: a service started
 // without users mounts none. capabilities is what the application supports, which decides
@@ -15,9 +16,15 @@ import FailedJobActions from '../components/FailedJobActions'
 export default function Failed({
   canAct,
   capabilities = null,
+  reread,
+  canReread = false,
 }: {
   canAct: boolean
   capabilities?: Capabilities | null
+  // reread asks the service for a descriptor read now; the control beside the banner draws it
+  // for administrators only (docs/adr/0014).
+  reread: () => Promise<Capabilities>
+  canReread?: boolean
 }) {
   const controls = failedJobControls(capabilities, canAct)
   const [trail, setTrail] = useState<Trail>(firstTrail)
@@ -122,7 +129,12 @@ export default function Failed({
         />
       )}
 
-      {!controls.retry && !controls.delete && <p className="muted">{controls.reason}</p>}
+      {!controls.retry && !controls.delete && (
+        <div className="banner__row">
+          <p className="muted">{controls.reason}</p>
+          <RereadCapabilities reread={reread} canReread={canReread} />
+        </div>
+      )}
     </>
   )
 }

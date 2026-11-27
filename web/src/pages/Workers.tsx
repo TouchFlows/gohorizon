@@ -2,6 +2,7 @@ import type { Capabilities, HealthReport } from '../api'
 import { workerControls } from '../capabilities'
 import { buildWorkers, countNoun } from '../view'
 import RestartWorker from '../components/RestartWorker'
+import RereadCapabilities from '../components/RereadCapabilities'
 
 // canAct is whether this deployment has administrative routes at all: a service started
 // without users mounts none. capabilities is what the application supports, which decides
@@ -11,10 +12,16 @@ export default function Workers({
   report,
   canAct = false,
   capabilities = null,
+  reread,
+  canReread = false,
 }: {
   report: HealthReport
   canAct?: boolean
   capabilities?: Capabilities | null
+  // reread asks the service for a descriptor read now; the control beside the banner draws it
+  // for administrators only (docs/adr/0014).
+  reread: () => Promise<Capabilities>
+  canReread?: boolean
 }) {
   const supervisors = buildWorkers(report)
   const controls = workerControls(capabilities, canAct)
@@ -79,7 +86,12 @@ export default function Workers({
         </section>
       ))}
 
-      {!controls.restart && <p className="muted">{controls.reason}</p>}
+      {!controls.restart && (
+        <div className="banner__row">
+          <p className="muted">{controls.reason}</p>
+          <RereadCapabilities reread={reread} canReread={canReread} />
+        </div>
+      )}
     </>
   )
 }

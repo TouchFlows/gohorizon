@@ -71,6 +71,30 @@ export function readOnlyFor(since: number, now: number = Math.floor(Date.now() /
   return days === 1 ? '1 day' : `${days} days`
 }
 
+// mayReread is who the re-read control is drawn for: asking the application to account for
+// itself again starts a command on its host, so it is the administrator's, which is the role the
+// service requires of the call. A service started without users has nobody holding it.
+export function mayReread(role: string | null): boolean {
+  return role === 'administrator'
+}
+
+// readResult is what a re-read found, in the words the control shows beside the banner. A
+// descriptor that is still unreadable is an answer about the deployment rather than a failure of
+// the call, so it repeats the reason the banner is already carrying rather than a status.
+export function readResult(capabilities: Capabilities): string {
+  if (!capabilities.available) {
+    const reason = capabilities.error ?? ''
+    return reason === '' ? 'Still read-only.' : `Still read-only: ${reason}`
+  }
+  const schema = capabilities.schema ?? 0
+  const packageName = [capabilities.package, capabilities.package_version]
+    .filter((part) => part !== undefined && part !== '')
+    .join(' ')
+  return packageName === ''
+    ? `Readable: schema ${schema}`
+    : `Readable: schema ${schema}, package ${packageName}`
+}
+
 // unsupported is the service's own answer, so a control that is missing says why rather than
 // only disappearing. The operation's own reason comes first: it names the fact that withheld it
 // (no telemetry stream, no inspectable connection), where the descriptor's error only describes
