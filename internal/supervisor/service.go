@@ -45,6 +45,12 @@ const (
 	// defaultQueueInterval is how often queue depth is sampled through the adapter.
 	// Counts are observations, never an execution ledger (docs/adr/0001).
 	defaultQueueInterval = 15 * time.Second
+
+	// defaultProbeInterval is how often the application's capabilities are re-read. It is slow
+	// on purpose: the answer changes when the deployment is repaired, upgraded or broken, not
+	// between two jobs, and every read starts PHP. It is a field on the service so a test can
+	// watch a re-read without waiting (docs/adr/0014).
+	defaultProbeInterval = 30 * time.Second
 )
 
 // ErrLocked is returned when another instance owns the supervisor lock. Startup
@@ -66,6 +72,13 @@ var errLockKeyGone = errors.New("the supervisor lock key no longer exists")
 // (docs/adr/0001). adapter.Probe implements it.
 type queueInspector interface {
 	Queues(ctx context.Context, connection string, queues []string) (adapter.Inspection, error)
+}
+
+// capabilityProbe is the adapter surface the descriptor is read through, at startup and then
+// on the service's own interval. adapter.Probe implements it; a test supplies answers without
+// a PHP application behind them.
+type capabilityProbe interface {
+	Capabilities(ctx context.Context) (adapter.Capabilities, error)
 }
 
 // failedJobStore is the adapter surface the failed-job read and the two actions go through,
@@ -102,11 +115,18 @@ type Service struct {
 	fenceAfter time.Duration
 	started    time.Time
 	owner      string
-	// probed is the capabilities answer startup read, and probeErr says why it could not
-	// answer when it did not. It is kept, not re-read: the endpoint has to publish the
-	// same facts the preflight acted on, and probing runs PHP (docs/adr/0014).
-	probed   adapter.Capabilities
-	probeErr error
+	// probed is the capabilities answer the endpoint publishes and probeErr says why it could
+	// not answer when it did not. They begin as the launch preflight's answer and are re-read on
+	// probeInterval, so a deployment repaired while the service runs is published as repaired
+	// without a restart (docs/adr/0014). capsMu guards them: the HTTP path reads what the loop
+	// writes, and neither may see a half-updated pair.
+	probed        adapter.Capabilities
+	probeErr      error
+	probe         capabilityProbe
+	probeInterval time.Duration
+	capsMu        sync.RWMutex
+	// appID names the application in the re-read's log lines.
+	appID string
 
 	mu         sync.Mutex
 	lockHeld   bool
@@ -169,6 +189,9 @@ func New(ctx context.Context, cfg *config.Config, log *slog.Logger) (*Service, e
 		owner:         fmt.Sprintf("%s-%d", version.Version, time.Now().UnixNano()),
 		inspector:     probe,
 		failer:        probe,
+		probe:         probe,
+		probeInterval: defaultProbeInterval,
+		appID:         app.ID,
 		probed:        caps,
 		probeErr:      probeErr,
 		queues:        configuredQueues(app),
@@ -302,11 +325,69 @@ func (s *Service) RestartWorker(uuid string) error {
 	return fmt.Errorf("no running worker with id %s", uuid)
 }
 
-// Capabilities returns the application descriptor startup read, or the error that stopped it
-// answering. It is the answer the launch preflight used, so the capabilities endpoint and the
-// decisions taken from it cannot disagree (docs/adr/0014).
+// Capabilities returns the application descriptor the service last read, or the error that
+// stopped it answering. The launch preflight's answer is the first one; probeLoop replaces it,
+// so the endpoint publishes what the application says now rather than only what it said at
+// startup (docs/adr/0014).
 func (s *Service) Capabilities() (adapter.Capabilities, error) {
+	s.capsMu.RLock()
+	defer s.capsMu.RUnlock()
 	return s.probed, s.probeErr
+}
+
+// probeLoop keeps the published descriptor current, so a deployment repaired, upgraded or
+// broken while the service runs is presented as it is now without a restart. The endpoint
+// itself still starts no PHP: it reads the answer this loop published (docs/adr/0014).
+func (s *Service) probeLoop(ctx context.Context) {
+	ticker := time.NewTicker(s.probeInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			s.probeOnce(ctx)
+		}
+	}
+}
+
+// probeOnce re-reads the application's capabilities and publishes that answer in place of the
+// one it replaces. Only the descriptor changes: the launch preflight is a decision about workers
+// that are already running, so a contradiction found here is published, never enforced.
+func (s *Service) probeOnce(ctx context.Context) {
+	caps, err := s.probe.Capabilities(ctx)
+
+	s.capsMu.Lock()
+	before, beforeErr := s.probed, s.probeErr
+	s.probed, s.probeErr = caps, err
+	s.capsMu.Unlock()
+
+	if sameCapabilityAnswer(before, beforeErr, caps, err) {
+		return
+	}
+	switch {
+	case err != nil:
+		s.log.Warn("application capabilities unavailable; the deployment is presented as read-only",
+			"application", s.appID, "error", err)
+	case !caps.Supported():
+		s.log.Warn("application capabilities schema not understood; the deployment is presented as read-only",
+			"application", s.appID, "schema", caps.Schema, "understood", adapter.SchemaVersion)
+	default:
+		s.log.Info("application capabilities re-read; the controls follow the application",
+			"application", s.appID, "schema", caps.Schema, "package", caps.Package)
+	}
+}
+
+// sameCapabilityAnswer reports whether two reads would be published identically, so a loop that
+// runs every interval records a change once instead of a line per read.
+func sameCapabilityAnswer(before adapter.Capabilities, beforeErr error, after adapter.Capabilities, afterErr error) bool {
+	if (beforeErr == nil) != (afterErr == nil) {
+		return false
+	}
+	if beforeErr != nil && beforeErr.Error() != afterErr.Error() {
+		return false
+	}
+	return before.Schema == after.Schema && before.Package == after.Package
 }
 
 // FailedJobs lists the application's own failed jobs for the dashboard. It is a read through
@@ -572,6 +653,12 @@ func (s *Service) Run(ctx context.Context) error {
 	go func() {
 		defer wg.Done()
 		s.queueLoop(runCtx)
+	}()
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		s.probeLoop(runCtx)
 	}()
 
 	// A definitive lock loss fences this instance: it stops every worker through the

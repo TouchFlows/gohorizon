@@ -151,11 +151,9 @@ let service: ChildProcess | undefined
 // a service against a package that cannot answer, not by breaking the one every case uses.
 let nocapsBase = ''
 let nocapsService: ChildProcess | undefined
-// The binary every deployment here runs, and the configuration the second one is restarted with
-// to prove a repair: the same deployment, the same port, a PHP that answers the capabilities
-// probe instead of refusing it.
-let binary = ''
-let repairedConfig = ''
+// The executable the second deployment runs, kept so the case that proves a repair can install
+// the package in place: the deployment keeps running against the same path.
+let nocapsWrapper = ''
 // session is the token the suite's direct calls to the API carry. The browser gets its own
 // cookie of the same shape, set on its context before each case.
 let session = ''
@@ -174,7 +172,7 @@ test.describe('the dashboard against the real binary', () => {
     test.setTimeout(120_000)
 
     		dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gohorizon-smoke-'))
-		binary = path.join(dir, 'gohorizon')
+		const binary = path.join(dir, 'gohorizon')
     execFileSync('go', ['build', '-o', binary, './cmd/gohorizon'], { cwd: root, stdio: 'inherit' })
 
     const port = await freePort()
@@ -252,18 +250,12 @@ test.describe('the dashboard against the real binary', () => {
     // read disappearing from a screen that has a record to act on.
     const nocapsPort = await freePort()
     nocapsBase = `http://127.0.0.1:${nocapsPort}`
-    const wrapper = path.join(dir, 'php-nocaps')
-    fs.writeFileSync(
-      wrapper,
-      `#!/bin/sh\nfor arg in "$@"; do\n  if [ "$arg" = "gohorizon:capabilities" ]; then\n    echo '${nocapsReason}' >&2\n    exit 1\n  fi\ndone\nexec ${JSON.stringify(php)} "$@"\n`,
-      { mode: 0o755 },
-    )
-    		const nocapsConfig = path.join(dir, 'gohorizon-nocaps.yaml')
-		fs.writeFileSync(nocapsConfig, noCapsConfigYAML(nocapsPort, dir, wrapper, passwordHash))
-		// The same deployment with the package it was missing, written now because the case that
-		// proves the repair restarts the service rather than editing its configuration.
-		repairedConfig = path.join(dir, 'gohorizon-repaired.yaml')
-		fs.writeFileSync(repairedConfig, noCapsConfigYAML(nocapsPort, dir, php, passwordHash))
+    		// The wrapper is a file rather than the interpreter itself, so installing the package is a
+		// change to what the deployment already runs — no restart and no configuration edit.
+		nocapsWrapper = path.join(dir, 'php-nocaps')
+		fs.writeFileSync(nocapsWrapper, refusingWrapper(php), { mode: 0o755 })
+		const nocapsConfig = path.join(dir, 'gohorizon-nocaps.yaml')
+		fs.writeFileSync(nocapsConfig, noCapsConfigYAML(nocapsPort, dir, nocapsWrapper, passwordHash))
 
     const nocapsLog = fs.openSync(path.join(dir, 'gohorizon-nocaps.log'), 'a')
     nocapsService = spawn(binary, ['run', '-config', nocapsConfig], {
@@ -1777,11 +1769,16 @@ test.describe('the dashboard against the real binary', () => {
     await expect(page.getByText(reason, { exact: true })).toBeVisible()
   })
 
-  test('a repaired deployment gets its controls back without a page reload', async ({ page }) => {
-    // An operator repairs a deployment by installing the package and restarting the service.
-    // The descriptor is a startup snapshot, so the restart is what changes the answer — and the
-    // page is never navigated away from, so what brings the controls back is the refresh on the
-    // dashboard's own interval rather than a load.
+  test('a repaired deployment gets its controls back without a restart', async ({ page }) => {
+    // An operator repairs a deployment by installing the package. Nothing else changes: the
+    // service keeps running with the configuration it started with, and the page is never
+    // navigated away from. What brings the controls back is the service re-reading the
+    // descriptor and the dashboard's refresh picking that answer up.
+    if (php === null) {
+      throw new Error('php is not on PATH')
+    }
+    test.setTimeout(120_000)
+
     await page.goto(`${nocapsBase}/#/workers`)
     await expect(page.getByRole('heading', { name: 'Workers', exact: true })).toBeVisible()
     await expect(page.getByRole('button', { name: 'Restart', exact: true })).toHaveCount(0)
@@ -1795,28 +1792,16 @@ test.describe('the dashboard against the real binary', () => {
     const reason = `Read-only: ${error ?? ''}`
     await expect(page.getByText(reason, { exact: true })).toBeVisible()
 
-    // Down, then up on the same port with the package answering. The session survives because
-    // both deployments sign with the same key, which is also why no sign-in is needed here.
-    stopService(nocapsService)
-    const log = fs.openSync(path.join(dir, 'gohorizon-repaired.log'), 'a')
-    nocapsService = spawn(binary, ['run', '-config', repairedConfig], {
-      cwd: root,
-      detached: true,
-      stdio: ['ignore', log, log],
-      env: { ...process.env, ...fixtureEnv, GOHORIZON_SMOKE_SESSION_KEY: sessionKey },
-    })
-    fs.closeSync(log)
-    await waitFor('listen again on the repaired deployment', async () => {
-      const response = await fetch(`${nocapsBase}/api/v1/health`, {
-        signal: AbortSignal.timeout(3_000),
-      })
-      return response.status === 401
-    })
+    // The repair, in place: the executable the running deployment already invokes starts
+    // answering the probe, which is what installing the package does.
+    fs.writeFileSync(nocapsWrapper, repairedWrapper(php), { mode: 0o755 })
 
-    // Nothing is clicked and nothing is reloaded: the next poll is what draws the control, the
-    // column it sits in, and takes the read-only reason away.
+    // Nothing is clicked and nothing is reloaded: the service's next re-read of the descriptor
+    // and the dashboard's next poll are what draw the control, the column it sits in, and take
+    // the read-only reason away. The wait covers one re-read interval with room for the poll
+    // and the PHP run behind it.
     await expect(page.getByRole('button', { name: 'Restart', exact: true }).first()).toBeVisible({
-      timeout: 20_000,
+      timeout: 60_000,
     })
     await expect(page.getByRole('columnheader', { name: 'Action', exact: true })).toBeVisible()
     await expect(page.getByText(reason, { exact: true })).toHaveCount(0)
@@ -1939,6 +1924,19 @@ applications:
 // own application and queue names, through a PHP that refuses the capabilities command. Its
 // one worker serves a queue nothing is dispatched to, so it cannot take the work the case
 // above dispatches, and its store is its own file beside the service's.
+// refusingWrapper is a PHP executable that refuses only `gohorizon:capabilities`, with the
+// reason the service is expected to publish; every other command reaches the fixture's own
+// interpreter.
+function refusingWrapper(php: string): string {
+  return `#!/bin/sh\nfor arg in "$@"; do\n  if [ "$arg" = "gohorizon:capabilities" ]; then\n    echo '${nocapsReason}' >&2\n    exit 1\n  fi\ndone\nexec ${JSON.stringify(php)} "$@"\n`
+}
+
+// repairedWrapper is the same executable once the package is installed: it answers every
+// command, the capabilities probe included.
+function repairedWrapper(php: string): string {
+  return `#!/bin/sh\nexec ${JSON.stringify(php)} "$@"\n`
+}
+
 function noCapsConfigYAML(port: number, dir: string, php: string, passwordHash: string): string {
   return `version: 1
 

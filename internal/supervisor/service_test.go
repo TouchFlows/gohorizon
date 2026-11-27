@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -148,6 +149,132 @@ func TestNewPassesPreflightForACompatibleLaunch(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "connect to redis") {
 		t.Fatalf("error = %q, want the redis connection failure", err)
+	}
+}
+
+// scriptedProbe answers the capabilities probe from a queue of answers, so a test can watch the
+// published descriptor change without a PHP application behind it.
+type scriptedProbe struct {
+	mu      sync.Mutex
+	answers []probeAnswer
+	reads   int
+}
+
+type probeAnswer struct {
+	caps adapter.Capabilities
+	err  error
+}
+
+func (p *scriptedProbe) Capabilities(context.Context) (adapter.Capabilities, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	answer := probeAnswer{}
+	if len(p.answers) > 0 {
+		answer, p.answers = p.answers[0], p.answers[1:]
+	}
+	p.reads++
+	return answer.caps, answer.err
+}
+
+// readCount is how many times the probe was asked, which is what a stop has to end.
+func (p *scriptedProbe) readCount() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.reads
+}
+
+// TestProbeOncePublishesTheApplicationsNewAnswer is the repair without a restart: a deployment
+// whose package is installed, or removed, while the service runs is presented as it is now. The
+// published pair is replaced as a whole, and each change is recorded once rather than every
+// interval.
+func TestProbeOncePublishesTheApplicationsNewAnswer(t *testing.T) {
+	unreadable := adapter.Capabilities{Schema: adapter.SchemaVersion + 1}
+	readable := adapter.Capabilities{Schema: adapter.SchemaVersion, Package: "gohorizon/laravel"}
+
+	probe := &scriptedProbe{answers: []probeAnswer{
+		{caps: readable},
+		{caps: unreadable},
+		{err: errors.New("php: could not open input file: artisan")},
+	}}
+	logs := &bytes.Buffer{}
+	service := &Service{
+		log:    slog.New(slog.NewJSONHandler(logs, nil)),
+		appID:  "app",
+		probe:  probe,
+		probed: unreadable,
+	}
+
+	// The package was installed: what the endpoint publishes is now the answer it gave.
+	service.probeOnce(context.Background())
+	caps, err := service.Capabilities()
+	if err != nil || caps.Schema != adapter.SchemaVersion || caps.Package != "gohorizon/laravel" {
+		t.Fatalf("descriptor = %+v, %v; want the repaired answer", caps, err)
+	}
+	if !strings.Contains(logs.String(), "capabilities re-read") {
+		t.Errorf("log = %q, want the repair recorded", logs.String())
+	}
+
+	// The package was upgraded past this service: read-only again. The read succeeded, so the
+	// error stays nil and the schema is what the endpoint reports on, exactly as at startup.
+	service.probeOnce(context.Background())
+	if caps, err := service.Capabilities(); err != nil || caps.Supported() || caps.Schema != adapter.SchemaVersion+1 {
+		t.Errorf("descriptor = %+v, %v; want the unreadable schema published", caps, err)
+	}
+	if !strings.Contains(logs.String(), "schema not understood") {
+		t.Errorf("log = %q, want the schema change recorded", logs.String())
+	}
+
+	// The package was removed: the probe's own reason is what the deployment presents.
+	service.probeOnce(context.Background())
+	_, err = service.Capabilities()
+	if err == nil || !strings.Contains(err.Error(), "artisan") {
+		t.Fatalf("error = %v, want the probe's own failure", err)
+	}
+	if !strings.Contains(logs.String(), "capabilities unavailable") {
+		t.Errorf("log = %q, want the failure recorded", logs.String())
+	}
+}
+
+// TestProbeLoopKeepsTheDescriptorCurrentUntilStopped proves the loop is what refreshes the
+// answer while the service runs, and that it stops with the service rather than reading PHP
+// forever.
+func TestProbeLoopKeepsTheDescriptorCurrentUntilStopped(t *testing.T) {
+	probe := &scriptedProbe{answers: []probeAnswer{
+		{caps: adapter.Capabilities{Schema: adapter.SchemaVersion + 1}},
+		{caps: adapter.Capabilities{Schema: adapter.SchemaVersion, Package: "gohorizon/laravel"}},
+	}}
+	service := &Service{
+		log:           slog.New(slog.NewTextHandler(io.Discard, nil)),
+		appID:         "app",
+		probe:         probe,
+		probeInterval: 5 * time.Millisecond,
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		service.probeLoop(ctx)
+	}()
+
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		if caps, err := service.Capabilities(); err == nil && caps.Supported() {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the loop never published the repaired answer")
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+
+	cancel()
+	<-done
+	reads := probe.readCount()
+	time.Sleep(50 * time.Millisecond)
+	if got := probe.readCount(); got != reads {
+		t.Errorf("the probe was read %d more times after the loop stopped", got-reads)
 	}
 }
 

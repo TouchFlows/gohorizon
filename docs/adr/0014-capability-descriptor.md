@@ -26,11 +26,14 @@ operator and a refusal would be the 503 the action returns.
 1. **`GET /api/v1/capabilities` publishes the descriptor read at startup.** It is a read in the
    session-gated group, so any signed-in role may ask, and it is read-only: a POST is a 405. It
    answers `Cache-Control: no-store`, like every other operational read.
-2. **The descriptor is a snapshot, not a live probe.** The values are the ones `supervisor.New`
-   read and the preflight acted on, held on the service; nothing on the HTTP path starts PHP.
-   The endpoint and the launch decision therefore cannot disagree, and a dashboard load costs no
-   process. A deployment whose application changes its queue configuration restarts the service —
-   which it already has to do, because the preflight is a startup check.
+2. **The descriptor is a snapshot the service refreshes, never a probe on the request path.**
+   The endpoint reads the last answer from memory, so a dashboard load costs no process and
+   cannot block on PHP. `supervisor.New` publishes the preflight's own answer first, and
+   `probeLoop` then re-reads it every 30 seconds, so a deployment repaired, upgraded or broken
+   while the service runs is presented as it is now without a restart. The refresh only
+   publishes: the launch preflight is a decision about workers that are already running, so a
+   contradiction found later is reported, never enforced — a queue configuration that changes
+   under a live pool still needs the restart it always needed.
 3. **The response separates "what the application said" from "what this service can do".**
    `available` is true only when the probe answered with a schema this service understands;
    `error` otherwise says which (the probe's own wording, or the two schema numbers). The
@@ -81,10 +84,13 @@ operator and a refusal would be the 503 the action returns.
   token checks — so a caller refused for its role is told that, not that the deployment is
   read-only. Nothing is asked of the pool or the application first: the refusal is not an action
   that happened and was then explained.
-- A repaired deployment recovers on its own. Because the descriptor is a startup snapshot
-  (decision 2), the only way it changes is a restarted service — which is exactly what an
-  operator does after installing the package. The dashboard's refresh then picks the new answer
-  up within one poll, and the read-only banner and the withheld controls leave with it.
+- A repaired deployment recovers on its own, without a restart. `probeLoop` re-reads the
+  descriptor on an interval, so installing the package — or removing it — changes what the
+  endpoint publishes within one interval, and the dashboard's refresh draws the controls, or the
+  reason, that follow. The re-read is cheap but not free: it starts PHP once per interval per
+  application, which is why the interval is slow and why the HTTP path still starts nothing. A
+  re-read that fails is published as unavailable, exactly like one that never answered at
+  startup; the next successful read restores the controls.
 - The endpoint publishes what the application reports about itself, including its Laravel and
   PHP versions and event list. It does not publish payloads, credentials or keys; the package
   already omits `has_password` values, and the probe ignores them.
@@ -110,7 +116,9 @@ operator and a refusal would be the 503 the action returns.
   drives the real binary through the endpoint against the application's own payload, against a
   PHP that refuses the probe, and against one that answers an unknown schema — where a signed-in
   operator's retry, delete and restart are refused and the worker is still the one running.
-  `tests/browser/smoke.spec.ts` restarts a refusing deployment on its own port with a PHP that
-  answers, and asserts the controls come back on the page that was already open, which is the
-  refresh and not a reload. The second broker
+  `tests/browser/smoke.spec.ts` repairs a refusing deployment in place — the executable it
+  already runs starts answering the probe — and asserts the controls come back on the page that
+  was already open, which is the service's re-read plus the dashboard's refresh, with neither a
+  restart nor a reload; `internal/supervisor/service_test.go` covers the re-read and the loop
+  that stops with the service. The second broker
   adapter that would make the descriptor earn its keep is still deferred.
