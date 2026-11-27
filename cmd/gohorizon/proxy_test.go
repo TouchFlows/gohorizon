@@ -28,6 +28,8 @@ func (idleProvider) Capabilities() (adapter.Capabilities, error) {
 	return adapter.Capabilities{Schema: adapter.SchemaVersion}, nil
 }
 
+func (idleProvider) CapabilityReadOnlySince() int64 { return 0 }
+
 func (idleProvider) Buckets(context.Context, metrics.Resolution, string, time.Time, time.Time) ([]metrics.Bucket, error) {
 	return nil, nil
 }

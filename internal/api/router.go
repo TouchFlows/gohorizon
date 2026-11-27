@@ -30,6 +30,10 @@ type Provider interface {
 	// answer when it did not. It is published read-only so a client can gate what it offers
 	// (docs/adr/0014).
 	Capabilities() (adapter.Capabilities, error)
+	// CapabilityReadOnlySince is when the deployment was first presented as read-only, in unix
+	// seconds, 0 while it is readable. The descriptor publishes it beside the reason so a banner
+	// can say how long the controls have been missing, not only why (docs/adr/0014).
+	CapabilityReadOnlySince() int64
 	Buckets(ctx context.Context, resolution metrics.Resolution, queue string, from, to time.Time) ([]metrics.Bucket, error)
 	Jobs(ctx context.Context, query metrics.JobQuery) ([]metrics.Job, error)
 	Job(ctx context.Context, jobID string) (metrics.Job, error)

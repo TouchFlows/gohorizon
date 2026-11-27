@@ -70,6 +70,8 @@ type capabilitiesAnswer struct {
 	} `json:"payload_schemas"`
 	// OperationReasons says why a withheld operation is withheld.
 	OperationReasons map[string]string `json:"operation_reasons"`
+	// ReadOnlySince is when the deployment went read-only, 0 while it is readable.
+	ReadOnlySince int64 `json:"read_only_since"`
 	// ApplicationPayloadSchemas is what the application says its own commands emit.
 	ApplicationPayloadSchemas *struct {
 		Inspect    int `json:"inspect"`
@@ -624,6 +626,13 @@ func TestCapabilitiesReportTheApplicationsRefusal(t *testing.T) {
 	}
 	if report.Capabilities.ReadOnlySince > time.Now().Unix() {
 		t.Errorf("read_only_since = %d, want no future instant", report.Capabilities.ReadOnlySince)
+	}
+
+	// The descriptor publishes the same instant, so the dashboard's banner can say how long the
+	// controls have been missing from the payload it already gates them on (docs/adr/0014).
+	if answer.ReadOnlySince != report.Capabilities.ReadOnlySince {
+		t.Errorf("descriptor read_only_since = %d, want health's %d",
+			answer.ReadOnlySince, report.Capabilities.ReadOnlySince)
 	}
 }
 

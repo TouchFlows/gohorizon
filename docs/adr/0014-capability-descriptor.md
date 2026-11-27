@@ -121,7 +121,10 @@ operator and a refusal would be the 503 the action returns.
   probe stamps it when the service starts against a deployment it cannot read, recording
   `started read-only: …` before Redis is even opened. A restart into the read-only state is
   therefore a record with an age rather than only a warning, and "how long has this been
-  read-only" is arithmetic on a field instead of a search of the log.
+  read-only" is arithmetic on a field instead of a search of the log. The descriptor publishes
+  the same instant as `read_only_since`, so the dashboard's banner says how long the controls
+  have been withheld from the payload it already gates them on, without a second poll to health
+  for one number.
 - The refusal is the service's, not only the page's. `requireCapability` derives the same
   operations the descriptor publishes and answers 503 with the withheld entry's own reason (the
   descriptor's `error` when the whole descriptor could not be read) for

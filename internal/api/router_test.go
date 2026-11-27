@@ -22,6 +22,9 @@ type stubProvider struct {
 	buckets []metrics.Bucket
 	err     error
 
+	// The instant the provider reports for a deployment it presents as read-only.
+	readOnlySince int64
+
 	// The last metrics query, so a test can check what the handler parsed.
 	resolution metrics.Resolution
 	queue      string
@@ -61,6 +64,8 @@ type stubProvider struct {
 func (s *stubProvider) Report() health.Report { return s.report }
 
 func (s *stubProvider) Capabilities() (adapter.Capabilities, error) { return s.caps, s.capsErr }
+
+func (s *stubProvider) CapabilityReadOnlySince() int64 { return s.readOnlySince }
 
 func (s *stubProvider) Buckets(_ context.Context, resolution metrics.Resolution, queue string, from, to time.Time) ([]metrics.Bucket, error) {
 	s.resolution, s.queue, s.from, s.to = resolution, queue, from, to

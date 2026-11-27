@@ -384,6 +384,16 @@ func (s *Service) Capabilities() (adapter.Capabilities, error) {
 	return s.probed, s.probeErr
 }
 
+// CapabilityReadOnlySince is when the deployment was first presented as read-only, 0 while it is
+// readable. It is read under the same lock as the answer it belongs to, and it is the instant
+// health publishes, so the descriptor's banner and a monitor cannot tell two ages for one state
+// (docs/adr/0014).
+func (s *Service) CapabilityReadOnlySince() int64 {
+	s.capsMu.RLock()
+	defer s.capsMu.RUnlock()
+	return unixSeconds(s.readOnlySince)
+}
+
 // probeLoop keeps the published descriptor current, so a deployment repaired, upgraded or
 // broken while the service runs is presented as it is now without a restart. The endpoint
 // itself still starts no PHP: it reads the answer this loop published (docs/adr/0014).

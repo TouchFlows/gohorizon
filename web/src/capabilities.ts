@@ -50,13 +50,37 @@ export function workerControls(capabilities: Capabilities | null, canAct: boolea
   return { restart, reason: restart ? '' : unsupported(capabilities, 'restart_workers') }
 }
 
+// readOnlyFor is how long a read-only deployment has been read-only, in the words a banner uses.
+// Minutes are enough up to an hour and hours up to a day: the exact instant is `read_only_since`,
+// and a banner that ticked by the second would be noise on a screen that already refreshes. An
+// instant from the future reads as the shortest age rather than a negative one.
+export function readOnlyFor(since: number, now: number = Math.floor(Date.now() / 1000)): string {
+  const seconds = now - since
+  if (seconds < 60) {
+    return 'less than a minute'
+  }
+  const minutes = Math.floor(seconds / 60)
+  if (minutes < 60) {
+    return minutes === 1 ? '1 minute' : `${minutes} minutes`
+  }
+  const hours = Math.floor(minutes / 60)
+  if (hours < 24) {
+    return hours === 1 ? '1 hour' : `${hours} hours`
+  }
+  const days = Math.floor(hours / 24)
+  return days === 1 ? '1 day' : `${days} days`
+}
+
 // unsupported is the service's own answer, so a control that is missing says why rather than
 // only disappearing. The operation's own reason comes first: it names the fact that withheld it
 // (no telemetry stream, no inspectable connection), where the descriptor's error only describes
-// a deployment that could not be read at all.
+// a deployment that could not be read at all. The age is added only when there is one: a readable
+// descriptor that withholds one screen publishes no instant, so that banner says why and nothing
+// else (docs/adr/0014).
 function unsupported(capabilities: Capabilities, operation: keyof CapabilityOperations): string {
   const reason = capabilities.operation_reasons?.[operation] ?? capabilities.error ?? ''
-  return reason === ''
-    ? 'Read-only: the application does not report support for this action.'
-    : `Read-only: ${reason}`
+  const detail =
+    reason === '' ? 'the application does not report support for this action.' : reason
+  const since = capabilities.read_only_since ?? 0
+  return since > 0 ? `Read-only for ${readOnlyFor(since)}: ${detail}` : `Read-only: ${detail}`
 }

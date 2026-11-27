@@ -41,7 +41,12 @@ type capabilitiesResponse struct {
 	// says anything. Published beside the versions this service reads so a mismatch is visible
 	// as two numbers rather than only as the reason an operation was withheld.
 	ApplicationPayloadSchemas *payloadSchemas `json:"application_payload_schemas,omitempty"`
-	Operations                map[string]bool `json:"operations"`
+	// ReadOnlySince is when the deployment was first presented as read-only, in unix seconds, 0
+	// while it is readable. Error says why the controls are missing; this says how long they have
+	// been, which is what a banner has to show to be useful, and it is the same instant health
+	// publishes (docs/adr/0014).
+	ReadOnlySince int64           `json:"read_only_since,omitempty"`
+	Operations    map[string]bool `json:"operations"`
 	// OperationReasons says why each withheld operation is withheld, in the words a refused
 	// action returns. A false entry without one would be a control that disappears with no
 	// explanation, which is the failure the descriptor exists to avoid (docs/adr/0014).
@@ -207,6 +212,7 @@ func capabilities(provider Provider) http.HandlerFunc {
 		operations, reasons := capabilityOperations(caps, available, unavailable)
 		response := capabilitiesResponse{
 			Available:        available,
+			ReadOnlySince:    provider.CapabilityReadOnlySince(),
 			PayloadSchemas:   payloadSchemaVersions(),
 			Operations:       operations,
 			OperationReasons: reasons,

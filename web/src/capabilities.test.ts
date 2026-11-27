@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { Capabilities } from './api'
-import { failedJobControls, workerControls } from './capabilities'
+import { failedJobControls, readOnlyFor, workerControls } from './capabilities'
 
 function descriptor(overrides: Partial<Capabilities> = {}): Capabilities {
   return {
@@ -78,6 +78,54 @@ describe('failedJobControls', () => {
 
     expect(failedJobControls(caps, true).reason).toBe(
       'Read-only: the application does not report support for this action.',
+    )
+  })
+})
+
+describe('readOnlyFor', () => {
+  it('counts minutes, hours and days, and never reports a negative age', () => {
+    const start = 1_000_000
+
+    expect(readOnlyFor(start, start + 30)).toBe('less than a minute')
+    expect(readOnlyFor(start, start + 60)).toBe('1 minute')
+    expect(readOnlyFor(start, start + 600)).toBe('10 minutes')
+    expect(readOnlyFor(start, start + 3599)).toBe('59 minutes')
+    expect(readOnlyFor(start, start + 3600)).toBe('1 hour')
+    expect(readOnlyFor(start, start + 7200)).toBe('2 hours')
+    expect(readOnlyFor(start, start + 86_400)).toBe('1 day')
+    expect(readOnlyFor(start, start + 3 * 86_400)).toBe('3 days')
+    // An instant from the future is a clock disagreement, not an age: the banner says the
+    // shortest thing it can rather than a negative duration.
+    expect(readOnlyFor(start, start - 600)).toBe('less than a minute')
+  })
+})
+
+describe('the read-only banner', () => {
+  it('says how long the deployment has been read-only, not only why', () => {
+    // The descriptor publishes the instant the service recorded, so the banner needs no second
+    // poll to say how long the controls have been missing (docs/adr/0014).
+    const now = Math.floor(Date.now() / 1000)
+    const caps = descriptor({
+      available: false,
+      error: 'the package is not installed',
+      read_only_since: now - 900,
+    })
+    caps.operations.restart_workers = false
+
+    expect(workerControls(caps, true).reason).toBe(
+      'Read-only for 15 minutes: the package is not installed',
+    )
+  })
+
+  it('leaves the age out when only one screen is withheld', () => {
+    // A readable descriptor withholds one operation with a reason of its own; nothing went
+    // read-only, so there is no instant and nothing to count from.
+    const caps = descriptor({ operation_reasons: { failed_job_retry: 'the application reports no failed store' } })
+    caps.operations.failed_job_retry = false
+    caps.operations.failed_job_delete = false
+
+    expect(failedJobControls(caps, true).reason).toBe(
+      'Read-only: the application reports no failed store',
     )
   })
 })

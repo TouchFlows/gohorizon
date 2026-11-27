@@ -111,8 +111,12 @@ export interface Capabilities {
   operations: CapabilityOperations
   // Why a withheld operation is withheld, in the service's own words. A false entry without one
   // would be a control that disappears without saying why.
-  operation_reasons?: Partial<Record<keyof CapabilityOperations, string>>
-  error?: string
+  	operation_reasons?: Partial<Record<keyof CapabilityOperations, string>>
+	// When the deployment was first presented as read-only, in unix seconds; absent or 0 while it
+	// is readable. The error says why the controls are missing, this says how long they have been
+	// (docs/adr/0014).
+	read_only_since?: number
+	error?: string
 }
 
 export async function fetchCapabilities(signal?: AbortSignal): Promise<Capabilities> {

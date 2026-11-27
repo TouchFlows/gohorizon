@@ -57,6 +57,8 @@ type capabilitiesAnswer struct {
 	} `json:"connections"`
 	Operations       map[string]bool   `json:"operations"`
 	OperationReasons map[string]string `json:"operation_reasons"`
+	// ReadOnlySince is when the deployment went read-only, 0 while it is readable.
+	ReadOnlySince int64 `json:"read_only_since"`
 	// ApplicationPayloadSchemas is what the application says its own commands emit.
 	ApplicationPayloadSchemas *struct {
 		Inspect    int `json:"inspect"`
@@ -114,6 +116,31 @@ func TestCapabilitiesPublishesTheApplicationDescriptor(t *testing.T) {
 		if !answer.Operations[operation] {
 			t.Errorf("operations[%q] = false, want true", operation)
 		}
+	}
+}
+
+// TestCapabilitiesPublishesWhenTheDeploymentWentReadOnly is the banner's other half: the error says
+// why the controls are missing, and this instant says how long they have been, so the dashboard can
+// say "read-only for 12 minutes" from the descriptor alone rather than asking health as well
+// (docs/adr/0014).
+func TestCapabilitiesPublishesWhenTheDeploymentWentReadOnly(t *testing.T) {
+	answer := readCapabilities(t, &stubProvider{
+		capsErr:       errors.New("gohorizon/laravel adapter is unavailable: the package is not installed"),
+		readOnlySince: 1763600000,
+	})
+
+	if answer.Available {
+		t.Error("available = true for an adapter that could not answer")
+	}
+	if answer.ReadOnlySince != 1763600000 {
+		t.Errorf("read_only_since = %d, want the instant the service recorded", answer.ReadOnlySince)
+	}
+
+	// A readable deployment has not been read-only at all, so the field stays out of the document
+	// instead of publishing an instant a banner would count from forever.
+	readable := readCapabilities(t, &stubProvider{caps: descriptor()})
+	if readable.ReadOnlySince != 0 {
+		t.Errorf("read_only_since = %d, want 0 for a readable deployment", readable.ReadOnlySince)
 	}
 }
 
