@@ -1735,8 +1735,9 @@ test.describe('the dashboard against the real binary', () => {
       restart_workers: false,
     })
 
-    // The reason is the service's own wording, and it is what both screens must carry.
-    const reason = `Read-only: ${capabilities.error ?? ''}`
+    // The reason is the service's own wording, and it is what both screens must carry, in front
+    // of the age the descriptor publishes so the line says how long as well as why.
+    const reason = readOnlyBanner(capabilities.error ?? '')
 
     // A record for the controls to be missing from: the smoke's own worker runs the failing
     // fixture job, and this deployment reads the same application's failed store.
@@ -1757,7 +1758,7 @@ test.describe('the dashboard against the real binary', () => {
     await expect(detail).toBeVisible()
     await expect(detail.getByRole('button', { name: 'Retry', exact: true })).toHaveCount(0)
     await expect(detail.getByRole('button', { name: 'Delete', exact: true })).toHaveCount(0)
-    await expect(page.getByText(reason, { exact: true })).toBeVisible()
+    await expect(page.getByText(reason)).toBeVisible()
 
     // The worker rows lose the control and the column that held it, and the same reason is
     // drawn under the table rather than only in the payload.
@@ -1766,7 +1767,7 @@ test.describe('the dashboard against the real binary', () => {
     await expect(page.locator('tbody tr').first()).toBeVisible()
     await expect(page.getByRole('button', { name: 'Restart', exact: true })).toHaveCount(0)
     await expect(page.getByRole('columnheader', { name: 'Action', exact: true })).toHaveCount(0)
-    await expect(page.getByText(reason, { exact: true })).toBeVisible()
+    await expect(page.getByText(reason)).toBeVisible()
   })
 
   test('a repaired deployment gets its controls back without a restart', async ({ page }) => {
@@ -1789,8 +1790,8 @@ test.describe('the dashboard against the real binary', () => {
     expect(described.status()).toBe(200)
     const { available, error } = (await described.json()) as { available: boolean; error?: string }
     expect(available).toBe(false)
-    const reason = `Read-only: ${error ?? ''}`
-    await expect(page.getByText(reason, { exact: true })).toBeVisible()
+    const reason = readOnlyBanner(error ?? '')
+    await expect(page.getByText(reason)).toBeVisible()
 
     // The repair, in place: the executable the running deployment already invokes starts
     // answering the probe, which is what installing the package does.
@@ -1804,7 +1805,7 @@ test.describe('the dashboard against the real binary', () => {
       timeout: 60_000,
     })
     await expect(page.getByRole('columnheader', { name: 'Action', exact: true })).toBeVisible()
-    await expect(page.getByText(reason, { exact: true })).toHaveCount(0)
+    await expect(page.getByText(reason)).toHaveCount(0)
   })
 
   test('a deep link outside the navigation loads the shell instead of a 404', async ({ page }) => {
@@ -2340,6 +2341,17 @@ function attemptCount(bucket: HistoryBucket): number {
 // takes the plural — and the one place a noun's wording lives on this side. It is mirrored
 // here rather than imported so the smoke can disagree with the page instead of sharing its
 // answer; the page's own countNoun words the same three nouns.
+// readOnlyBanner is the line a withheld control leaves under a screen: "Read-only for 12 minutes:
+// <the service's reason>". The age counts from the instant the descriptor publishes, and its own
+// wording is pinned by the dashboard's unit tests (web/src/capabilities.test.ts), so any of those
+// reads are accepted here while the sentence after the colon is matched exactly.
+function readOnlyBanner(reason: string): RegExp {
+  const escaped = reason.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+  return new RegExp(
+    `^Read-only for (?:less than a minute|\\d+ (?:minute|minutes|hour|hours|day|days)): ${escaped}$`,
+  )
+}
+
 function countNoun(count: number, noun: string): string {
   return `${count} ${noun}${count === 1 ? '' : 's'}`
 }
