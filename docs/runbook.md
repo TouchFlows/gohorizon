@@ -14,7 +14,7 @@ state changed and why it was then).
 ## GoHorizonCapabilitiesReadOnly
 
 **Means:** the application's capability descriptor cannot be read, so the dashboard offers no administrative action, restart included — a fact, not a stopped service.
-**Do:** read `capabilities.error` for the reason, then run `php artisan gohorizon:capabilities --json` in the application: a missing or unreadable package needs `composer require gohorizon/laravel`, a schema number this service does not understand needs one side upgraded, and a failed command needs the error it printed.
+**Do:** read `capabilities.error` for the reason, then run `php artisan gohorizon:capabilities --json` in the application: a missing or unreadable package needs `composer require gohorizon/laravel`, a schema number this service does not understand needs one side upgraded, and a failed command needs the error it printed. After repairing it, `POST /api/v1/capabilities/refresh` as an administrator re-reads the descriptor at once and answers with what it found, so the repair is confirmed without waiting out the 30-second interval or restarting the service; the `capability-refresh` audit line says who asked and whether it is readable again.
 
 ## GoHorizonCapabilitiesReadOnlyTooLong
 

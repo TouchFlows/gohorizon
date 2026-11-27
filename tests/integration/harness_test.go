@@ -169,17 +169,24 @@ func (h *harness) writeConfigWithPHP(php string) (string, string) {
 // and the key that signs its session.
 func (h *harness) writeConfigWithAuth(php, passwordHash string) (string, string) {
 	h.t.Helper()
+	return h.writeConfigWithRole(php, passwordHash, auth.RoleOperator)
+}
+
+// writeConfigWithRole is writeConfigWithAuth with the user's role chosen, so a test can call the
+// routes that need an administrator and be refused on the ones that do not.
+func (h *harness) writeConfigWithRole(php, passwordHash, role string) (string, string) {
+	h.t.Helper()
 
 	h.t.Setenv("GOHORIZON_E2E_SESSION_KEY", "gohorizon-e2e-session-key-0123456789abcdef")
-	auth := fmt.Sprintf(`  auth:
+	authBlock := fmt.Sprintf(`  auth:
     session_key_env: GOHORIZON_E2E_SESSION_KEY
     session_hours: 1
     users:
       - name: %s
         password_hash: %q
-        role: operator
-`, testOperator, passwordHash)
-	return h.writeConfigAs(testRedisAddr, []string{testQueue}, 1, php, auth)
+        role: %s
+`, testOperator, passwordHash, role)
+	return h.writeConfigAs(testRedisAddr, []string{testQueue}, 1, php, authBlock)
 }
 
 // writeConfigAs writes the configuration for one PHP executable, with the server's auth block

@@ -34,6 +34,9 @@ type Provider interface {
 	// seconds, 0 while it is readable. The descriptor publishes it beside the reason so a banner
 	// can say how long the controls have been missing, not only why (docs/adr/0014).
 	CapabilityReadOnlySince() int64
+	// ReprobeCapabilities re-reads the descriptor now and publishes the answer, so a repair can
+	// be confirmed without waiting out the interval or restarting the service (docs/adr/0014).
+	ReprobeCapabilities(ctx context.Context) (adapter.Capabilities, error)
 	Buckets(ctx context.Context, resolution metrics.Resolution, queue string, from, to time.Time) ([]metrics.Bucket, error)
 	Jobs(ctx context.Context, query metrics.JobQuery) ([]metrics.Job, error)
 	Job(ctx context.Context, jobID string) (metrics.Job, error)
@@ -137,6 +140,14 @@ func NewRouter(provider Provider, log *slog.Logger, opts ...Option) http.Handler
 					requireCSRF(store, audit.ActionFailedJobDelete, auditor),
 					requireCapability(provider, "failed_job_delete", audit.ActionFailedJobDelete, store, auditor),
 				).Delete("/failed/{job}", deleteFailedJob(provider, store, log, auditor))
+				// Re-reading the descriptor is what someone asks for right after repairing a
+				// deployment. It answers with the document a GET would, and it is deliberately not
+				// gated on the descriptor: the deployment presented as read-only is exactly the one
+				// worth re-reading (docs/adr/0014).
+				r.With(
+					requireRole(store, auth.RoleAdministrator, audit.ActionCapabilityRefresh, auditor),
+					requireCSRF(store, audit.ActionCapabilityRefresh, auditor),
+				).Post("/capabilities/refresh", refreshCapabilities(provider, store, auditor))
 			})
 		}
 

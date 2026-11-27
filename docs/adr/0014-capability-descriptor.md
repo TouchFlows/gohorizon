@@ -26,9 +26,10 @@ operator and a refusal would be the 503 the action returns.
 1. **`GET /api/v1/capabilities` publishes the descriptor read at startup.** It is a read in the
    session-gated group, so any signed-in role may ask, and it is read-only: a POST is a 405. It
    answers `Cache-Control: no-store`, like every other operational read.
-2. **The descriptor is a snapshot the service refreshes, never a probe on the request path.**
+2. **The descriptor is a snapshot the service refreshes, never a probe on a read path.**
    The endpoint reads the last answer from memory, so a dashboard load costs no process and
-   cannot block on PHP. `supervisor.New` publishes the preflight's own answer first, and
+   cannot block on PHP. A re-read is asked for explicitly — by the loop, or by an administrator
+   who has just repaired the deployment (see below). `supervisor.New` publishes the preflight's own answer first, and
    `probeLoop` then re-reads it every 30 seconds, so a deployment repaired, upgraded or broken
    while the service runs is presented as it is now without a restart. The refresh only
    publishes: the launch preflight is a decision about workers that are already running, so a
@@ -138,7 +139,22 @@ operator and a refusal would be the 503 the action returns.
   descriptor on an interval, so installing the package — or removing it — changes what the
   endpoint publishes within one interval, and the dashboard's refresh draws the controls, or the
   reason, that follow. The re-read is cheap but not free: it starts PHP once per interval per
-  application, which is why the interval is slow and why the HTTP path still starts nothing.
+  application, which is why the interval is slow and why the HTTP read path still starts nothing.
+- A repair can be confirmed on demand. `POST /api/v1/capabilities/refresh` re-reads the
+  descriptor now and answers with the document a GET would, so whoever has just installed the
+  package or raised `retry_after` reads the result instead of waiting out the interval — or
+  restarting the service, which would stop the pool to answer a question. It needs the
+  administrator role and the token, because it starts a PHP command on the application's host,
+  and it is recorded under `capability-refresh` with what the read found (`readable: schema 1,
+  package gohorizon/laravel 0.1.0`, or `still read-only: …`), so "did the repair work, and who
+  checked" is answerable afterwards. It is deliberately not gated on the descriptor: the
+  deployment presented as read-only is exactly the one worth re-reading. The answer is published
+  as it was read, without the debounce a scheduled read gets, because the caller is waiting on
+  this read and keeping the last answer would tell them nothing — and it is still only
+  published, so a contradiction found here is reported and never enforced. Reads are serialized,
+  so the loop and the operator cannot publish each other's answer out of order, and a manual
+  read counts as the loop's last answer because it is one: it updates
+  `gohorizon_capabilities_last_success_timestamp_seconds` when it gets an answer.
 - The state is alertable without the log. `GET /api/v1/health` carries a `capabilities` object
   (`available`, `schema`, `failed_reads`, `error`, `contradiction`, `last_read_at`,
   `read_only_since`) and `/metrics`
@@ -209,7 +225,11 @@ operator and a refusal would be the 503 the action returns.
   drives the real binary through the endpoint against the application's own payload, against a
   PHP that refuses the probe, and against one that answers an unknown schema — where a signed-in
   operator's retry, delete and restart are refused and the worker is still the one running.
-  `tests/browser/smoke.spec.ts` repairs a refusing deployment in place — the executable it
+  `POST /api/v1/capabilities/refresh` is covered in `internal/api/capabilities_test.go` (the
+  role, the token, the answer it publishes and the record it writes),
+  `internal/supervisor/service_test.go` (a forced read publishes its answer, a failure
+  included) and `tests/integration`, which repairs the application's answer while the service
+  runs and confirms it with one call;   `tests/browser/smoke.spec.ts` repairs a refusing deployment in place — the executable it
   already runs starts answering the probe — and asserts the controls come back on the page that
   was already open, which is the service's re-read plus the dashboard's refresh, with neither a
   restart nor a reload;   `internal/supervisor/service_test.go` covers the re-read, the loop that stops with the service

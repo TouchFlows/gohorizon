@@ -59,6 +59,11 @@ type stubProvider struct {
 	// not.
 	caps    adapter.Capabilities
 	capsErr error
+
+	// The answer a forced re-read publishes, and how many times one was asked for.
+	reprobed     adapter.Capabilities
+	reprobeErr   error
+	reprobeReads int
 }
 
 func (s *stubProvider) Report() health.Report { return s.report }
@@ -66,6 +71,11 @@ func (s *stubProvider) Report() health.Report { return s.report }
 func (s *stubProvider) Capabilities() (adapter.Capabilities, error) { return s.caps, s.capsErr }
 
 func (s *stubProvider) CapabilityReadOnlySince() int64 { return s.readOnlySince }
+
+func (s *stubProvider) ReprobeCapabilities(context.Context) (adapter.Capabilities, error) {
+	s.reprobeReads++
+	return s.reprobed, s.reprobeErr
+}
 
 func (s *stubProvider) Buckets(_ context.Context, resolution metrics.Resolution, queue string, from, to time.Time) ([]metrics.Bucket, error) {
 	s.resolution, s.queue, s.from, s.to = resolution, queue, from, to

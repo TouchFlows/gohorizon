@@ -34,6 +34,10 @@ const (
 	// read-only, coming back, or a package upgrade under a readable descriptor. It has no
 	// user, because the service noticed rather than an operator doing anything (docs/adr/0014).
 	ActionCapabilityChange = "capability-change"
+	// ActionCapabilityRefresh is an administrator asking the service to re-read the descriptor now,
+	// and it has an actor: a person asked, and "was the repair confirmed, and by whom" is the
+	// question the line answers (docs/adr/0014).
+	ActionCapabilityRefresh = "capability-refresh"
 )
 
 // Outcomes a record can carry: the action happened, it was refused, the caller was held back by

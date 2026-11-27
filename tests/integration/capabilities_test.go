@@ -957,3 +957,85 @@ func TestCapabilitiesReportASchemaThisServiceDoesNotUnderstand(t *testing.T) {
 		}
 	}
 }
+
+// TestCapabilitiesRefreshConfirmsARepairWithoutWaitingForTheTick is the operator's shortcut: the
+// deployment is repaired while the service runs, and an administrator asks for a re-read instead
+// of waiting out the thirty-second interval or restarting the supervisor. The answer is the
+// document that read produced, so the repair is confirmed by the call itself, and the record
+// names who asked and what the read found (docs/adr/0014).
+func TestCapabilitiesRefreshConfirmsARepairWithoutWaitingForTheTick(t *testing.T) {
+	h := newHarness(t)
+	answerPath := filepath.Join(h.dir, "capabilities.json")
+
+	// The launch found a deployment it cannot read, which is what a missing or broken package
+	// looks like: the service supervises the pool and presents itself as read-only.
+	if err := os.WriteFile(answerPath, []byte("not the documented json"), 0o644); err != nil {
+		t.Fatalf("write the application's answer: %v", err)
+	}
+	hash, err := auth.HashPassword(testOperatorPassword)
+	if err != nil {
+		t.Fatalf("hash the test password: %v", err)
+	}
+	configPath, base := h.writeConfigWithRole(h.fileAnsweringPHP(answerPath), hash, auth.RoleAdministrator)
+	inst := h.startBinary(h.buildBinary(), configPath)
+	cookies := h.signIn(t, base, testOperator, testOperatorPassword)
+	awaitRunning(h, base, cookies...)
+
+	before := h.fetchCapabilities(t, base, cookies...)
+	if before.Available {
+		t.Fatalf("available = true at launch, want a deployment that could not be read")
+	}
+
+	// The repair. Nothing else changes: the same executable now answers a payload this service
+	// reads, and only a re-read can notice.
+	if err := os.WriteFile(answerPath, []byte(capabilitiesAnswerFor(90, "0.1.0")), 0o644); err != nil {
+		t.Fatalf("rewrite the application's answer: %v", err)
+	}
+
+	status, body := h.call(t, base, http.MethodPost, "/api/v1/capabilities/refresh", cookies)
+	if status != http.StatusOK {
+		t.Fatalf("POST /api/v1/capabilities/refresh = %d, want 200 (body %s)", status, body)
+	}
+	var refreshed capabilitiesAnswer
+	if err := json.Unmarshal([]byte(body), &refreshed); err != nil {
+		t.Fatalf("decode the refresh answer: %v (%s)", err, body)
+	}
+	if !refreshed.Available || refreshed.Error != "" {
+		t.Fatalf("available=%t error=%q, want the repaired descriptor in the refresh's own answer",
+			refreshed.Available, refreshed.Error)
+	}
+	if refreshed.Package != "gohorizon/laravel" || refreshed.Laravel == "" || refreshed.PHP == "" {
+		t.Errorf("descriptor = %+v, want the application's identifiers", refreshed)
+	}
+	if refreshed.ReadOnlySince != 0 {
+		t.Errorf("read_only_since = %d, want it cleared by the repair", refreshed.ReadOnlySince)
+	}
+	for _, operation := range []string{"inspect_queues", "telemetry", "failed_jobs_list", "failed_job_retry", "failed_job_delete", "restart_workers"} {
+		if !refreshed.Operations[operation] {
+			t.Errorf("operations[%q] = false, want the controls back with the readable descriptor", operation)
+		}
+	}
+
+	// The published state moved with it, so a client that reads next sees the same deployment
+	// rather than a refresh that answered and changed nothing.
+	published := h.fetchCapabilities(t, base, cookies...)
+	if !published.Available || published.ReadOnlySince != 0 || published.Package != refreshed.Package {
+		t.Errorf("published = %+v, want the refreshed answer", published)
+	}
+	report, err := h.fetchReport(base, cookies...)
+	if err != nil {
+		t.Fatalf("read health after the refresh: %v", err)
+	}
+	if !report.Capabilities.Available || report.Capabilities.ReadOnlySince != 0 {
+		t.Errorf("health capabilities = %+v, want readable with no read-only instant", report.Capabilities)
+	}
+
+	// And the call is in the log, with its actor and what the read found.
+	record := inst.auditRecord(t, "capability-refresh", "readable")
+	if record["outcome"] != "allowed" {
+		t.Errorf("outcome = %v, want allowed", record["outcome"])
+	}
+	if record["user"] != testOperator || record["role"] != auth.RoleAdministrator {
+		t.Errorf("record = %v, want %s as administrator", record, testOperator)
+	}
+}

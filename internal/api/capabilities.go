@@ -7,6 +7,8 @@ import (
 	"strings"
 
 	"github.com/gohorizon/gohorizon/internal/adapter"
+	"github.com/gohorizon/gohorizon/internal/audit"
+	"github.com/gohorizon/gohorizon/internal/auth"
 )
 
 // capabilitiesResponse is GET /api/v1/capabilities: what the application said about itself at
@@ -200,45 +202,85 @@ func noInspectableQueue(caps adapter.Capabilities) string {
 // know is reported as unavailable rather than half-read: the fields it thinks it recognises
 // need not mean the same thing in another schema.
 func capabilities(provider Provider) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
+	return func(w http.ResponseWriter, _ *http.Request) {
 		caps, err := provider.Capabilities()
-		available := err == nil && caps.Supported()
-		// The same sentence the health report and a refused action publish, so a client cannot
-		// read two different stories about one deployment.
-		unavailable := ""
-		if !available {
-			unavailable = caps.Reason(err)
-		}
-		operations, reasons := capabilityOperations(caps, available, unavailable)
-		response := capabilitiesResponse{
-			Available:        available,
-			ReadOnlySince:    provider.CapabilityReadOnlySince(),
-			PayloadSchemas:   payloadSchemaVersions(),
-			Operations:       operations,
-			OperationReasons: reasons,
-			Error:            unavailable,
-		}
-		if available {
-			response.Schema = caps.Schema
-			response.Package = caps.Package
-			response.PackageVersion = caps.PackageVersion
-			response.Laravel = caps.Laravel
-			response.PHP = caps.PHP
-			response.Application = caps.Application
-			response.Environment = caps.Environment
-			response.DefaultConnection = caps.Queue.DefaultConnection
-			response.Connections = capabilityConnections(caps)
-			response.PCNTL = caps.Runtime.PCNTL
-			response.TelemetryStream = caps.Telemetry.Stream
-			response.Events = caps.Events
-			if caps.Payloads.Inspect != 0 || caps.Payloads.FailedJobs != 0 {
-				reported := payloadSchemas{Inspect: caps.Payloads.Inspect, FailedJobs: caps.Payloads.FailedJobs}
-				response.ApplicationPayloadSchemas = &reported
-			}
-		}
-		w.Header().Set("Cache-Control", "no-store")
-		writeJSON(w, http.StatusOK, response)
+		writeDescriptor(w, provider, caps, err)
 	}
+}
+
+// refreshCapabilities re-reads the descriptor before answering, so a repair can be confirmed
+// now rather than at the next interval. The answer is the document a GET would return for the
+// same read — a client comparing the two is comparing one deployment, not two formats — and a
+// read that fails is still a 200 with `available: false` and the reason, because "the
+// application cannot answer" is the answer to the question that was asked (docs/adr/0014).
+//
+// The record says what the read found, not only that it happened: "was the repair confirmed" is
+// what an operator asks the log afterwards, and a line that named neither would leave them to
+// ask again.
+func refreshCapabilities(provider Provider, store *auth.Store, auditor *audit.Logger) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		caps, err := provider.ReprobeCapabilities(r.Context())
+		me, _ := store.Current(r)
+		auditor.Record(r, audit.Event{
+			Action:  audit.ActionCapabilityRefresh,
+			Outcome: audit.OutcomeAllowed,
+			User:    me.Name,
+			Role:    me.Role,
+			Address: store.ClientAddress(r),
+			Detail:  capabilityReadResult(caps, err),
+		})
+		writeDescriptor(w, provider, caps, err)
+	}
+}
+
+// capabilityReadResult says what one read found, in the words the descriptor publishes: the
+// reason it is read-only, or what became readable.
+func capabilityReadResult(caps adapter.Capabilities, err error) string {
+	if err != nil || !caps.Supported() {
+		return "still read-only: " + caps.Reason(err)
+	}
+	return fmt.Sprintf("readable: schema %d, package %s %s", caps.Schema, caps.Package, caps.PackageVersion)
+}
+
+// writeDescriptor answers with the descriptor computed from one read, so the endpoint and the
+// forced re-read cannot publish two different documents about the same deployment.
+func writeDescriptor(w http.ResponseWriter, provider Provider, caps adapter.Capabilities, err error) {
+	available := err == nil && caps.Supported()
+	// The same sentence the health report and a refused action publish, so a client cannot
+	// read two different stories about one deployment.
+	unavailable := ""
+	if !available {
+		unavailable = caps.Reason(err)
+	}
+	operations, reasons := capabilityOperations(caps, available, unavailable)
+	response := capabilitiesResponse{
+		Available:        available,
+		ReadOnlySince:    provider.CapabilityReadOnlySince(),
+		PayloadSchemas:   payloadSchemaVersions(),
+		Operations:       operations,
+		OperationReasons: reasons,
+		Error:            unavailable,
+	}
+	if available {
+		response.Schema = caps.Schema
+		response.Package = caps.Package
+		response.PackageVersion = caps.PackageVersion
+		response.Laravel = caps.Laravel
+		response.PHP = caps.PHP
+		response.Application = caps.Application
+		response.Environment = caps.Environment
+		response.DefaultConnection = caps.Queue.DefaultConnection
+		response.Connections = capabilityConnections(caps)
+		response.PCNTL = caps.Runtime.PCNTL
+		response.TelemetryStream = caps.Telemetry.Stream
+		response.Events = caps.Events
+		if caps.Payloads.Inspect != 0 || caps.Payloads.FailedJobs != 0 {
+			reported := payloadSchemas{Inspect: caps.Payloads.Inspect, FailedJobs: caps.Payloads.FailedJobs}
+			response.ApplicationPayloadSchemas = &reported
+		}
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	writeJSON(w, http.StatusOK, response)
 }
 
 // capabilityConnections copies the connections the application defined, in name order so the

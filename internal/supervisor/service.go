@@ -133,6 +133,11 @@ type Service struct {
 	probe         capabilityProbe
 	probeInterval time.Duration
 	capsMu        sync.RWMutex
+	// probeMu serializes reads of the descriptor. The loop and an administrator's re-read can
+	// ask at the same time, and the answer published has to be the one read last rather than
+	// whichever read happened to finish last, so it is held across the command; capsMu stays the
+	// lock the HTTP path reads the published pair under (docs/adr/0014).
+	probeMu sync.Mutex
 	// probeFailures counts the failed re-reads since the last one that answered, so a single
 	// blip cannot withdraw a readable descriptor. It is written under capsMu with the answer it
 	// belongs to.
@@ -410,17 +415,41 @@ func (s *Service) probeLoop(ctx context.Context) {
 	}
 }
 
-// probeOnce re-reads the application's capabilities and publishes that answer in place of the
-// one it replaces. Only the descriptor changes: the launch preflight is a decision about workers
-// that are already running, so a contradiction found here is published, never enforced.
+// ReprobeCapabilities re-reads the application's capabilities now instead of at the next
+// interval, and answers with what it published. It exists for the person who has just repaired a
+// deployment: waiting out the interval to learn whether the repair worked is half a minute of
+// guessing, and restarting the service to force a read would stop the pool to answer a question
+// (docs/adr/0014).
 //
-// A read that fails is debounced. One failure keeps the last answer, because a single PHP run
-// can fail for reasons that have nothing to do with the deployment, and taking every control
-// away over it would be a worse lie than the answer a moment ago; consecutive failures are the
-// application failing to answer, and those are published as the read-only state they are. A read
-// that answers at all — including one with a schema this service does not know — resets the
-// count, because the application is answering.
+// The answer is published as it was read, without the debounce a scheduled read gets. The caller
+// asked for the state now and is looking at the result, so keeping the last answer would tell
+// them nothing, and a failure is exactly what they need to see. It is still only published: a
+// contradiction found here is reported, never enforced, like every other re-read.
+func (s *Service) ReprobeCapabilities(ctx context.Context) (adapter.Capabilities, error) {
+	return s.reprobe(ctx, true)
+}
+
+// probeOnce is the scheduled re-read: ReprobeCapabilities without a caller waiting on it, so a
+// failed read is debounced instead of published at once.
 func (s *Service) probeOnce(ctx context.Context) {
+	s.reprobe(ctx, false)
+}
+
+// reprobe reads the descriptor, publishes that answer in place of the one it replaces, and
+// answers with what it published. Only the descriptor changes: the launch preflight is a decision
+// about workers that are already running, so a contradiction found here is published, never
+// enforced.
+//
+// A read that fails is debounced unless forced. One failure keeps the last answer, because a
+// single PHP run can fail for reasons that have nothing to do with the deployment, and taking
+// every control away over it would be a worse lie than the answer a moment ago; consecutive
+// failures are the application failing to answer, and those are published as the read-only state
+// they are. A read that answers at all — including one with a schema this service does not know —
+// resets the count, because the application is answering.
+func (s *Service) reprobe(ctx context.Context, force bool) (adapter.Capabilities, error) {
+	s.probeMu.Lock()
+	defer s.probeMu.Unlock()
+
 	caps, err := s.probe.Capabilities(ctx)
 
 	s.capsMu.Lock()
@@ -430,8 +459,9 @@ func (s *Service) probeOnce(ctx context.Context) {
 	if err != nil {
 		s.probeFailures++
 		// An already unreadable descriptor is republished with the newest reason: there is no
-		// good answer to protect, and the reason is the operator's only signal.
-		publish = beforeErr != nil || s.probeFailures >= probeFailureThreshold
+		// good answer to protect, and the reason is the operator's only signal. A forced read is
+		// published for the same reason one step earlier: somebody asked, and is waiting.
+		publish = force || beforeErr != nil || s.probeFailures >= probeFailureThreshold
 	} else {
 		s.probeFailures = 0
 	}
@@ -462,7 +492,7 @@ func (s *Service) probeOnce(ctx context.Context) {
 	if !publish {
 		s.log.Warn("application capabilities re-read failed; keeping the last answer",
 			"application", s.appID, "failures", failures, "threshold", probeFailureThreshold, "error", err)
-		return
+		return after, afterErr
 	}
 	if detail := capabilityTransition(before, after, beforeErr, afterErr); detail != "" {
 		// No request and no user: the service noticed, and the line says what changed and why.
@@ -481,7 +511,7 @@ func (s *Service) probeOnce(ctx context.Context) {
 		}
 	}
 	if sameCapabilityAnswer(before, beforeErr, after, afterErr) {
-		return
+		return after, afterErr
 	}
 	switch {
 	case err != nil:
@@ -494,6 +524,7 @@ func (s *Service) probeOnce(ctx context.Context) {
 		s.log.Info("application capabilities re-read; the controls follow the application",
 			"application", s.appID, "schema", caps.Schema, "package", caps.Package)
 	}
+	return after, afterErr
 }
 
 // noteReadOnly stamps when the deployment was first presented as read-only and clears that

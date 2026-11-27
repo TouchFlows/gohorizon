@@ -217,6 +217,14 @@ commands, and so does `restart_workers`: a deployment whose descriptor cannot be
 presented as read-only until it is repaired. Any signed-in role may read it; it is read-only
 and not cached (docs/adr/0014).
 
+`POST /api/v1/capabilities/refresh` re-reads the descriptor now and answers with the same
+document, so a repair can be confirmed without waiting out the 30-second interval or restarting
+the service. It needs the administrator role and the token, because it starts a PHP command on
+the application's host, it is recorded under `capability-refresh` with what the read found
+(`readable: …` or `still read-only: …`), and it is deliberately not gated on the descriptor: the
+deployment presented as read-only is exactly the one worth re-reading. A read that fails is
+still a 200 with `available: false` and the reason (docs/adr/0014).
+
 `GET /metrics` serves the state `/api/v1/health` reports in the Prometheus text format
 (`text/plain; version=0.0.4; charset=utf-8`), without a client library:
 `gohorizon_up`, `gohorizon_lock_held`,

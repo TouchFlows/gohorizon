@@ -3,6 +3,7 @@ package api
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -479,5 +480,145 @@ func TestCapabilitiesIsReadOnly(t *testing.T) {
 
 	if code := serve(handler, http.MethodPost, "/api/v1/capabilities", "{}").Code; code != http.StatusMethodNotAllowed {
 		t.Errorf("POST status = %d, want 405", code)
+	}
+}
+
+// TestCapabilitiesRefreshNeedsAnAdministratorAndTheToken gates the one route that starts PHP on
+// demand. A viewer or an operator can read the descriptor, but asking the deployment to account
+// for itself again is an administrator's call, and the token is the same double-submit check
+// every mutation carries — so a request that would run a command needs both (docs/adr/0011,
+// docs/adr/0014).
+func TestCapabilitiesRefreshNeedsAnAdministratorAndTheToken(t *testing.T) {
+	cases := []struct {
+		name string
+		role string
+		// token picks the header: "cookie" echoes the issued token, "wrong" sends another,
+		// "" sends none.
+		token string
+		want  int
+	}{
+		{name: "a viewer with the token", role: auth.RoleViewer, token: "cookie", want: http.StatusForbidden},
+		{name: "an operator with the token", role: auth.RoleOperator, token: "cookie", want: http.StatusForbidden},
+		{name: "an administrator with no token", role: auth.RoleAdministrator, token: "", want: http.StatusForbidden},
+		{name: "an administrator with the wrong token", role: auth.RoleAdministrator, token: "wrong", want: http.StatusForbidden},
+		{name: "an administrator with the token", role: auth.RoleAdministrator, token: "cookie", want: http.StatusOK},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			provider := &stubProvider{caps: descriptor(), reprobed: descriptor()}
+			handler, _, _ := adminRouterFor(t, tc.role, provider)
+			session, csrf := signInForAdmin(t, handler)
+
+			token := ""
+			switch tc.token {
+			case "cookie":
+				token = csrf.Value
+			case "wrong":
+				token = "not-the-issued-token"
+			}
+			recorder := administrativeCall(handler, http.MethodPost, "/api/v1/capabilities/refresh", token, session, csrf)
+
+			if recorder.Code != tc.want {
+				t.Fatalf("status = %d, want %d (body %s)", recorder.Code, tc.want, recorder.Body)
+			}
+			// Nothing starts a command unless the request passed both checks, so a refusal is
+			// proved by the provider never being asked to re-read.
+			wantReads := 0
+			if tc.want == http.StatusOK {
+				wantReads = 1
+			}
+			if provider.reprobeReads != wantReads {
+				t.Errorf("re-reads = %d, want %d", provider.reprobeReads, wantReads)
+			}
+			if got := recorder.Header().Get("Cache-Control"); got != "no-store" {
+				t.Errorf("Cache-Control = %q, want no-store", got)
+			}
+		})
+	}
+}
+
+// TestCapabilitiesRefreshPublishesTheAnswerItJustRead is the repair's confirmation: the response
+// is the document the re-read produced, not the one the endpoint held before, so an administrator
+// who has just installed the package reads the controls back in the same call. The record says
+// what the read found and who asked, which is the line an operator looks for afterwards
+// (docs/adr/0014).
+func TestCapabilitiesRefreshPublishesTheAnswerItJustRead(t *testing.T) {
+	readable := descriptor()
+	provider := &stubProvider{
+		caps:     adapter.Capabilities{Schema: adapter.SchemaVersion + 1},
+		capsErr:  errors.New("the package is not installed"),
+		reprobed: readable,
+	}
+	handler, _, records := adminRouterFor(t, auth.RoleAdministrator, provider)
+	session, csrf := signInForAdmin(t, handler)
+
+	recorder := administrativeCall(handler, http.MethodPost, "/api/v1/capabilities/refresh", csrf.Value, session, csrf)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (body %s)", recorder.Code, recorder.Body)
+	}
+	var answer capabilitiesAnswer
+	if err := json.Unmarshal(recorder.Body.Bytes(), &answer); err != nil {
+		t.Fatalf("decode body: %v (%s)", err, recorder.Body)
+	}
+	if !answer.Available || answer.Error != "" {
+		t.Fatalf("available=%t error=%q, want the answer the re-read produced", answer.Available, answer.Error)
+	}
+	if answer.Package != readable.Package || !answer.Operations["restart_workers"] {
+		t.Errorf("descriptor = %+v, want the readable answer with its controls", answer)
+	}
+	// A deployment that has just become readable has not been read-only at all, so the instant is
+	// out of the document rather than counting from the state it left.
+	if answer.ReadOnlySince != 0 {
+		t.Errorf("read_only_since = %d, want it cleared by the repair", answer.ReadOnlySince)
+	}
+
+	events := auditRecords(t, records)
+	allowed := events[len(events)-1]
+	if allowed["action"] != audit.ActionCapabilityRefresh || allowed["outcome"] != audit.OutcomeAllowed {
+		t.Fatalf("record = %v, want an allowed capability-refresh", allowed)
+	}
+	if allowed["user"] != "alice" || allowed["role"] != auth.RoleAdministrator {
+		t.Errorf("record = %v, want alice as administrator", allowed)
+	}
+	if detail := fmt.Sprint(allowed["detail"]); !strings.Contains(detail, "readable") || !strings.Contains(detail, "0.1.0") {
+		t.Errorf("detail = %q, want what the read found", detail)
+	}
+}
+
+// TestCapabilitiesRefreshReportsAReadThatStillFails is the other answer: the read happened and the
+// application still cannot describe itself. That is a 200 with the reason — the caller asked what
+// the deployment is now — and the record says the repair is not confirmed yet, so nobody reads a
+// refresh that changed nothing as a refresh that worked (docs/adr/0014).
+func TestCapabilitiesRefreshReportsAReadThatStillFails(t *testing.T) {
+	const reason = "gohorizon/laravel adapter is unavailable: could not open input file: artisan"
+	provider := &stubProvider{caps: descriptor(), reprobeErr: errors.New(reason)}
+	handler, _, records := adminRouterFor(t, auth.RoleAdministrator, provider)
+	session, csrf := signInForAdmin(t, handler)
+
+	recorder := administrativeCall(handler, http.MethodPost, "/api/v1/capabilities/refresh", csrf.Value, session, csrf)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: the read happened, and this is what it found (body %s)", recorder.Code, recorder.Body)
+	}
+	var answer capabilitiesAnswer
+	if err := json.Unmarshal(recorder.Body.Bytes(), &answer); err != nil {
+		t.Fatalf("decode body: %v (%s)", err, recorder.Body)
+	}
+	if answer.Available {
+		t.Error("available = true for a re-read that failed")
+	}
+	if !strings.Contains(answer.Error, "artisan") {
+		t.Errorf("error = %q, want the read's own reason", answer.Error)
+	}
+	if answer.Operations["restart_workers"] {
+		t.Error("operations[restart_workers] = true for a deployment that cannot describe itself")
+	}
+
+	events := auditRecords(t, records)
+	allowed := events[len(events)-1]
+	if allowed["action"] != audit.ActionCapabilityRefresh || allowed["outcome"] != audit.OutcomeAllowed {
+		t.Fatalf("record = %v, want an allowed capability-refresh: the read was allowed and performed", allowed)
+	}
+	if detail := fmt.Sprint(allowed["detail"]); !strings.Contains(detail, "still read-only") {
+		t.Errorf("detail = %q, want it to say the deployment is still read-only", detail)
 	}
 }

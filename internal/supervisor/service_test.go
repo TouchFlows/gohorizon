@@ -1604,3 +1604,66 @@ func TestServiceForgetFailedJobPassesAMissingRecordThrough(t *testing.T) {
 		t.Fatalf("error = %v, want the adapter's not-found passed through", err)
 	}
 }
+
+// TestReprobeCapabilitiesPublishesTheAnswerItReadNow is the manual repair check end to end at the
+// service boundary: an administrator asks for a re-read instead of waiting out the interval or
+// restarting the service, and the answer that read produced is what the endpoint publishes — a
+// failure included, because a caller waiting on the result has to be told the truth rather than
+// shown the answer from before their repair (docs/adr/0014).
+func TestReprobeCapabilitiesPublishesTheAnswerItReadNow(t *testing.T) {
+	readable := adapter.Capabilities{Schema: adapter.SchemaVersion, Package: "gohorizon/laravel", PackageVersion: "0.1.0"}
+	unreadable := adapter.Capabilities{Schema: adapter.SchemaVersion + 1}
+	failure := errors.New("gohorizon:capabilities: exit status 1: could not open input file: artisan")
+
+	probe := &scriptedProbe{answers: []probeAnswer{
+		{caps: readable}, // the repair
+		{err: failure},   // and a forced read that fails
+	}}
+	records := &bytes.Buffer{}
+	service := &Service{
+		log:     slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		appID:   "app",
+		probe:   probe,
+		probed:  unreadable,
+		auditor: audit.New(slog.New(slog.NewJSONHandler(records, nil))),
+	}
+
+	// The repair: one call, no interval waited, and the descriptor is readable again.
+	caps, err := service.ReprobeCapabilities(context.Background())
+	if err != nil || !caps.Supported() || caps.Package != "gohorizon/laravel" {
+		t.Fatalf("answer = %+v, %v; want the repaired answer", caps, err)
+	}
+	if published, publishedErr := service.Capabilities(); publishedErr != nil || !published.Supported() {
+		t.Errorf("published = %+v, %v; want the answer the read produced", published, publishedErr)
+	}
+	if since := service.CapabilityReadOnlySince(); since != 0 {
+		t.Errorf("read_only_since = %d, want it cleared by the repair", since)
+	}
+
+	// A forced read that fails is published at once, where a scheduled one would have kept the
+	// last answer: the caller asked what the deployment is now.
+	caps, err = service.ReprobeCapabilities(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "artisan") {
+		t.Fatalf("answer = %+v, %v; want the read's own failure", caps, err)
+	}
+	if published, publishedErr := service.Capabilities(); publishedErr == nil || published.Supported() {
+		t.Errorf("published = %+v, %v; want the forced read's failure", published, publishedErr)
+	}
+	if service.CapabilityReadOnlySince() == 0 {
+		t.Error("read_only_since = 0, want the instant the forced read found the deployment unreadable")
+	}
+
+	if probe.readCount() != 2 {
+		t.Errorf("reads = %d, want one per call", probe.readCount())
+	}
+	lines := auditRecords(t, records.Bytes())
+	if len(lines) != 2 {
+		t.Fatalf("records = %d, want one per transition (%s)", len(lines), records)
+	}
+	if !strings.Contains(lines[0].Detail, "readable again") {
+		t.Errorf("first detail = %q, want the repair", lines[0].Detail)
+	}
+	if !strings.Contains(lines[1].Detail, "read-only") {
+		t.Errorf("second detail = %q, want the forced read's failure", lines[1].Detail)
+	}
+}
