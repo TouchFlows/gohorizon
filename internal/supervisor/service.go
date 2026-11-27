@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/gohorizon/gohorizon/internal/adapter"
+	"github.com/gohorizon/gohorizon/internal/audit"
 	"github.com/gohorizon/gohorizon/internal/config"
 	"github.com/gohorizon/gohorizon/internal/health"
 	"github.com/gohorizon/gohorizon/internal/metrics"
@@ -147,6 +148,10 @@ type Service struct {
 	lastRead time.Time
 	// appID names the application in the re-read's log lines.
 	appID string
+	// auditor records a descriptor transition with no actor: "when did this go read-only, and
+	// why" is asked after the fact, and the log line it would otherwise be lost in is a
+	// warning about a state, not a record an operator can select on (docs/adr/0014).
+	auditor *audit.Logger
 
 	mu         sync.Mutex
 	lockHeld   bool
@@ -220,6 +225,7 @@ func New(ctx context.Context, cfg *config.Config, log *slog.Logger) (*Service, e
 		probe:         probe,
 		probeInterval: defaultProbeInterval,
 		appID:         app.ID,
+		auditor:       audit.New(log),
 		probed:        caps,
 		probeErr:      probeErr,
 		lastRead:      launchRead,
@@ -429,6 +435,14 @@ func (s *Service) probeOnce(ctx context.Context) {
 			"application", s.appID, "failures", failures, "threshold", probeFailureThreshold, "error", err)
 		return
 	}
+	if detail := capabilityTransition(before, after, beforeErr, afterErr); detail != "" {
+		// No request and no user: the service noticed, and the line says what changed and why.
+		s.auditor.Record(nil, audit.Event{
+			Action:  audit.ActionCapabilityChange,
+			Outcome: audit.OutcomeChanged,
+			Detail:  detail,
+		})
+	}
 	if contradiction != beforeContradiction {
 		if contradiction == "" {
 			s.log.Info("worker launch contradiction cleared; the pool keeps running", "application", s.appID)
@@ -451,6 +465,31 @@ func (s *Service) probeOnce(ctx context.Context) {
 		s.log.Info("application capabilities re-read; the controls follow the application",
 			"application", s.appID, "schema", caps.Schema, "package", caps.Package)
 	}
+}
+
+// capabilityTransition is what an operator would look for later, or "" when the two answers
+// describe the same deployment: the readable state, the reason it is not readable, or a package
+// upgrade under a readable one. A schema change only happens across that boundary, and the
+// read-only reason already names both numbers. A reason that varies while the deployment stays
+// read-only is left to the log: the audit line records when it went read-only and why it was
+// then, not every wording of a failing command's output (docs/adr/0014).
+func capabilityTransition(before, after adapter.Capabilities, beforeErr, afterErr error) string {
+	wasReadable := beforeErr == nil && before.Supported()
+	isReadable := afterErr == nil && after.Supported()
+
+	switch {
+	case wasReadable && !isReadable:
+		return "presented as read-only: " + after.Reason(afterErr)
+	case !wasReadable && isReadable:
+		return fmt.Sprintf("readable again (schema %d, package %s %s)",
+			after.Schema, after.Package, after.PackageVersion)
+	case wasReadable && isReadable:
+		if before.Package != after.Package || before.PackageVersion != after.PackageVersion {
+			return fmt.Sprintf("package %s %s -> %s %s",
+				before.Package, before.PackageVersion, after.Package, after.PackageVersion)
+		}
+	}
+	return ""
 }
 
 // contradictionFor is what the current answer contradicts in the launch configuration, or "" when

@@ -224,12 +224,43 @@ func lastSuccessTimestamp(t *testing.T, body []byte) int64 {
 	return 0
 }
 
-// capabilitiesAnswerWith is a schema-1 descriptor whose queue connection has this retry_after,
-// with pcntl present so the retry_after is the only thing the preflight can object to.
-func capabilitiesAnswerWith(retryAfter int) string {
-	return fmt.Sprintf(`{"schema":1,"package":"gohorizon/laravel","laravel":"13.0.0","php":"8.4.0",`+
+// capabilitiesAnswerFor is a schema-1 descriptor whose queue connection has this retry_after, with
+// pcntl present so the retry_after is the only thing the preflight can object to, and this
+// package version so a test can make an upgrade visible.
+func capabilitiesAnswerFor(retryAfter int, packageVersion string) string {
+	return fmt.Sprintf(`{"schema":1,"package":"gohorizon/laravel","package_version":"%s","laravel":"13.0.0","php":"8.4.0",`+
 		`"queue":{"connections":{"redis":{"driver":"redis","retry_after":%d}}},`+
-		`"runtime":{"pcntl":true},"telemetry":{"stream":"gohorizon:events"},"events":[]}`, retryAfter)
+		`"runtime":{"pcntl":true},"telemetry":{"stream":"gohorizon:events"},"events":[]}`, packageVersion, retryAfter)
+}
+
+// auditRecord returns the first audit line for action whose detail contains fragment, once it is
+// written: the line an operator selects on after the fact.
+func (i *instance) auditRecord(t *testing.T, action, fragment string) map[string]any {
+	t.Helper()
+
+	var record map[string]any
+	eventually(t, 10*time.Second, "the audit line for "+action, func() error {
+		data, err := os.ReadFile(i.logPath)
+		if err != nil {
+			return err
+		}
+		for _, line := range strings.Split(string(data), "\n") {
+			var candidate map[string]any
+			if err := json.Unmarshal([]byte(line), &candidate); err != nil {
+				continue
+			}
+			if candidate["msg"] != "audit" || candidate["action"] != action {
+				continue
+			}
+			detail, _ := candidate["detail"].(string)
+			if strings.Contains(detail, fragment) {
+				record = candidate
+				return nil
+			}
+		}
+		return fmt.Errorf("no audit line for %s containing %q yet", action, fragment)
+	})
+	return record
 }
 
 // TestContradictionAppearsWhenTheApplicationLowersRetryAfter is the preflight's second life: it
@@ -239,12 +270,12 @@ func capabilitiesAnswerWith(retryAfter int) string {
 func TestContradictionAppearsWhenTheApplicationLowersRetryAfter(t *testing.T) {
 	h := newHarness(t)
 	answer := filepath.Join(h.dir, "capabilities.json")
-	if err := os.WriteFile(answer, []byte(capabilitiesAnswerWith(10)), 0o644); err != nil {
+	if err := os.WriteFile(answer, []byte(capabilitiesAnswerFor(10, "0.1.0")), 0o644); err != nil {
 		t.Fatalf("write the application's answer: %v", err)
 	}
 
 	configPath, base := h.writeConfigWithPHP(h.fileAnsweringPHP(answer))
-	h.startBinary(h.buildBinary(), configPath)
+	inst := h.startBinary(h.buildBinary(), configPath)
 	awaitRunning(h, base)
 
 	// The launch the preflight approved: a window above the worker's timeout, nothing to report.
@@ -257,7 +288,8 @@ func TestContradictionAppearsWhenTheApplicationLowersRetryAfter(t *testing.T) {
 			report.Capabilities.Contradiction)
 	}
 
-	if err := os.WriteFile(answer, []byte(capabilitiesAnswerWith(2)), 0o644); err != nil {
+	// The same re-read carries a package upgrade, so one transition is recorded with both facts.
+	if err := os.WriteFile(answer, []byte(capabilitiesAnswerFor(2, "0.2.0")), 0o644); err != nil {
 		t.Fatalf("rewrite the application's answer: %v", err)
 	}
 
@@ -292,6 +324,16 @@ func TestContradictionAppearsWhenTheApplicationLowersRetryAfter(t *testing.T) {
 	}
 	if !strings.Contains(string(body), "\ngohorizon_capabilities_contradiction 1\n") {
 		t.Errorf("scrape has no contradiction sample:\n%s", body)
+	}
+
+	// And the transition is in the audit log, so "what changed, and when" is answerable without
+	// reading the warnings above it.
+	record := inst.auditRecord(t, "capability-change", "0.1.0 -> gohorizon/laravel 0.2.0")
+	if record["outcome"] != "changed" {
+		t.Errorf("audit outcome = %v, want changed", record["outcome"])
+	}
+	if _, ok := record["user"]; ok {
+		t.Errorf("audit record = %v, want no actor for a change the service noticed", record)
 	}
 }
 

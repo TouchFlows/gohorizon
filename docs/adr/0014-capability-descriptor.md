@@ -112,6 +112,12 @@ operator and a refusal would be the 503 the action returns.
   tick, and `failedJobList` answers 503 with the reason before asking the application. Both
   resume on the next tick or request after a repair, so the skip is the current answer rather
   than a latch; neither changes the report's status, because the pool is still supervised.
+- A descriptor transition is recorded in the audit log. When the deployment becomes read-only
+  (with the reason), becomes readable again, or the package changes under a readable descriptor,
+  the service writes a `capability-change` record with the outcome `changed` and no user: nobody
+  acted, and the line exists for the question asked after the fact. A reason that varies while
+  the deployment stays read-only stays in the log, so the trail is transitions rather than one
+  line per interval.
 - The refusal is the service's, not only the page's. `requireCapability` derives the same
   operations the descriptor publishes and answers 503 with the withheld entry's own reason (the
   descriptor's `error` when the whole descriptor could not be read) for

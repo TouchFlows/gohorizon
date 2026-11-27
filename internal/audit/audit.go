@@ -7,7 +7,9 @@
 // that it happened and that it was refused — by role or by a missing token — so the line says
 // who tried, not only who succeeded. Further administrative actions inherit the same shape and
 // the same logger; a queryable audit history is a store away from that, and is deliberately
-// not promised here.
+// not promised here. A state change the service notices on its own — the deployment becoming
+// read-only, or a package upgrade under a readable one — is recorded the same way with no user
+// and no request: the line says what changed and why, which is what an operator asks later.
 //
 // A record is written to the service log rather than to a database: it is one line, it is
 // append-only, and the log already has rotation, shipping and retention an operator chose.
@@ -28,14 +30,21 @@ const (
 	ActionWorkerRestart   = "worker-restart"
 	ActionFailedJobRetry  = "failed-job-retry"
 	ActionFailedJobDelete = "failed-job-delete"
+	// ActionCapabilityChange is the deployment changing what it says about itself: becoming
+	// read-only, coming back, or a package upgrade under a readable descriptor. It has no
+	// user, because the service noticed rather than an operator doing anything (docs/adr/0014).
+	ActionCapabilityChange = "capability-change"
 )
 
-// Outcomes a record can carry: the action happened, it was refused, or the caller was held
-// back by the limiter before anything was checked.
+// Outcomes a record can carry: the action happened, it was refused, the caller was held back by
+// the limiter before anything was checked, or the service observed a state change.
 const (
 	OutcomeAllowed = "allowed"
 	OutcomeRefused = "refused"
 	OutcomeLimited = "limited"
+	// OutcomeChanged says what the line describes is a state that changed, not an action that was
+	// taken or refused.
+	OutcomeChanged = "changed"
 )
 
 // Event is one auditable action. User and Role are the actor when there is one; a refused

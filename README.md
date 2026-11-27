@@ -88,7 +88,9 @@ Milestones 1 and 2 implemented:
   `gohorizon:inspect` (publishing the reason as `queues.error`) and the failed-list endpoint
   answers 503 with that reason, rather than starting PHP to fail decoding on every tick or
   request. The decoder still refuses such a payload at read time — so a package upgrade cannot
-  change queue depth or the failed store silently.
+  change queue depth or the failed   store silently. A descriptor transition — read-only, readable again, or a package upgrade — is
+  written to the audit log as `capability-change`, so "when did this go read-only, and why" is
+  answerable from the log rather than only from a warning nobody kept.
 - Read-only `GET /api/v1/health`, and `GET /metrics` for a Prometheus scrape of the same
   state: `gohorizon_up`, `gohorizon_lock_held`, `gohorizon_capabilities_available`,
   `gohorizon_capabilities_failed_reads`, `gohorizon_capabilities_contradiction` (a re-read that

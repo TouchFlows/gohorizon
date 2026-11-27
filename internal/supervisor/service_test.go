@@ -3,6 +3,7 @@ package supervisor
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -17,6 +18,7 @@ import (
 	"time"
 
 	"github.com/gohorizon/gohorizon/internal/adapter"
+	"github.com/gohorizon/gohorizon/internal/audit"
 	"github.com/gohorizon/gohorizon/internal/config"
 	"github.com/gohorizon/gohorizon/internal/metrics"
 	"github.com/gohorizon/gohorizon/internal/process"
@@ -286,6 +288,88 @@ func TestProbePublishesConsecutiveFailures(t *testing.T) {
 	if !strings.Contains(logs.String(), "presented as read-only") {
 		t.Errorf("log = %q, want the read-only state recorded", logs.String())
 	}
+}
+
+// TestProbeAuditsADescriptorTransition is the line an operator looks for after the fact: when the
+// deployment went read-only and why, when it came back, and when the package changed under a
+// readable one. Nothing is recorded for an answer that says the same thing, so the trail is
+// transitions rather than one line per interval (docs/adr/0014).
+func TestProbeAuditsADescriptorTransition(t *testing.T) {
+	readable := adapter.Capabilities{
+		Schema: adapter.SchemaVersion, Package: "gohorizon/laravel", PackageVersion: "0.1.0",
+	}
+	upgraded := readable
+	upgraded.PackageVersion = "0.2.0"
+	unreadable := adapter.Capabilities{Schema: adapter.SchemaVersion + 1, Package: "gohorizon/laravel", PackageVersion: "0.2.0"}
+
+	probe := &scriptedProbe{answers: []probeAnswer{
+		{caps: upgraded},   // the package was upgraded
+		{caps: unreadable}, // and now reports a schema this service cannot read
+		{caps: upgraded},   // repaired
+		{caps: upgraded},   // unchanged: no new record
+	}}
+	records := &bytes.Buffer{}
+	service := &Service{
+		log:     slog.New(slog.NewTextHandler(io.Discard, nil)),
+		appID:   "app",
+		probe:   probe,
+		probed:  readable,
+		auditor: audit.New(slog.New(slog.NewJSONHandler(records, nil))),
+	}
+
+	for i := 0; i < 4; i++ {
+		service.probeOnce(context.Background())
+	}
+
+	lines := auditRecords(t, records.Bytes())
+	if len(lines) != 3 {
+		t.Fatalf("records = %d, want one per transition (%s)", len(lines), records)
+	}
+	for _, line := range lines {
+		if line.Action != audit.ActionCapabilityChange || line.Outcome != audit.OutcomeChanged {
+			t.Errorf("record = %+v, want the capabilities action and the changed outcome", line)
+		}
+		if line.User != "" {
+			t.Errorf("record = %+v, want no actor: the service noticed the change", line)
+		}
+	}
+	if !strings.Contains(lines[0].Detail, "0.1.0 -> gohorizon/laravel 0.2.0") {
+		t.Errorf("first detail = %q, want the package upgrade", lines[0].Detail)
+	}
+	for _, want := range []string{"read-only", "schema 2", "schema 1"} {
+		if !strings.Contains(lines[1].Detail, want) {
+			t.Errorf("second detail = %q, want it to name %q", lines[1].Detail, want)
+		}
+	}
+	if !strings.Contains(lines[2].Detail, "readable again") {
+		t.Errorf("third detail = %q, want the repair", lines[2].Detail)
+	}
+}
+
+// auditRecord is one line the audit logger wrote, as an operator selecting on `msg=audit` reads
+// it.
+type auditRecord struct {
+	Action  string `json:"action"`
+	Outcome string `json:"outcome"`
+	Detail  string `json:"detail"`
+	User    string `json:"user"`
+}
+
+func auditRecords(t *testing.T, data []byte) []auditRecord {
+	t.Helper()
+
+	var records []auditRecord
+	for _, line := range bytes.Split(data, []byte("\n")) {
+		if len(bytes.TrimSpace(line)) == 0 {
+			continue
+		}
+		var record auditRecord
+		if err := json.Unmarshal(line, &record); err != nil {
+			t.Fatalf("decode audit line %s: %v", line, err)
+		}
+		records = append(records, record)
+	}
+	return records
 }
 
 // TestReportPublishesWhenTheLoopLastAnswered is the staleness field: every other capabilities
