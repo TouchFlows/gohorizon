@@ -43,6 +43,15 @@ func failedJobList(provider Provider, log *slog.Logger) http.HandlerFunc {
 			return
 		}
 
+		// A failed-list payload this service does not read is refused before the command runs:
+		// the endpoint would otherwise start PHP on every request to fail decoding. The reason is
+		// the one the descriptor publishes for the withheld operation (docs/adr/0014).
+		caps, _ := provider.Capabilities()
+		if reason := caps.FailedJobsPayloadRefusal(); reason != "" {
+			writeError(w, http.StatusServiceUnavailable, reason)
+			return
+		}
+
 		page, err := provider.FailedJobs(r.Context(), adapter.FailedJobQuery{Limit: limit, Before: before})
 		if err != nil {
 			if errors.Is(err, adapter.ErrInvalidFailedJobCursor) {

@@ -548,15 +548,19 @@ func (s *Service) queueLoop(ctx context.Context) {
 }
 
 func (s *Service) sampleQueues(ctx context.Context) {
+	// A payload this service cannot read is refused before the command runs: every tick would
+	// otherwise start PHP to decode an answer it already knows it cannot use. The descriptor's
+	// reason is published as the queue error instead, and the next tick after a repair reads
+	// again (docs/adr/0014).
+	if reason := s.inspectRefusal(); reason != "" {
+		s.publishQueueError(errors.New(reason),
+			"queue depth withheld; the application's inspect payload is not one this service reads")
+		return
+	}
+
 	inspection, err := s.inspector.Queues(ctx, s.cfg.Application().RedisConnection, s.queues)
 	if err != nil {
-		s.mu.Lock()
-		changed := s.queueDepth.Error != err.Error()
-		s.queueDepth = health.Queues{Error: err.Error()}
-		s.mu.Unlock()
-		if changed {
-			s.log.Warn("queue depth unavailable; the application's inspection command failed", "error", err)
-		}
+		s.publishQueueError(err, "queue depth unavailable; the application's inspection command failed")
 		return
 	}
 
@@ -581,6 +585,28 @@ func (s *Service) sampleQueues(ctx context.Context) {
 	s.mu.Unlock()
 	if recovered {
 		s.log.Info("queue depth inspection recovered")
+	}
+}
+
+// inspectRefusal is the descriptor's reason when queue depth must not be read at all, or "" when
+// the read may go ahead. It is the same sentence the descriptor publishes for the withheld
+// operation, so the queue screen and the API cannot tell two stories about one deployment.
+func (s *Service) inspectRefusal() string {
+	s.capsMu.RLock()
+	caps := s.probed
+	s.capsMu.RUnlock()
+	return caps.InspectPayloadRefusal()
+}
+
+// publishQueueError records why there is no depth to publish, and logs it once per change: the
+// loop runs every few seconds, so an unchanged reason is not news.
+func (s *Service) publishQueueError(err error, message string) {
+	s.mu.Lock()
+	changed := s.queueDepth.Error != err.Error()
+	s.queueDepth = health.Queues{Error: err.Error()}
+	s.mu.Unlock()
+	if changed {
+		s.log.Warn(message, "error", err)
 	}
 }
 

@@ -337,8 +337,10 @@ func TestCapabilitiesWithholdOnlyThePayloadItCannotRead(t *testing.T) {
 		offered  string
 	}{
 		{
-			name:     "inspect",
-			payloads: func(c *adapter.Capabilities) { c.Payloads.Inspect = adapter.InspectionSchema + 1 },
+			name: "inspect",
+			payloads: func(c *adapter.Capabilities) {
+				c.Payloads.Inspect = adapter.InspectionSchema + 1
+			},
 			withheld: "inspect_queues",
 			offered:  "failed_jobs_list",
 		},

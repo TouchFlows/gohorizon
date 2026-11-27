@@ -120,6 +120,31 @@ func TestFailedJobsAnswersAnUnreadableCursorWithABadRequest(t *testing.T) {
 	}
 }
 
+// TestFailedJobsRefusesAPayloadItCannotRead is the endpoint half of withholding the operation: a
+// failed-list schema this service does not read is refused before the command runs, with the
+// reason the descriptor publishes, instead of starting PHP to fail decoding on every request
+// (docs/adr/0014).
+func TestFailedJobsRefusesAPayloadItCannotRead(t *testing.T) {
+	caps := descriptor()
+	caps.Payloads.FailedJobs = adapter.FailedJobsSchema + 1
+	provider := &stubProvider{caps: caps}
+
+	recorder := get(t, provider, "/api/v1/failed")
+
+	if recorder.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want 503 (body %s)", recorder.Code, recorder.Body)
+	}
+	for _, want := range []string{"schema 2", "schema 1"} {
+		if !strings.Contains(recorder.Body.String(), want) {
+			t.Errorf("body = %s, want it to name %q", recorder.Body.String(), want)
+		}
+	}
+	// Nothing was started: the command would print a payload this service cannot read.
+	if provider.failedQuery != (adapter.FailedJobQuery{}) {
+		t.Errorf("the adapter was asked with %+v, want no read", provider.failedQuery)
+	}
+}
+
 func TestFailedJobsReportsAnApplicationThatCannotAnswer(t *testing.T) {
 	provider := &stubProvider{failedErr: errors.New("gohorizon:failed:list failed in /srv/application")}
 

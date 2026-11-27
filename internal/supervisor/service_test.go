@@ -584,6 +584,52 @@ func TestQueueInspectionFailureLeavesTheStatusAlone(t *testing.T) {
 	}
 }
 
+// TestQueueSamplingSkipsAnInspectPayloadItCannotRead is the other half of withholding the
+// operation: the descriptor says the application's inspect command emits a schema this service
+// cannot read, so the loop must not start it every interval to fail decoding. The reason the
+// descriptor publishes is what health carries instead, and a repaired descriptor reads again
+// without a restart (docs/adr/0014).
+func TestQueueSamplingSkipsAnInspectPayloadItCannotRead(t *testing.T) {
+	inspector := &stubInspector{inspection: adapter.Inspection{
+		Connection: "redis",
+		Queues:     []adapter.QueueDepth{{Queue: "default"}},
+	}}
+	service := queueTestService(t, inspector)
+	service.probed = adapter.Capabilities{
+		Schema:   adapter.SchemaVersion,
+		Payloads: adapter.PayloadSchemas{Inspect: adapter.InspectionSchema + 1},
+	}
+
+	service.sampleQueues(context.Background())
+
+	if calls := inspector.calls.Load(); calls != 0 {
+		t.Errorf("inspect ran %d times, want none for a payload this service cannot read", calls)
+	}
+	report := service.Report()
+	if report.Status != "ok" {
+		t.Errorf("status = %q, want ok: the pool is still supervised", report.Status)
+	}
+	for _, want := range []string{"schema 2", "schema 1"} {
+		if !strings.Contains(report.Queues.Error, want) {
+			t.Errorf("queues.error = %q, want it to name %q", report.Queues.Error, want)
+		}
+	}
+	if len(report.Queues.Depths) != 0 {
+		t.Errorf("depths = %+v, want none for a refused read", report.Queues.Depths)
+	}
+
+	// A repaired descriptor resumes the loop: the skip is the current answer, not a latch.
+	service.probed.Payloads.Inspect = adapter.InspectionSchema
+	service.sampleQueues(context.Background())
+
+	if calls := inspector.calls.Load(); calls != 1 {
+		t.Errorf("inspect ran %d times after the repair, want 1", calls)
+	}
+	if report := service.Report(); report.Queues.Error != "" || len(report.Queues.Depths) != 1 {
+		t.Errorf("queues = %+v, want the recovered read", report.Queues)
+	}
+}
+
 func TestMetricsRetentionMapsTheConfiguredWindows(t *testing.T) {
 	cfg := &config.Config{Storage: config.Storage{Retention: config.Retention{
 		RawHours: 48, MinuteDays: 3, HourlyDays: 10, DailyDays: 90,

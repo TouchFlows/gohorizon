@@ -86,10 +86,16 @@ operator and a refusal would be the 503 the action returns.
    `failed_jobs_list`), with both numbers in its reason; everything else keeps working, because
    a package that changed one payload is not a deployment that cannot describe itself. A package
    older than the field reports nothing, which is treated as compatible: refusing a package for
-   a claim it never made would read as a deployment fault. The decoders still refuse a payload
-   declaring another version at read time, so the check holds for a caller that never asks the
-   descriptor — and the acceptance tests compare both published numbers with what the fixture's
-   own commands print, so a package bump cannot pass unnoticed.
+   a claim it never made would read as a deployment fault. The service also stops making the
+   read it knows it cannot use: the queue loop does not start `gohorizon:inspect` while the
+   reported inspect payload is one this service does not read, and `GET /api/v1/failed` answers
+   503 with that reason instead of running the command — a mismatch is not worth a PHP process
+   per interval or per request. A descriptor that could not be read is *not* treated this way:
+   it says nothing about the other commands, which may still answer (a package whose only
+   broken command is `gohorizon:capabilities` still has a readable queue). The decoders still
+   refuse a payload declaring another version at read time, so the check holds for a caller that
+   never asks the descriptor — and the acceptance tests compare both published numbers with what
+   the fixture's own commands print, so a package bump cannot pass unnoticed.
 
 ## Consequences
 
@@ -101,6 +107,11 @@ operator and a refusal would be the 503 the action returns.
   an unavailable descriptor is "this deployment is read-only, and here is what to repair", which
   is only coherent if every control obeys it. The descriptor, not the screen, still decides,
   which is the seam a later external-worker integration needs.
+- A withheld payload is also a read the service skips. `sampleQueues` publishes the reason as
+  `queues.error` (and logs it once per change) instead of starting PHP to fail decoding on every
+  tick, and `failedJobList` answers 503 with the reason before asking the application. Both
+  resume on the next tick or request after a repair, so the skip is the current answer rather
+  than a latch; neither changes the report's status, because the pool is still supervised.
 - The refusal is the service's, not only the page's. `requireCapability` derives the same
   operations the descriptor publishes and answers 503 with the withheld entry's own reason (the
   descriptor's `error` when the whole descriptor could not be read) for

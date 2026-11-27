@@ -5,6 +5,7 @@ package integration_test
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"os/exec"
@@ -504,6 +505,62 @@ func TestCapabilitiesWithholdOnlyThePayloadItCannotRead(t *testing.T) {
 	}
 	if answer.PayloadSchemas.Inspect != 1 {
 		t.Errorf("payload_schemas.inspect = %d, want the version this service reads", answer.PayloadSchemas.Inspect)
+	}
+
+	// The loop does not start the command to fail decoding on every tick: health carries the
+	// descriptor's reason and no depth, and the status stays ok because the pool is supervised.
+	eventually(t, 10*time.Second, "the withheld queue depth in health", func() error {
+		payload, err := h.fetchReport(base)
+		if err != nil {
+			return err
+		}
+		if payload.Status != "ok" {
+			return fmt.Errorf("status = %q, want ok", payload.Status)
+		}
+		for _, want := range []string{"schema 2", "schema 1"} {
+			if !strings.Contains(payload.Queues.Error, want) {
+				return fmt.Errorf("queues.error = %q, want it to name %q", payload.Queues.Error, want)
+			}
+		}
+		if len(payload.Queues.Depths) != 0 {
+			return fmt.Errorf("depths = %+v, want none for a refused read", payload.Queues.Depths)
+		}
+		return nil
+	})
+}
+
+// TestFailedListRefusesAPayloadItCannotRead runs the real binary against an application that
+// reports a failed-list payload one version ahead: the endpoint answers with that reason instead
+// of starting the command, so a package upgrade is a sentence rather than a decode failure per
+// request.
+func TestFailedListRefusesAPayloadItCannotRead(t *testing.T) {
+	h := newHarness(t)
+	payload := `{"schema":1,"package":"gohorizon/laravel","laravel":"13.0.0","php":"8.4.0",` +
+		`"queue":{"connections":{"redis":{"driver":"redis","retry_after":90}}},` +
+		`"runtime":{"pcntl":true},"telemetry":{"stream":"gohorizon:events"},"events":[],` +
+		`"payload_schemas":{"inspect":1,"failed_jobs":2}}`
+
+	configPath, base := h.writeConfigWithPHP(h.answeringPHP(payload))
+	h.startBinary(h.buildBinary(), configPath)
+	awaitRunning(h, base)
+
+	resp, err := http.Get(base + "/api/v1/failed")
+	if err != nil {
+		t.Fatalf("GET /api/v1/failed: %v", err)
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read the failed-list body: %v", err)
+	}
+
+	if resp.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want 503 (body %s)", resp.StatusCode, body)
+	}
+	for _, want := range []string{"schema 2", "schema 1"} {
+		if !strings.Contains(string(body), want) {
+			t.Errorf("body = %s, want it to name %q", body, want)
+		}
 	}
 }
 

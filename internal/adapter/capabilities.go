@@ -58,6 +58,13 @@ type Connection struct {
 	RetryAfter retryAfterValue `json:"retry_after"`
 }
 
+// PayloadSchemas are the versions the application reports for the payloads its other commands
+// print, as `gohorizon:capabilities` publishes them.
+type PayloadSchemas struct {
+	Inspect    int `json:"inspect"`
+	FailedJobs int `json:"failed_jobs"`
+}
+
 // Capabilities is `php artisan gohorizon:capabilities --json`: the identifiers the
 // application reports about itself, the connections GoHorizon acts on, and the runtime and
 // event facts its preflight reads. Unknown fields are ignored, so a package that adds one
@@ -84,10 +91,7 @@ type Capabilities struct {
 	// commands say they emit. A package older than the field reports nothing (zero), which is
 	// treated as compatible: refusing a package for a claim it never made would read as a
 	// deployment fault rather than a version mismatch (docs/adr/0014).
-	Payloads struct {
-		Inspect    int `json:"inspect"`
-		FailedJobs int `json:"failed_jobs"`
-	} `json:"payload_schemas"`
+	Payloads PayloadSchemas `json:"payload_schemas"`
 	// Events are the Laravel lifecycle events the application's version has, which is how a
 	// newer Laravel with a renamed event is visible instead of silently unobserved.
 	Events []string `json:"events"`
@@ -120,6 +124,27 @@ func (c Capabilities) InspectPayloadSupported() bool {
 // FailedJobsPayloadSupported is the same question for the failed-list payload.
 func (c Capabilities) FailedJobsPayloadSupported() bool {
 	return c.Payloads.FailedJobs == 0 || c.Payloads.FailedJobs == FailedJobsSchema
+}
+
+// InspectPayloadRefusal is why the queue-inspection payload must not be read at all, in the words
+// the descriptor publishes, or "" when the read may go ahead. Only a payload version this service
+// does not read is refused: a descriptor that could not be read says nothing about the inspect
+// command, which may still answer (docs/adr/0014).
+func (c Capabilities) InspectPayloadRefusal() string {
+	if c.InspectPayloadSupported() {
+		return ""
+	}
+	return fmt.Sprintf("the application's inspect command emits schema %d; this GoHorizon reads schema %d",
+		c.Payloads.Inspect, InspectionSchema)
+}
+
+// FailedJobsPayloadRefusal is the same question for the failed-list payload.
+func (c Capabilities) FailedJobsPayloadRefusal() string {
+	if c.FailedJobsPayloadSupported() {
+		return ""
+	}
+	return fmt.Sprintf("the application's failed-list command emits schema %d; this GoHorizon reads schema %d",
+		c.Payloads.FailedJobs, FailedJobsSchema)
 }
 
 // Probe executes the capabilities command in the application directory.

@@ -490,6 +490,14 @@ type report struct {
 		FailedReads int    `json:"failed_reads"`
 		Error       string `json:"error"`
 	} `json:"capabilities"`
+	// Queues is the depth the service last read; a read it refused leaves the reason here.
+	Queues struct {
+		Connection string `json:"connection"`
+		Error      string `json:"error"`
+		Depths     []struct {
+			Queue string `json:"queue"`
+		} `json:"depths"`
+	} `json:"queues"`
 	Supervisors []reportSupervisor `json:"supervisors"`
 }
 

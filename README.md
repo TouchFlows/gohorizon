@@ -84,8 +84,11 @@ Milestones 1 and 2 implemented:
   `gohorizon:inspect` and `gohorizon:failed:list` commands emit, and the descriptor publishes them
   (`application_payload_schemas`) beside the versions this service reads (`payload_schemas`). A
   mismatch withholds only the operation that would misread that payload, with both numbers in
-  its reason, and the decoder still refuses such a payload at read time — so a package upgrade
-  cannot change queue depth or the failed store silently.
+  its reason, and the service stops making the read it cannot use: the queue loop skips
+  `gohorizon:inspect` (publishing the reason as `queues.error`) and the failed-list endpoint
+  answers 503 with that reason, rather than starting PHP to fail decoding on every tick or
+  request. The decoder still refuses such a payload at read time — so a package upgrade cannot
+  change queue depth or the failed store silently.
 - Read-only `GET /api/v1/health`, and `GET /metrics` for a Prometheus scrape of the same
   state: `gohorizon_up`, `gohorizon_lock_held`, `gohorizon_capabilities_available`,
   `gohorizon_capabilities_failed_reads`, telemetry counters by result, queue depth by state, and

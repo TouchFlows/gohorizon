@@ -118,12 +118,11 @@ func capabilityOperations(caps adapter.Capabilities, available bool, unavailable
 	}
 
 	switch {
-	case !caps.InspectPayloadSupported():
+	case caps.InspectPayloadRefusal() != "":
 		// The application's own command prints a payload this service cannot read, so the
 		// depth it would count is not one to publish. A driver without a queue is the other
 		// reason the same screen cannot be filled.
-		withhold("inspect_queues", fmt.Sprintf("the application's inspect command emits schema %d; this GoHorizon reads schema %d",
-			caps.Payloads.Inspect, adapter.InspectionSchema))
+		withhold("inspect_queues", caps.InspectPayloadRefusal())
 	case inspectableDrivers(caps) == nil:
 		withhold("inspect_queues", noInspectableQueue(caps))
 	default:
@@ -133,11 +132,10 @@ func capabilityOperations(caps adapter.Capabilities, available bool, unavailable
 	// The failed store is the application's own failer, and its list payload is versioned like
 	// the inspect one. A package that changed that payload withholds the list — and only the
 	// list, because retry and delete run Laravel's own commands rather than that payload.
-	if caps.FailedJobsPayloadSupported() {
-		operations["failed_jobs_list"] = true
+	if reason := caps.FailedJobsPayloadRefusal(); reason != "" {
+		withhold("failed_jobs_list", reason)
 	} else {
-		withhold("failed_jobs_list", fmt.Sprintf("the application's failed-list command emits schema %d; this GoHorizon reads schema %d",
-			caps.Payloads.FailedJobs, adapter.FailedJobsSchema))
+		operations["failed_jobs_list"] = true
 	}
 	operations["failed_job_retry"] = true
 	operations["failed_job_delete"] = true
