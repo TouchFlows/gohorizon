@@ -146,6 +146,12 @@ type Service struct {
 	// stopped publishes a healthy-looking descriptor, so staleness needs its own field
 	// (docs/adr/0014). Written under capsMu with the answer it belongs to.
 	lastRead time.Time
+	// readOnlySince is when the deployment was first presented as read-only, zero while it is
+	// readable. A transition stamps it and a repair clears it, so it is the age of the state
+	// rather than of the loop; the launch probe stamps it too, because a service that starts
+	// read-only has already transitioned and no re-read will ever record that (docs/adr/0014).
+	// Written under capsMu with the answer it belongs to.
+	readOnlySince time.Time
 	// appID names the application in the re-read's log lines.
 	appID string
 	// auditor records a descriptor transition with no actor: "when did this go read-only, and
@@ -170,7 +176,14 @@ func New(ctx context.Context, cfg *config.Config, log *slog.Logger) (*Service, e
 	// double-run jobs (docs/adr/0002). A missing package degrades the check with a
 	// warning rather than blocking supervision (docs/adr/0001).
 	probe := adapter.Probe{PHP: app.PHP, Artisan: app.Artisan, Dir: app.Path}
+	auditor := audit.New(log)
 	caps, probeErr := probe.Capabilities(ctx)
+	// A deployment that is read-only the moment the service starts has already transitioned:
+	// the launch read is the first answer, so there is no earlier one to compare it with and no
+	// re-read will record it. It is recorded here, with the launch's own reason, so a restart
+	// into the read-only state leaves a line rather than only the warning above — and it is
+	// recorded before Redis is opened, so an instance that cannot start still says what it found.
+	readOnlySince := recordStartupReadOnly(auditor, caps, probeErr, time.Now())
 	switch {
 	case probeErr != nil:
 		log.Warn("application capabilities unavailable; pcntl and retry_after preflight skipped",
@@ -225,10 +238,11 @@ func New(ctx context.Context, cfg *config.Config, log *slog.Logger) (*Service, e
 		probe:         probe,
 		probeInterval: defaultProbeInterval,
 		appID:         app.ID,
-		auditor:       audit.New(log),
+		auditor:       auditor,
 		probed:        caps,
 		probeErr:      probeErr,
 		lastRead:      launchRead,
+		readOnlySince: readOnlySince,
 		queues:        configuredQueues(app),
 		queueInterval: defaultQueueInterval,
 		pruneInterval: defaultPruneInterval,
@@ -424,6 +438,11 @@ func (s *Service) probeOnce(ctx context.Context) {
 		// answer is published with the new descriptor instead of waiting for a restart
 		// (docs/adr/0014).
 		s.contradiction = s.contradictionFor(caps, err)
+		// The same transition stamps when the deployment went read-only, and clears that instant
+		// when it is repaired. The answer stamps it, not the tick: a debounced blip is not a
+		// transition, and moving the instant would report an age that started over for no change
+		// in what the deployment can do (docs/adr/0014).
+		s.noteReadOnly(caps, err, time.Now())
 	}
 	after, afterErr := s.probed, s.probeErr
 	failures := s.probeFailures
@@ -465,6 +484,36 @@ func (s *Service) probeOnce(ctx context.Context) {
 		s.log.Info("application capabilities re-read; the controls follow the application",
 			"application", s.appID, "schema", caps.Schema, "package", caps.Package)
 	}
+}
+
+// noteReadOnly stamps when the deployment was first presented as read-only and clears that
+// instant once it is readable again. It records nothing: the transition line is the audit's, and
+// this is the number health publishes so the line does not have to be searched for. The caller
+// holds capsMu.
+func (s *Service) noteReadOnly(caps adapter.Capabilities, err error, now time.Time) {
+	if err == nil && caps.Supported() {
+		s.readOnlySince = time.Time{}
+		return
+	}
+	if s.readOnlySince.IsZero() {
+		s.readOnlySince = now
+	}
+}
+
+// recordStartupReadOnly does for the launch probe what noteReadOnly does for a re-read, and
+// returns the instant health publishes: now for an answer the deployment cannot act on, zero for
+// a readable one, which is the normal state and not worth a record. It takes the auditor rather
+// than a service because the launch happens before the service exists.
+func recordStartupReadOnly(auditor *audit.Logger, caps adapter.Capabilities, err error, now time.Time) time.Time {
+	if err == nil && caps.Supported() {
+		return time.Time{}
+	}
+	auditor.Record(nil, audit.Event{
+		Action:  audit.ActionCapabilityChange,
+		Outcome: audit.OutcomeChanged,
+		Detail:  "started read-only: " + caps.Reason(err),
+	})
+	return now
 }
 
 // capabilityTransition is what an operator would look for later, or "" when the two answers
@@ -980,6 +1029,7 @@ func (s *Service) Report() health.Report {
 	capsFailures := s.probeFailures
 	contradiction := s.contradiction
 	lastRead := s.lastRead
+	readOnlySince := s.readOnlySince
 	s.capsMu.RUnlock()
 
 	app := s.cfg.Application()
@@ -995,6 +1045,7 @@ func (s *Service) Report() health.Report {
 			FailedReads:   capsFailures,
 			Contradiction: contradiction,
 			LastReadAt:    unixSeconds(lastRead),
+			ReadOnlySince: unixSeconds(readOnlySince),
 		},
 	}
 	if !report.Capabilities.Available {

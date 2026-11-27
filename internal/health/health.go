@@ -37,6 +37,12 @@ type Capabilities struct {
 	// has. Every other field here describes the last answer, so a loop that stopped looks like a
 	// healthy one; this is the field an alert on staleness reads (docs/adr/0014).
 	LastReadAt int64 `json:"last_read_at,omitempty"`
+	// ReadOnlySince is when the deployment was first presented as read-only, in unix seconds, 0
+	// while it is readable. A transition stamps it and a repair clears it, so it is the age of
+	// the state rather than of the loop: "how long has this been read-only" is arithmetic
+	// instead of a log search, and a service that starts read-only stamps it at launch instead
+	// of waiting for a change that already happened (docs/adr/0014).
+	ReadOnlySince int64 `json:"read_only_since,omitempty"`
 }
 
 type Lock struct {

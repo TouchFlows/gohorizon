@@ -372,6 +372,104 @@ func auditRecords(t *testing.T, data []byte) []auditRecord {
 	return records
 }
 
+// TestStartupReadOnlyIsRecordedAndStamped is the restart case: a service that starts against a
+// deployment it cannot read has already transitioned, so the launch probe is what records it and
+// stamps the instant health publishes. A readable launch is the normal state and records
+// nothing, so the trail stays transitions rather than one line per restart (docs/adr/0014).
+func TestStartupReadOnlyIsRecordedAndStamped(t *testing.T) {
+	records := &bytes.Buffer{}
+	auditor := audit.New(slog.New(slog.NewJSONHandler(records, nil)))
+	now := time.Now()
+
+	unknown := adapter.Capabilities{Schema: adapter.SchemaVersion + 1, Package: "gohorizon/laravel"}
+	if since := recordStartupReadOnly(auditor, unknown, nil, now); !since.Equal(now) {
+		t.Errorf("read-only since = %v, want the launch instant %v", since, now)
+	}
+
+	lines := auditRecords(t, records.Bytes())
+	if len(lines) != 1 {
+		t.Fatalf("records = %d, want one for the read-only launch (%s)", len(lines), records)
+	}
+	line := lines[0]
+	if line.Action != audit.ActionCapabilityChange || line.Outcome != audit.OutcomeChanged {
+		t.Errorf("record = %+v, want the capabilities action and the changed outcome", line)
+	}
+	if line.User != "" {
+		t.Errorf("record = %+v, want no actor: the service found the deployment this way", line)
+	}
+	for _, want := range []string{"started read-only", "schema 2", "schema 1"} {
+		if !strings.Contains(line.Detail, want) {
+			t.Errorf("detail = %q, want it to name %q", line.Detail, want)
+		}
+	}
+
+	// A deployment that answered is not a transition, and stamping it would date a state the
+	// deployment is not in.
+	records.Reset()
+	readable := adapter.Capabilities{Schema: adapter.SchemaVersion, Package: "gohorizon/laravel"}
+	if since := recordStartupReadOnly(auditor, readable, nil, now); !since.IsZero() {
+		t.Errorf("read-only since = %v, want none for a readable launch", since)
+	}
+	if records.Len() != 0 {
+		t.Errorf("records = %q, want none for a readable launch", records)
+	}
+}
+
+// TestReportPublishesWhenTheDeploymentWentReadOnly is the age of the state rather than of the
+// loop: the instant is stamped by the transition, kept across re-reads that change only the
+// reason, and cleared by the repair. A debounced single failure is not a transition, so it moves
+// nothing — otherwise a blip would make the deployment look newly read-only (docs/adr/0014).
+func TestReportPublishesWhenTheDeploymentWentReadOnly(t *testing.T) {
+	readable := adapter.Capabilities{Schema: adapter.SchemaVersion, Package: "gohorizon/laravel"}
+	probe := &scriptedProbe{answers: []probeAnswer{
+		{err: errors.New("exit status 1: could not open input file: artisan")}, // debounced
+		{err: errors.New("exit status 1: could not open input file: artisan")}, // published
+		{err: errors.New("exit status 28: the command timed out")},             // same state, new reason
+		{caps: readable}, // repaired
+	}}
+	service := &Service{
+		cfg:      preflightConfig(t, 60),
+		log:      slog.New(slog.NewTextHandler(io.Discard, nil)),
+		consumer: &telemetry.Consumer{},
+		appID:    "app",
+		probe:    probe,
+		probed:   readable,
+		started:  time.Now(),
+	}
+	service.lockHeld = true
+
+	if got := service.Report().Capabilities.ReadOnlySince; got != 0 {
+		t.Fatalf("read_only_since = %d, want 0 for a readable deployment", got)
+	}
+
+	service.probeOnce(context.Background())
+	if got := service.Report().Capabilities.ReadOnlySince; got != 0 {
+		t.Errorf("read_only_since = %d, want 0 while the only failure is debounced", got)
+	}
+
+	before := time.Now().Unix()
+	service.probeOnce(context.Background())
+	report := service.Report()
+	if report.Capabilities.Available {
+		t.Fatal("available = true, want the second consecutive failure published")
+	}
+	since := report.Capabilities.ReadOnlySince
+	if since < before || since > time.Now().Unix() {
+		t.Fatalf("read_only_since = %d, want the instant the transition was published", since)
+	}
+
+	// A different wording of the same failure is not a new read-only state.
+	service.probeOnce(context.Background())
+	if got := service.Report().Capabilities.ReadOnlySince; got != since {
+		t.Errorf("read_only_since = %d, want it kept at %d across an unchanged state", got, since)
+	}
+
+	service.probeOnce(context.Background())
+	if got := service.Report().Capabilities.ReadOnlySince; got != 0 {
+		t.Errorf("read_only_since = %d, want 0 after the repair", got)
+	}
+}
+
 // TestReportPublishesWhenTheLoopLastAnswered is the staleness field: every other capabilities
 // value describes the last answer, so a loop that stopped looks healthy. The launch read counts
 // as the first answer, a failed read leaves the timestamp alone, and a read that answers with a

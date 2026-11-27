@@ -117,7 +117,11 @@ operator and a refusal would be the 503 the action returns.
   the service writes a `capability-change` record with the outcome `changed` and no user: nobody
   acted, and the line exists for the question asked after the fact. A reason that varies while
   the deployment stays read-only stays in the log, so the trail is transitions rather than one
-  line per interval.
+  line per interval. The same transition stamps `read_only_since` in health, and the launch
+  probe stamps it when the service starts against a deployment it cannot read, recording
+  `started read-only: …` before Redis is even opened. A restart into the read-only state is
+  therefore a record with an age rather than only a warning, and "how long has this been
+  read-only" is arithmetic on a field instead of a search of the log.
 - The refusal is the service's, not only the page's. `requireCapability` derives the same
   operations the descriptor publishes and answers 503 with the withheld entry's own reason (the
   descriptor's `error` when the whole descriptor could not be read) for

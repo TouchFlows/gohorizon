@@ -564,7 +564,7 @@ func TestCapabilitiesReportTheApplicationsRefusal(t *testing.T) {
 	const reason = "the gohorizon/laravel package is not installed in this deployment"
 
 	configPath, base := h.writeConfigWithPHP(h.refusingPHP(reason))
-	h.startBinary(h.buildBinary(), configPath)
+	inst := h.startBinary(h.buildBinary(), configPath)
 	// The refused preflight skips the launch checks; supervision itself must still come up,
 	// which is what makes the deployment repairable rather than failed.
 	awaitRunning(h, base)
@@ -601,6 +601,84 @@ func TestCapabilitiesReportTheApplicationsRefusal(t *testing.T) {
 	if fmt.Sprint(answer.Operations) != fmt.Sprint(wantOperations) {
 		t.Errorf("operations = %v, want %v", answer.Operations, wantOperations)
 	}
+
+	// It started read-only, which is a transition in its own right: no re-read will ever
+	// compare two answers that differ, so the launch has to leave both the record and the
+	// instant health publishes (docs/adr/0014).
+	record := inst.auditRecord(t, "capability-change", "started read-only")
+	if record["outcome"] != "changed" {
+		t.Errorf("outcome = %v, want %q", record["outcome"], "changed")
+	}
+	if _, ok := record["user"]; ok {
+		t.Errorf("record = %v, want no user: the service found the deployment this way", record)
+	}
+	if detail := fmt.Sprint(record["detail"]); !strings.Contains(detail, reason) {
+		t.Errorf("detail = %q, want the refusal's own reason", detail)
+	}
+	report, err := h.fetchReport(base)
+	if err != nil {
+		t.Fatalf("read health: %v", err)
+	}
+	if report.Capabilities.ReadOnlySince == 0 {
+		t.Error("read_only_since = 0, want the instant the deployment was found read-only")
+	}
+	if report.Capabilities.ReadOnlySince > time.Now().Unix() {
+		t.Errorf("read_only_since = %d, want no future instant", report.Capabilities.ReadOnlySince)
+	}
+}
+
+// TestReadOnlySinceIsStampedAtStartupAndClearedByTheRepair is the age end to end: a deployment
+// found read-only at launch publishes and records the instant, and a repair while the service
+// runs clears both. An operator asking "how long has this been read-only" reads a number
+// instead of searching the log for a warning (docs/adr/0014).
+func TestReadOnlySinceIsStampedAtStartupAndClearedByTheRepair(t *testing.T) {
+	h := newHarness(t)
+	answer := filepath.Join(h.dir, "capabilities.json")
+
+	// The command answers something this service cannot read, so the launch probe fails where a
+	// missing package does: no usable descriptor.
+	if err := os.WriteFile(answer, []byte("not the documented json"), 0o644); err != nil {
+		t.Fatalf("write the application's answer: %v", err)
+	}
+
+	configPath, base := h.writeConfigWithPHP(h.fileAnsweringPHP(answer))
+	inst := h.startBinary(h.buildBinary(), configPath)
+	awaitRunning(h, base)
+
+	report, err := h.fetchReport(base)
+	if err != nil {
+		t.Fatalf("read health: %v", err)
+	}
+	if report.Capabilities.Available {
+		t.Fatal("available = true, want a launch that could not read the descriptor")
+	}
+	if report.Capabilities.ReadOnlySince == 0 {
+		t.Fatal("read_only_since = 0, want the instant the deployment was found read-only")
+	}
+	if report.Capabilities.ReadOnlySince > time.Now().Unix() {
+		t.Errorf("read_only_since = %d, want no future instant", report.Capabilities.ReadOnlySince)
+	}
+	inst.auditRecord(t, "capability-change", "started read-only")
+
+	// The repair: an answer this service can read, which is all the read-only state needs to end.
+	if err := os.WriteFile(answer, []byte(capabilitiesAnswerFor(90, "0.1.0")), 0o644); err != nil {
+		t.Fatalf("rewrite the application's answer: %v", err)
+	}
+
+	eventually(t, 60*time.Second, "the repaired descriptor in health", func() error {
+		payload, err := h.fetchReport(base)
+		if err != nil {
+			return err
+		}
+		if !payload.Capabilities.Available {
+			return fmt.Errorf("available = false (%q), want the readable answer", payload.Capabilities.Error)
+		}
+		if payload.Capabilities.ReadOnlySince != 0 {
+			return fmt.Errorf("read_only_since = %d, want it cleared by the repair", payload.Capabilities.ReadOnlySince)
+		}
+		return nil
+	})
+	inst.auditRecord(t, "capability-change", "readable again")
 }
 
 // TestCapabilitiesWithholdWhatTheDescriptorCannotSupport runs the real binary against an

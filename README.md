@@ -90,7 +90,10 @@ Milestones 1 and 2 implemented:
   request. The decoder still refuses such a payload at read time — so a package upgrade cannot
   change queue depth or the failed   store silently. A descriptor transition — read-only, readable again, or a package upgrade — is
   written to the audit log as `capability-change`, so "when did this go read-only, and why" is
-  answerable from the log rather than only from a warning nobody kept.
+  answerable from the log rather than only from a warning nobody kept. The transition also
+  stamps `read_only_since` in health, and a service that starts against a deployment it cannot
+  read stamps it at launch and records `started read-only`, so a restart into the read-only
+  state publishes an age instead of waiting for a change that already happened.
 - Read-only `GET /api/v1/health`, and `GET /metrics` for a Prometheus scrape of the same
   state: `gohorizon_up`, `gohorizon_lock_held`, `gohorizon_capabilities_available`,
   `gohorizon_capabilities_failed_reads`, `gohorizon_capabilities_contradiction` (a re-read that
