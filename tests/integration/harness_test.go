@@ -3,6 +3,7 @@
 package integration_test
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
@@ -26,6 +27,7 @@ import (
 	_ "modernc.org/sqlite"
 
 	"github.com/gohorizon/gohorizon/internal/adapter"
+	"github.com/gohorizon/gohorizon/internal/auth"
 	"github.com/gohorizon/gohorizon/internal/metrics"
 	"github.com/gohorizon/gohorizon/internal/process"
 )
@@ -37,6 +39,12 @@ const (
 	testConnection  = "redis"
 	testRedisDB     = 15
 	testRedisAddr   = "127.0.0.1:6379"
+
+	// The operator a deployment with users signs in as, and the password its configured hash
+	// was made from. Neither the hash nor the session key is a secret worth keeping: both are
+	// generated for the test that uses them.
+	testOperator         = "operator"
+	testOperatorPassword = "e2e-password"
 )
 
 // harness owns the disposable application, the Redis keys and the processes one
@@ -145,7 +153,7 @@ func (h *harness) writeConfigAt(address string) (string, string) {
 // allocation takes its pool size from min.
 func (h *harness) writeConfigFor(address string, queues []string, workers int) (string, string) {
 	h.t.Helper()
-	return h.writeConfigAs(address, queues, workers, h.php)
+	return h.writeConfigAs(address, queues, workers, h.php, "")
 }
 
 // writeConfigWithPHP is writeConfigFor with the application's PHP executable overridden, so
@@ -153,11 +161,30 @@ func (h *harness) writeConfigFor(address string, queues []string, workers int) (
 // Only that command changes: everything else still reaches the fixture's own interpreter.
 func (h *harness) writeConfigWithPHP(php string) (string, string) {
 	h.t.Helper()
-	return h.writeConfigAs(testRedisAddr, []string{testQueue}, 1, php)
+	return h.writeConfigAs(testRedisAddr, []string{testQueue}, 1, php, "")
 }
 
-// writeConfigAs writes the configuration for one PHP executable.
-func (h *harness) writeConfigAs(address string, queues []string, workers int, php string) (string, string) {
+// writeConfigWithAuth is writeConfigWithPHP for a deployment that has users. The administrative
+// routes exist only then (docs/adr/0011), so a test that calls one has to configure an operator
+// and the key that signs its session.
+func (h *harness) writeConfigWithAuth(php, passwordHash string) (string, string) {
+	h.t.Helper()
+
+	h.t.Setenv("GOHORIZON_E2E_SESSION_KEY", "gohorizon-e2e-session-key-0123456789abcdef")
+	auth := fmt.Sprintf(`  auth:
+    session_key_env: GOHORIZON_E2E_SESSION_KEY
+    session_hours: 1
+    users:
+      - name: %s
+        password_hash: %q
+        role: operator
+`, testOperator, passwordHash)
+	return h.writeConfigAs(testRedisAddr, []string{testQueue}, 1, php, auth)
+}
+
+// writeConfigAs writes the configuration for one PHP executable, with the server's auth block
+// when the test configured users.
+func (h *harness) writeConfigAs(address string, queues []string, workers int, php, authBlock string) (string, string) {
 	h.t.Helper()
 
 	listen := fmt.Sprintf("127.0.0.1:%d", freePort(h.t))
@@ -169,7 +196,7 @@ func (h *harness) writeConfigAs(address string, queues []string, workers int, ph
 
 server:
   listen: %q
-
+%s
 storage:
   driver: sqlite
   path: %q
@@ -204,6 +231,7 @@ applications:
         restart_backoff: 1
 `,
 		listen,
+		authBlock,
 		filepath.Join(h.dir, "metrics.db"),
 		address,
 		testRedisDB,
@@ -483,15 +511,76 @@ func (r report) supervisor(t *testing.T) reportSupervisor {
 	return r.Supervisors[0]
 }
 
-func (h *harness) fetchReport(base string) (report, error) {
-	_, payload, err := h.fetchReportCode(base)
+func (h *harness) fetchReport(base string, cookies ...*http.Cookie) (report, error) {
+	_, payload, err := h.fetchReportCode(base, cookies...)
 	return payload, err
+}
+
+// signIn asks the service for a session and returns the cookies it set: the session, and the
+// double-submit token a mutation has to echo. It retries, because in a deployment that has
+// users the sign-in is also the first request that can prove the listener is up.
+func (h *harness) signIn(t *testing.T, base, name, password string) []*http.Cookie {
+	t.Helper()
+
+	var cookies []*http.Cookie
+	eventually(t, 30*time.Second, "the service to answer a sign-in", func() error {
+		body, err := json.Marshal(map[string]string{"name": name, "password": password})
+		if err != nil {
+			return err
+		}
+		resp, err := http.Post(base+"/api/v1/session", "application/json", bytes.NewReader(body))
+		if err != nil {
+			return err
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			return fmt.Errorf("sign-in returned %d", resp.StatusCode)
+		}
+		cookies = resp.Cookies()
+		return nil
+	})
+	return cookies
+}
+
+// call makes one administrative request with the cookies a signed-in browser holds, echoing the
+// token the sign-in issued, and answers with the status and the body. It is the caller the
+// dashboard's controls are: nothing here is privileged beyond what the page can send.
+func (h *harness) call(t *testing.T, base, method, path string, cookies []*http.Cookie) (int, string) {
+	t.Helper()
+
+	request, err := http.NewRequest(method, base+path, nil)
+	if err != nil {
+		t.Fatalf("%s %s: %v", method, path, err)
+	}
+	for _, cookie := range cookies {
+		request.AddCookie(cookie)
+		if cookie.Name == auth.CSRFCookie {
+			request.Header.Set(auth.CSRFHeader, cookie.Value)
+		}
+	}
+	resp, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatalf("%s %s: %v", method, path, err)
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read %s %s: %v", method, path, err)
+	}
+	return resp.StatusCode, string(body)
 }
 
 // fetchReportCode is fetchReport plus the HTTP status, so a test can prove the 503 that
 // ADR 0004 ties to lock loss instead of inferring it from the body.
-func (h *harness) fetchReportCode(base string) (int, report, error) {
-	resp, err := http.Get(base + "/api/v1/health")
+func (h *harness) fetchReportCode(base string, cookies ...*http.Cookie) (int, report, error) {
+	request, err := http.NewRequest(http.MethodGet, base+"/api/v1/health", nil)
+	if err != nil {
+		return 0, report{}, err
+	}
+	for _, cookie := range cookies {
+		request.AddCookie(cookie)
+	}
+	resp, err := http.DefaultClient.Do(request)
 	if err != nil {
 		return 0, report{}, err
 	}

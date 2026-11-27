@@ -36,6 +36,15 @@ func adminRouter(t *testing.T, role string) (http.Handler, *stubProvider, *bytes
 
 func adminRouterWith(t *testing.T, role string, report health.Report) (http.Handler, *stubProvider, *bytes.Buffer) {
 	t.Helper()
+	// A descriptor this service understands: the administrative actions are gated on it too,
+	// so a test about roles or tokens is about the only thing that can refuse them.
+	return adminRouterFor(t, role, &stubProvider{report: report, caps: descriptor()})
+}
+
+// adminRouterFor is adminRouterWith for a provider a test configures itself, which is how a
+// test makes the descriptor unreadable and watches the actions be refused for that reason.
+func adminRouterFor(t *testing.T, role string, provider *stubProvider) (http.Handler, *stubProvider, *bytes.Buffer) {
+	t.Helper()
 	hash, err := auth.HashPassword("s3cret")
 	if err != nil {
 		t.Fatalf("HashPassword: %v", err)
@@ -49,7 +58,6 @@ func adminRouterWith(t *testing.T, role string, report health.Report) (http.Hand
 	}
 	records := &bytes.Buffer{}
 	log := slog.New(slog.NewJSONHandler(records, nil))
-	provider := &stubProvider{report: report}
 	return NewRouter(provider, log, WithAuth(store)), provider, records
 }
 

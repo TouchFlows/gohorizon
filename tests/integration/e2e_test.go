@@ -13,6 +13,7 @@ package integration_test
 import (
 	"context"
 	"fmt"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -22,13 +23,14 @@ import (
 )
 
 // awaitRunning waits until the configured pool is at its desired size and healthy, so the
-// single-worker tests and the two-queue pool share one definition of ready.
-func awaitRunning(h *harness, base string) report {
+// single-worker tests and the two-queue pool share one definition of ready. A deployment with
+// users answers the report only to a session, so the caller passes the cookies it holds.
+func awaitRunning(h *harness, base string, cookies ...*http.Cookie) report {
 	h.t.Helper()
 
 	var latest report
 	eventually(h.t, 40*time.Second, "the desired pool running and reported as healthy", func() error {
-		current, err := h.fetchReport(base)
+		current, err := h.fetchReport(base, cookies...)
 		if err != nil {
 			return err
 		}

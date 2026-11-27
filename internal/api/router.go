@@ -106,8 +106,9 @@ func NewRouter(provider Provider, log *slog.Logger, opts ...Option) http.Handler
 		}
 
 		// Administration is the only part of this API that changes the world, so it carries
-		// the controls the reads do not need: a role below the minimum is refused, and the
-		// mutation must echo the token from the cookie (docs/adr/0011).
+		// the controls the reads do not need: a role below the minimum is refused, the
+		// mutation must echo the token from the cookie (docs/adr/0011), and an action the
+		// descriptor does not offer is refused before it can run (docs/adr/0014).
 		//
 		// It is mounted only when the deployment has users. With nobody to hold a role there
 		// is nobody to allow, and inventing an anonymous administrator is exactly what the
@@ -120,14 +121,17 @@ func NewRouter(provider Provider, log *slog.Logger, opts ...Option) http.Handler
 				r.With(
 					requireRole(store, auth.RoleOperator, audit.ActionWorkerRestart, auditor),
 					requireCSRF(store, audit.ActionWorkerRestart, auditor),
+					requireCapability(provider, "restart_workers", audit.ActionWorkerRestart, store, auditor),
 				).Post("/workers/{worker}/restart", restartWorker(provider, store, log, auditor))
 				r.With(
 					requireRole(store, auth.RoleOperator, audit.ActionFailedJobRetry, auditor),
 					requireCSRF(store, audit.ActionFailedJobRetry, auditor),
+					requireCapability(provider, "failed_job_retry", audit.ActionFailedJobRetry, store, auditor),
 				).Post("/failed/{job}/retry", retryFailedJob(provider, store, log, auditor))
 				r.With(
 					requireRole(store, auth.RoleOperator, audit.ActionFailedJobDelete, auditor),
 					requireCSRF(store, audit.ActionFailedJobDelete, auditor),
+					requireCapability(provider, "failed_job_delete", audit.ActionFailedJobDelete, store, auditor),
 				).Delete("/failed/{job}", deleteFailedJob(provider, store, log, auditor))
 			})
 		}
@@ -312,6 +316,37 @@ func requireCSRF(store *auth.Store, action string, auditor *audit.Logger) func(h
 			})
 			w.Header().Set("Cache-Control", "no-store")
 			writeError(w, http.StatusForbidden, "CSRF token missing or mismatched")
+		})
+	}
+}
+
+// requireCapability refuses an action the published descriptor does not offer, with the
+// descriptor's own reason. The dashboard already drops these controls, so this is the same
+// answer for a caller that kept them: a deployment that cannot describe itself is presented as
+// read-only, restart included, and an action that would run a command this service cannot
+// vouch for is not one it takes (docs/adr/0014). It runs last, so a caller refused for its
+// role or its token is told that instead of being told the deployment is read-only.
+func requireCapability(provider Provider, operation, action string, store *auth.Store, auditor *audit.Logger) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			caps, err := provider.Capabilities()
+			if err == nil && caps.Supported() && capabilityOperations(true)[operation] {
+				next.ServeHTTP(w, r)
+				return
+			}
+
+			reason := capabilityReason(caps, err)
+			me, _ := store.Current(r)
+			auditor.Record(r, audit.Event{
+				Action:  action,
+				Outcome: audit.OutcomeRefused,
+				User:    me.Name,
+				Role:    me.Role,
+				Address: store.ClientAddress(r),
+				Detail:  reason,
+			})
+			w.Header().Set("Cache-Control", "no-store")
+			writeError(w, http.StatusServiceUnavailable, reason)
 		})
 	}
 }

@@ -6,9 +6,14 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/gohorizon/gohorizon/internal/adapter"
+	"github.com/gohorizon/gohorizon/internal/audit"
+	"github.com/gohorizon/gohorizon/internal/auth"
+	"github.com/gohorizon/gohorizon/internal/health"
 )
 
 // descriptor is a capabilities payload as the package documents it, including the facts the
@@ -157,6 +162,106 @@ func TestCapabilitiesIsAReadAnySessionMayMake(t *testing.T) {
 	// alice is a viewer, and this is a read: gating the controls must not need a role.
 	if code := serve(handler, http.MethodGet, "/api/v1/capabilities", "", cookie).Code; code != http.StatusOK {
 		t.Fatalf("status for a signed-in viewer = %d, want 200", code)
+	}
+}
+
+// administrativeCall presents the cookies a signed-in browser holds and, when token is not
+// empty, the header it echoes: everything the administrative routes ask for before the
+// descriptor is consulted.
+func administrativeCall(handler http.Handler, method, target, token string, cookies ...*http.Cookie) *httptest.ResponseRecorder {
+	request := httptest.NewRequest(method, target, nil)
+	request.RemoteAddr = "192.0.2.10:5555"
+	for _, cookie := range cookies {
+		request.AddCookie(cookie)
+	}
+	if token != "" {
+		request.Header.Set(auth.CSRFHeader, token)
+	}
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, request)
+	return recorder
+}
+
+// TestUnreadableCapabilitiesRefuseTheActionsTheDashboardDrops covers the server-side half of the
+// gate: a control the dashboard stops drawing is also refused when a caller keeps it. The
+// descriptor is the only thing that can refuse here — the same role, token and report answer
+// 202/200 when it is readable (admin_test.go) — so this is not a role or session answer in
+// disguise, and nothing is attempted on the pool or the application first.
+func TestUnreadableCapabilitiesRefuseTheActionsTheDashboardDrops(t *testing.T) {
+	caps := descriptor()
+	caps.Schema = adapter.SchemaVersion + 1
+	provider := &stubProvider{
+		caps: caps,
+		report: health.Report{
+			Status: "ok",
+			Supervisors: []health.Supervisor{{
+				ID:      "default",
+				Running: 1,
+				Workers: []health.Worker{{UUID: testWorkerUUID, Queue: "default", State: "running"}},
+			}},
+		},
+	}
+	handler, provider, records := adminRouterFor(t, auth.RoleOperator, provider)
+	session, csrf := signInForAdmin(t, handler)
+
+	// The refusal is the descriptor's own reason, so a caller learns which side to upgrade
+	// rather than only that the action did not happen.
+	reason := capabilityReason(caps, nil)
+	for _, want := range []string{"schema 2", "schema 1"} {
+		if !strings.Contains(reason, want) {
+			t.Fatalf("reason = %q, want it to name %q", reason, want)
+		}
+	}
+
+	cases := []struct {
+		action string
+		method string
+		target string
+	}{
+		{audit.ActionWorkerRestart, http.MethodPost, "/api/v1/workers/" + testWorkerUUID + "/restart"},
+		{audit.ActionFailedJobRetry, http.MethodPost, "/api/v1/failed/" + testJobUUID + "/retry"},
+		{audit.ActionFailedJobDelete, http.MethodDelete, "/api/v1/failed/" + testJobUUID},
+	}
+	for _, tc := range cases {
+		recorder := administrativeCall(handler, tc.method, tc.target, csrf.Value, session, csrf)
+		if recorder.Code != http.StatusServiceUnavailable {
+			t.Errorf("%s: status = %d, want 503 (body %s)", tc.action, recorder.Code, recorder.Body)
+			continue
+		}
+		if cache := recorder.Header().Get("Cache-Control"); cache != "no-store" {
+			t.Errorf("%s: Cache-Control = %q, want no-store", tc.action, cache)
+		}
+		var payload struct {
+			Error string `json:"error"`
+		}
+		if err := json.Unmarshal(recorder.Body.Bytes(), &payload); err != nil {
+			t.Errorf("%s: decode body: %v (%s)", tc.action, err, recorder.Body)
+			continue
+		}
+		if payload.Error != reason {
+			t.Errorf("%s: error = %q, want the descriptor's reason %q", tc.action, payload.Error, reason)
+		}
+	}
+
+	// A refusal is not an action that happened and was then explained: neither the pool nor
+	// the application was asked to do anything.
+	if len(provider.restarted) != 0 || len(provider.retried) != 0 || len(provider.forgotten) != 0 {
+		t.Errorf("refused actions reached the provider: restarted=%v retried=%v forgotten=%v",
+			provider.restarted, provider.retried, provider.forgotten)
+	}
+	if provider.jobID != "" {
+		t.Errorf("history was consulted for %q, want the refusal to come before the action", provider.jobID)
+	}
+
+	// Each refusal is recorded under the action the caller tried, so the trail says which
+	// control a deployment presented as read-only was asked for anyway.
+	for _, tc := range cases {
+		if !strings.Contains(records.String(), `"action":"`+tc.action+`"`) {
+			t.Errorf("no audit record for %s in %s", tc.action, records)
+		}
+	}
+	if got := strings.Count(records.String(), `"outcome":"refused"`); got != len(cases) {
+		t.Errorf("refused audit records = %d, want %d", got, len(cases))
 	}
 }
 

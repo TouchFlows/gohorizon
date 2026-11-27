@@ -13,6 +13,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/gohorizon/gohorizon/internal/auth"
 )
 
 // rawCapabilities mirrors `php artisan gohorizon:capabilities --json` itself, not the
@@ -159,10 +161,17 @@ func (i *instance) startupWarning(t *testing.T, fragment string) (map[string]any
 	return record, nil
 }
 
-func (h *harness) fetchCapabilities(t *testing.T, base string) capabilitiesAnswer {
+func (h *harness) fetchCapabilities(t *testing.T, base string, cookies ...*http.Cookie) capabilitiesAnswer {
 	t.Helper()
 
-	resp, err := http.Get(base + "/api/v1/capabilities")
+	request, err := http.NewRequest(http.MethodGet, base+"/api/v1/capabilities", nil)
+	if err != nil {
+		t.Fatalf("GET /api/v1/capabilities: %v", err)
+	}
+	for _, cookie := range cookies {
+		request.AddCookie(cookie)
+	}
+	resp, err := http.DefaultClient.Do(request)
 	if err != nil {
 		t.Fatalf("GET /api/v1/capabilities: %v", err)
 	}
@@ -334,6 +343,10 @@ func TestCapabilitiesReportTheApplicationsRefusal(t *testing.T) {
 	}
 }
 
+// refusedJobID is an identity the application never stored. The refusal an unreadable descriptor
+// produces comes before the application is asked, so any well-formed id proves the same thing.
+const refusedJobID = "e0a1c2d3-4b5f-4a6b-8c7d-9e0f1a2b3c4d"
+
 // TestCapabilitiesReportASchemaThisServiceDoesNotUnderstand runs the real binary against an
 // application that answers the probe with a schema this service cannot read. The payload is
 // well-formed and deliberately contradicts the worker launch (no pcntl, a `--timeout`
@@ -347,18 +360,26 @@ func TestCapabilitiesReportASchemaThisServiceDoesNotUnderstand(t *testing.T) {
 		`"retry_after":10}}},"runtime":{"pcntl":false},"telemetry":{"stream":"gohorizon:events"},` +
 		`"events":[]}`
 
-	configPath, base := h.writeConfigWithPHP(h.answeringPHP(payload))
+	// The actions the dashboard drops are only refused by the service if the deployment has
+	// users at all: without them there are no administrative routes to refuse (docs/adr/0011).
+	// So this is a real signed-in deployment, not an open one.
+	hash, err := auth.HashPassword(testOperatorPassword)
+	if err != nil {
+		t.Fatalf("hash the test password: %v", err)
+	}
+	configPath, base := h.writeConfigWithAuth(h.answeringPHP(payload), hash)
 	inst := h.startBinary(h.buildBinary(), configPath)
+	cookies := h.signIn(t, base, testOperator, testOperatorPassword)
 	// Supervision comes up although the launch checks could not run, which is what keeps the
 	// deployment repairable instead of an unexplained failed start.
-	awaitRunning(h, base)
+	running := awaitRunning(h, base, cookies...)
 
 	// The skipped preflight is not in the descriptor alone: an operator reading the log has
 	// to see why the launch checks were abandoned, and which side to upgrade. Both schema
 	// numbers are the reason, so a warning that names one of them is not enough.
-	warning, err := inst.startupWarning(t, "capabilities schema not understood")
-	if err != nil {
-		t.Fatalf("read the startup warning: %v", err)
+	warning, warningErr := inst.startupWarning(t, "capabilities schema not understood")
+	if warningErr != nil {
+		t.Fatalf("read the startup warning: %v", warningErr)
 	}
 	schema, schemaOK := warning["schema"].(float64)
 	understood, understoodOK := warning["understood"].(float64)
@@ -372,7 +393,7 @@ func TestCapabilitiesReportASchemaThisServiceDoesNotUnderstand(t *testing.T) {
 		t.Errorf("warning msg = %v, want it to say the preflight was skipped", warning["msg"])
 	}
 
-	answer := h.fetchCapabilities(t, base)
+	answer := h.fetchCapabilities(t, base, cookies...)
 
 	if answer.Available {
 		t.Error("available = true, want false for a schema this service does not understand")
@@ -400,5 +421,41 @@ func TestCapabilitiesReportASchemaThisServiceDoesNotUnderstand(t *testing.T) {
 	}
 	if fmt.Sprint(answer.Operations) != fmt.Sprint(wantOperations) {
 		t.Errorf("operations = %v, want %v", answer.Operations, wantOperations)
+	}
+
+	// The page is not the only thing between an operator and an action this deployment cannot
+	// perform: every control it stopped drawing is refused by the service too, in the words the
+	// descriptor publishes. A job id the application never stored is enough, because the refusal
+	// comes before anything is asked of the application.
+	worker := running.supervisor(t).Workers[0]
+	refused := []struct {
+		method string
+		path   string
+	}{
+		{http.MethodPost, "/api/v1/workers/" + worker.UUID + "/restart"},
+		{http.MethodPost, "/api/v1/failed/" + refusedJobID + "/retry"},
+		{http.MethodDelete, "/api/v1/failed/" + refusedJobID},
+	}
+	for _, action := range refused {
+		status, body := h.call(t, base, action.method, action.path, cookies)
+		if status != http.StatusServiceUnavailable {
+			t.Errorf("%s %s = %d, want 503 (body %s)", action.method, action.path, status, body)
+			continue
+		}
+		for _, want := range []string{"schema 2", "schema 1"} {
+			if !strings.Contains(body, want) {
+				t.Errorf("%s %s = %s, want the refusal to name %q", action.method, action.path, body, want)
+			}
+		}
+	}
+
+	// A refusal is not an action that happened and was explained: the worker the restart named
+	// is still the one running, so the guard answered rather than the supervisor.
+	after, err := h.fetchReport(base, cookies...)
+	if err != nil {
+		t.Fatalf("read the report after the refused actions: %v", err)
+	}
+	if got := after.supervisor(t).Workers[0].UUID; got != worker.UUID {
+		t.Errorf("worker = %q, want %q still running: the refused restart recycled it", got, worker.UUID)
 	}
 }

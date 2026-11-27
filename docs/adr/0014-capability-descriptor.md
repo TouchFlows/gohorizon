@@ -70,6 +70,13 @@ operator and a refusal would be the 503 the action returns.
   an unavailable descriptor is "this deployment is read-only, and here is what to repair", which
   is only coherent if every control obeys it. The descriptor, not the screen, still decides,
   which is the seam a later external-worker integration needs.
+- The refusal is the service's, not only the page's. `requireCapability` answers 503 with the
+  descriptor's own `error` for `POST /api/v1/workers/{worker}/restart`,
+  `POST /api/v1/failed/{job}/retry` and `DELETE /api/v1/failed/{job}` whenever the descriptor is
+  unavailable, records the refusal under that action's audit entry, and runs after the role and
+  token checks — so a caller refused for its role is told that, not that the deployment is
+  read-only. Nothing is asked of the pool or the application first: the refusal is not an action
+  that happened and was then explained.
 - The endpoint publishes what the application reports about itself, including its Laravel and
   PHP versions and event list. It does not publish payloads, credentials or keys; the package
   already omits `has_password` values, and the probe ignores them.
@@ -86,8 +93,10 @@ operator and a refusal would be the 503 the action returns.
   package's `events` list replaces the illustrative `operations` array in the fixture: the
   operations map is this service's derivation, not a field the package sends.
 - Tests: `internal/api/capabilities_test.go` covers the published descriptor, the unavailable
-  adapter, the unknown schema and the session/read-only rules; `web/src/capabilities.test.ts`
+  adapter, the unknown schema, the session/read-only rules and the refusal of all three actions
+  when the descriptor is unreadable (the same role, token and report succeed when it is not); `web/src/capabilities.test.ts`
   covers the gating, including the transient-failure and per-action cases; `tests/integration`
   drives the real binary through the endpoint against the application's own payload, against a
-  PHP that refuses the probe, and against one that answers an unknown schema. The second broker
+  PHP that refuses the probe, and against one that answers an unknown schema — where a signed-in
+  operator's retry, delete and restart are refused and the worker is still the one running. The second broker
   adapter that would make the descriptor earn its keep is still deferred.

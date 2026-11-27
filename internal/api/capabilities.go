@@ -58,22 +58,32 @@ func capabilityOperations(understood bool) map[string]bool {
 	}
 }
 
+// capabilityReason is why the descriptor cannot be used, in the words the endpoint publishes:
+// the probe's own message when it could not answer, and the two schema numbers when it answered
+// one this service does not understand. An action that is refused and a client that reads the
+// descriptor get the same sentence, so neither can describe the deployment differently.
+func capabilityReason(caps adapter.Capabilities, err error) string {
+	if err != nil {
+		return err.Error()
+	}
+	return fmt.Sprintf(
+		"the application reports capabilities schema %d; this GoHorizon understands schema %d",
+		caps.Schema, adapter.SchemaVersion)
+}
+
 // capabilities publishes the startup descriptor. A payload whose schema this service does not
 // know is reported as unavailable rather than half-read: the fields it thinks it recognises
 // need not mean the same thing in another schema.
 func capabilities(provider Provider) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		caps, err := provider.Capabilities()
+		available := err == nil && caps.Supported()
 		response := capabilitiesResponse{
-			Available:  err == nil && caps.Supported(),
-			Operations: capabilityOperations(false),
+			Available:  available,
+			Operations: capabilityOperations(available),
 		}
-		if err != nil {
-			response.Error = err.Error()
-		} else if !caps.Supported() {
-			response.Error = fmt.Sprintf(
-				"the application reports capabilities schema %d; this GoHorizon understands schema %d",
-				caps.Schema, adapter.SchemaVersion)
+		if !available {
+			response.Error = capabilityReason(caps, err)
 		} else {
 			response.Schema = caps.Schema
 			response.Package = caps.Package
