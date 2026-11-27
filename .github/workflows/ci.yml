@@ -89,6 +89,8 @@ jobs:
           tar -xzf /tmp/prometheus.tar.gz -C /tmp
           /tmp/prometheus-${PROMTOOL_VERSION}.linux-amd64/promtool check rules \
             deployments/prometheus/gohorizon.rules.yml
+          /tmp/prometheus-${PROMTOOL_VERSION}.linux-amd64/promtool test rules \
+            deployments/prometheus/gohorizon.rules.test.yml
 
       - name: go test
         run: go test -race -count=1 ./...

@@ -15,8 +15,9 @@ import (
 // point of reading them from disk is that the files an operator deploys are the ones under test
 // (docs/adr/0014).
 const (
-	alertingRulesPath = "../../deployments/prometheus/gohorizon.rules.yml"
-	runbookPath       = "../../docs/runbook.md"
+	alertingRulesPath     = "../../deployments/prometheus/gohorizon.rules.yml"
+	alertingRulesTestPath = "../../deployments/prometheus/gohorizon.rules.test.yml"
+	runbookPath           = "../../docs/runbook.md"
 )
 
 // alertMetricPattern is how a rule's expression is scanned for the samples it names: every
@@ -206,6 +207,23 @@ func TestLoopStaleLeavesANeverAnsweredLoopToReadOnly(t *testing.T) {
 		return
 	}
 	t.Fatal("GoHorizonCapabilitiesLoopStale is missing")
+}
+
+// TestAlertingRulesHavePromtoolCases keeps the shipped rules covered by the shipped promtool tests:
+// a new or renamed alert with no case there would pass promtool's syntax check and prove nothing
+// about when it fires, which is the half a rule file gets wrong (docs/adr/0014).
+func TestAlertingRulesHavePromtoolCases(t *testing.T) {
+	data, err := os.ReadFile(alertingRulesTestPath)
+	if err != nil {
+		t.Fatalf("read %s: %v", alertingRulesTestPath, err)
+	}
+	cases := string(data)
+
+	for _, rule := range loadAlertingRules(t) {
+		if !strings.Contains(cases, "alertname: "+rule.Alert+"\n") {
+			t.Errorf("%s has no promtool case for %s", alertingRulesTestPath, rule.Alert)
+		}
+	}
 }
 
 func readRunbook(t *testing.T) string {

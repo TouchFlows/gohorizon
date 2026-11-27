@@ -161,7 +161,12 @@ operator and a refusal would be the 503 the action returns.
   `docs/runbook.md` that says what the state means and what to do. A test renders a scrape and
   checks every metric an expression names against the families the exporter writes, and checks
   every alert against its runbook section: a renamed sample or a retired alert fails the build
-  instead of leaving a rule that never fires or an instruction nobody can find.
+  instead of leaving a rule that never fires or an instruction nobody can find. The rules carry
+  `promtool test rules` cases of their own, which is where the guards are pinned rather than only
+  argued: a loop that never answered (`last_success` 0) must not fire the stale alert, and the
+  read-only age must ignore the zero it writes while the deployment is readable. CI runs
+  `promtool check rules` and `promtool test rules` on the shipped files, so a syntax error and a
+  guard that stopped guarding both fail the build.
 - The launch preflight has a second life. Every re-read runs `adapter.Check` again, so an
   application that lowers a `retry_after` under a worker's timeout, or loses pcntl under a
   `--timeout`, is the contradiction the launch would have been refused over — found after the

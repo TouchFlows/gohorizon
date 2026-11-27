@@ -1,0 +1,120 @@
+# Unit tests for the shipped rules (promtool test rules gohorizon.rules.test.yml).
+#
+# They pin the decisions the rule file argues for, which a syntax check cannot see: a deployment
+# the service presents as read-only fires, a loop that has never had an answer does not fire the
+# stale alert (it is read-only, and `last_success > 0` is what keeps the two apart), an instant
+# old enough fires only after the hold, and the read-only age rule ignores the zero it writes
+# while the deployment is readable (docs/adr/0014).
+rule_files:
+  - gohorizon.rules.yml
+
+evaluation_interval: 1m
+
+tests:
+  # available 0 is the read-only state: it fires once the minute hold has passed, so one slow
+  # scrape cannot page anyone.
+  - interval: 1m
+    input_series:
+      - series: gohorizon_capabilities_available
+        values: "0x12"
+    alert_rule_test:
+      - eval_time: 0m
+        alertname: GoHorizonCapabilitiesReadOnly
+        exp_alerts: []
+      - eval_time: 5m
+        alertname: GoHorizonCapabilitiesReadOnly
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: "The deployment is presented as read-only: its capability descriptor cannot be read."
+              runbook: "docs/runbook.md#gohorizoncapabilitiesreadonly"
+
+  # last_success 0 is "never answered", not "answered long ago": the deployment is read-only, and
+  # the stale alert must stay quiet rather than measure an age from a zero instant.
+  - interval: 1m
+    input_series:
+      - series: gohorizon_capabilities_last_success_timestamp_seconds
+        values: "0x25"
+      - series: gohorizon_capabilities_available
+        values: "0x25"
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: GoHorizonCapabilitiesLoopStale
+        exp_alerts: []
+      - eval_time: 20m
+        alertname: GoHorizonCapabilitiesReadOnly
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: "The deployment is presented as read-only: its capability descriptor cannot be read."
+              runbook: "docs/runbook.md#gohorizoncapabilitiesreadonly"
+
+  # An instant that has aged past the threshold fires, but not before the hold: the alert says the
+  # loop stopped, and a sample that is merely old is not yet that.
+  - interval: 1m
+    input_series:
+      - series: gohorizon_capabilities_last_success_timestamp_seconds
+        values: "1x45"
+    alert_rule_test:
+      - eval_time: 1m
+        alertname: GoHorizonCapabilitiesLoopStale
+        exp_alerts: []
+      - eval_time: 10m
+        alertname: GoHorizonCapabilitiesLoopStale
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: "The capabilities re-read loop has answered before but not for more than two intervals, so every other sample describes an answer that may be minutes old."
+              runbook: "docs/runbook.md#gohorizoncapabilitiesloopstale"
+
+  # A late contradiction is the launch preflight refusing the configuration that is already
+  # running, so it fires once it has lasted the hold rather than on a sample that may be one
+  # re-read old.
+  - interval: 1m
+    input_series:
+      - series: gohorizon_capabilities_contradiction
+        values: "1x12"
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: GoHorizonCapabilitiesContradiction
+        exp_alerts: []
+      - eval_time: 8m
+        alertname: GoHorizonCapabilitiesContradiction
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: "The application's current answer contradicts the running configuration (a retry_after under a worker timeout, a --timeout without pcntl)."
+              runbook: "docs/runbook.md#gohorizoncapabilitiescontradiction"
+
+  # The read-only age rule has the same guard for the same reason: while the deployment is
+  # readable the instant is 0, and a zero is not a state that has lasted half an hour.
+  - interval: 1m
+    input_series:
+      - series: gohorizon_capabilities_read_only_since_timestamp_seconds
+        values: "0x45"
+    alert_rule_test:
+      - eval_time: 45m
+        alertname: GoHorizonCapabilitiesReadOnlyTooLong
+        exp_alerts: []
+
+  # A real instant fires once it is old enough, which is the alert nobody acted on.
+  - interval: 1m
+    input_series:
+      - series: gohorizon_capabilities_read_only_since_timestamp_seconds
+        values: "1x45"
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: GoHorizonCapabilitiesReadOnlyTooLong
+        exp_alerts: []
+      - eval_time: 40m
+        alertname: GoHorizonCapabilitiesReadOnlyTooLong
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+            exp_annotations:
+              summary: "The deployment has been read-only for more than 30 minutes."
+              runbook: "docs/runbook.md#gohorizoncapabilitiesreadonlytoolong"

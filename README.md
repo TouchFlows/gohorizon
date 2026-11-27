@@ -107,7 +107,11 @@ Milestones 1 and 2 implemented:
   `deployments/prometheus/gohorizon.rules.yml`: one per capability state, each naming a section of
   `docs/runbook.md` that says what it means and what to do. A test checks every expression against
   the families `/metrics` writes and every alert against its runbook entry, so a renamed sample
-  fails the build instead of leaving a rule that quietly never fires.
+  fails the build instead of leaving a rule that quietly never fires. The rules ship with their own
+  `promtool test rules` cases (`deployments/prometheus/gohorizon.rules.test.yml`), which pin what
+  the guards decide — a loop that has never answered does not fire the stale alert, and the
+  read-only age ignores the zero it writes while the deployment is readable — and CI runs both
+  `promtool check rules` and `promtool test rules` on them.
 - Dashboard served at `/`: overview, queues, workers, jobs, failed jobs and metrics screens.
   The first three read `/api/v1/health` every 5 s, where a 503 is shown as a degraded service
   rather than an error page and a count the driver could not report reads `unknown`, not `0`;
