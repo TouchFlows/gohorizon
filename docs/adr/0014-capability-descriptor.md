@@ -109,5 +109,8 @@ operator and a refusal would be the 503 the action returns.
   ends the session; `tests/integration`
   drives the real binary through the endpoint against the application's own payload, against a
   PHP that refuses the probe, and against one that answers an unknown schema — where a signed-in
-  operator's retry, delete and restart are refused and the worker is still the one running. The second broker
+  operator's retry, delete and restart are refused and the worker is still the one running.
+  `tests/browser/smoke.spec.ts` restarts a refusing deployment on its own port with a PHP that
+  answers, and asserts the controls come back on the page that was already open, which is the
+  refresh and not a reload. The second broker
   adapter that would make the descriptor earn its keep is still deferred.
