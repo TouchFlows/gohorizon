@@ -50,6 +50,25 @@ final class CapabilitiesCommandTest extends TestCase
         self::assertStringNotContainsString('queue-password-that-must-not-leak', $output);
     }
 
+    public function test_it_reports_the_payload_versions_its_commands_emit(): void
+    {
+        $this->app->instance('queue.failer', new FakeFailedJobs([]));
+
+        Artisan::call('gohorizon:capabilities', ['--json' => true]);
+        $capabilities = json_decode(Artisan::output(), true, flags: JSON_THROW_ON_ERROR);
+
+        Artisan::call('gohorizon:inspect', ['--json' => true, '--queue' => ['default']]);
+        $inspect = json_decode(Artisan::output(), true, flags: JSON_THROW_ON_ERROR);
+
+        Artisan::call('gohorizon:failed:list', ['--json' => true]);
+        $failed = json_decode(Artisan::output(), true, flags: JSON_THROW_ON_ERROR);
+
+        // The descriptor reports the versions the other commands actually print, so a package
+        // that bumps one of those payloads cannot leave this answer behind (docs/adr/0014).
+        self::assertSame($inspect['schema'], $capabilities['payload_schemas']['inspect']);
+        self::assertSame($failed['schema'], $capabilities['payload_schemas']['failed_jobs']);
+    }
+
     public function test_the_inspection_command_degrades_on_a_driver_without_counts(): void
     {
         config()->set('queue.default', 'sync');

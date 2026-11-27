@@ -80,6 +80,14 @@ type Capabilities struct {
 	Telemetry struct {
 		Stream string `json:"stream"`
 	} `json:"telemetry"`
+	// Payloads are the versions of the package's other documented payloads the application's
+	// commands say they emit. A package older than the field reports nothing (zero), which is
+	// treated as compatible: refusing a package for a claim it never made would read as a
+	// deployment fault rather than a version mismatch (docs/adr/0014).
+	Payloads struct {
+		Inspect    int `json:"inspect"`
+		FailedJobs int `json:"failed_jobs"`
+	} `json:"payload_schemas"`
 	// Events are the Laravel lifecycle events the application's version has, which is how a
 	// newer Laravel with a renamed event is visible instead of silently unobserved.
 	Events []string `json:"events"`
@@ -100,6 +108,18 @@ func (c Capabilities) Reason(err error) string {
 	}
 	return fmt.Sprintf("the application reports capabilities schema %d; this GoHorizon understands schema %d",
 		c.Schema, SchemaVersion)
+}
+
+// InspectPayloadSupported reports whether the application's queue-inspection payload is one this
+// service reads. An application that does not report its version is assumed to emit the one this
+// service reads.
+func (c Capabilities) InspectPayloadSupported() bool {
+	return c.Payloads.Inspect == 0 || c.Payloads.Inspect == InspectionSchema
+}
+
+// FailedJobsPayloadSupported is the same question for the failed-list payload.
+func (c Capabilities) FailedJobsPayloadSupported() bool {
+	return c.Payloads.FailedJobs == 0 || c.Payloads.FailedJobs == FailedJobsSchema
 }
 
 // Probe executes the capabilities command in the application directory.

@@ -57,7 +57,12 @@ type capabilitiesAnswer struct {
 	} `json:"connections"`
 	Operations       map[string]bool   `json:"operations"`
 	OperationReasons map[string]string `json:"operation_reasons"`
-	PayloadSchemas   struct {
+	// ApplicationPayloadSchemas is what the application says its own commands emit.
+	ApplicationPayloadSchemas *struct {
+		Inspect    int `json:"inspect"`
+		FailedJobs int `json:"failed_jobs"`
+	} `json:"application_payload_schemas"`
+	PayloadSchemas struct {
 		Inspect    int `json:"inspect"`
 		FailedJobs int `json:"failed_jobs"`
 	} `json:"payload_schemas"`
@@ -318,6 +323,66 @@ func TestCapabilitiesWithholdWhatThePayloadCannotSupport(t *testing.T) {
 		if !offered && reason == "" {
 			t.Errorf("operation_reasons[%q] is empty for a withheld operation", operation)
 		}
+	}
+}
+
+// TestCapabilitiesWithholdOnlyThePayloadItCannotRead is the version check the application's own
+// report makes possible: a package that bumped one payload withholds that screen, and nothing
+// else, so a new inspect payload does not take the failed store away with it.
+func TestCapabilitiesWithholdOnlyThePayloadItCannotRead(t *testing.T) {
+	cases := []struct {
+		name     string
+		payloads func(*adapter.Capabilities)
+		withheld string
+		offered  string
+	}{
+		{
+			name:     "inspect",
+			payloads: func(c *adapter.Capabilities) { c.Payloads.Inspect = adapter.InspectionSchema + 1 },
+			withheld: "inspect_queues",
+			offered:  "failed_jobs_list",
+		},
+		{
+			name:     "failed list",
+			payloads: func(c *adapter.Capabilities) { c.Payloads.FailedJobs = adapter.FailedJobsSchema + 1 },
+			withheld: "failed_jobs_list",
+			offered:  "inspect_queues",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			caps := descriptor()
+			tc.payloads(&caps)
+
+			answer := readCapabilities(t, &stubProvider{caps: caps})
+
+			if !answer.Available {
+				t.Fatalf("available = false (%q), want the descriptor read", answer.Error)
+			}
+			if answer.Operations[tc.withheld] {
+				t.Errorf("operations[%q] = true although the application emits a payload this service cannot read", tc.withheld)
+			}
+			if !answer.Operations[tc.offered] {
+				t.Errorf("operations[%q] = false, want only the affected operation withheld", tc.offered)
+			}
+
+			reason := answer.OperationReasons[tc.withheld]
+			for _, want := range []string{"schema 2", "schema 1"} {
+				if !strings.Contains(reason, want) {
+					t.Errorf("operation_reasons[%q] = %q, want it to name %q", tc.withheld, reason, want)
+				}
+			}
+
+			// The two numbers are published separately too, so a client does not have to parse
+			// the sentence to see which side is ahead.
+			if answer.ApplicationPayloadSchemas == nil {
+				t.Fatal("application_payload_schemas is missing, want what the application reported")
+			}
+			if answer.ApplicationPayloadSchemas.Inspect != caps.Payloads.Inspect ||
+				answer.ApplicationPayloadSchemas.FailedJobs != caps.Payloads.FailedJobs {
+				t.Errorf("application_payload_schemas = %+v, want %+v", answer.ApplicationPayloadSchemas, caps.Payloads)
+			}
+		})
 	}
 }
 

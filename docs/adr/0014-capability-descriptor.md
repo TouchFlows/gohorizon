@@ -50,13 +50,14 @@ operator and a refusal would be the 503 the action returns.
    operator just is not offered that control from a page that cannot say what the deployment
    is. A descriptor that *can* be read is still not a promise that every screen has something
    to show, so two entries follow the facts the payload carries: `telemetry` follows
-   `telemetry.stream` (no stream, no events to show), and `inspect_queues` follows the
-   connections' drivers (`sync` runs a job inline and `null` drops it, so neither has a queue,
-   a backlog or a depth; an unknown driver is assumed inspectable, because the inspect payload
-   omits a count its driver cannot answer instead of inventing one). `failed_jobs_list`,
-   `failed_job_retry`, `failed_job_delete` and `restart_workers` follow `available`, because the
-   payload describes nothing narrower about the failed store and restarting is the supervisor's
-   own action. Every withheld entry carries its reason in the service's words, so a control that
+   `telemetry.stream` (no stream, no events to show), and `inspect_queues` follows both the
+   inspect payload version the application reports (decision 7) and the connections' drivers
+   (`sync` runs a job inline and `null` drops it, so neither has a queue, a backlog or a depth;
+   an unknown driver is assumed inspectable, because the inspect payload omits a count its
+   driver cannot answer instead of inventing one). `failed_jobs_list` follows the failed-list
+   version the application reports; `failed_job_retry`, `failed_job_delete` and
+   `restart_workers` follow `available`, because retry and delete run Laravel's own commands
+   rather than that payload, and restarting is the supervisor's own action. Every withheld entry carries its reason in the service's words, so a control that
    disappears says why instead of only disappearing.
 5. **An unavailable or unreadable adapter is a 200, not a 503.** "This deployment cannot do
    that" is the answer the caller asked for; a 503 would describe a failed read and invite a
@@ -74,16 +75,21 @@ operator and a refusal would be the 503 the action returns.
    so a deployment repaired and restarted gets its controls back without a page reload; a
    refresh that fails keeps the last descriptor, since falling back would put back a control
    the service would refuse.
-7. **The descriptor also publishes the versions of the application's other payloads this
-   service reads.** `payload_schemas` names the queue-inspection and failed-list versions
-   (`inspect`, `failed_jobs`) beside the `schema` of the capabilities payload itself. Both
-   decoders already refuse a payload that declares another version, naming both numbers; a
-   package that changes either payload therefore fails the read with the versions in the error
-   instead of being read with fields that may mean something else. Publishing the numbers makes
-   the contract visible before a payload is read, and makes drift testable: the acceptance test
-   compares them with what the fixture's own commands print, so a package bump cannot pass
-   unnoticed. They describe this service, not the application's claims, so they are published
-   even when the descriptor itself is unavailable.
+7. **Both sides of the payload contract are published, and a mismatch withholds only the
+   affected operation.** `gohorizon:capabilities` reports the versions its own inspect and
+   failed-list commands print, taken from the constants those commands print so the two cannot
+   drift apart. The descriptor publishes the versions this service reads in `payload_schemas` —
+   they describe this service, so they are published even when the descriptor is unavailable —
+   and what the application reported in `application_payload_schemas`, so a client sees two
+   numbers rather than only a sentence. When the application reports a version this service does
+   not read, only the operation that would misread that payload is withheld (`inspect_queues` or
+   `failed_jobs_list`), with both numbers in its reason; everything else keeps working, because
+   a package that changed one payload is not a deployment that cannot describe itself. A package
+   older than the field reports nothing, which is treated as compatible: refusing a package for
+   a claim it never made would read as a deployment fault. The decoders still refuse a payload
+   declaring another version at read time, so the check holds for a caller that never asks the
+   descriptor — and the acceptance tests compare both published numbers with what the fixture's
+   own commands print, so a package bump cannot pass unnoticed.
 
 ## Consequences
 

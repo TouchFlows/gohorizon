@@ -75,6 +75,14 @@ final class CapabilitiesCommand extends Command
             'telemetry' => [
                 'stream' => $this->keys->events(),
             ],
+            // The versions of this package's other payloads, so GoHorizon can compare them with
+            // the ones it reads and withhold only the screen that would misread one. The numbers
+            // live on the commands that print them, so they cannot drift apart from it
+            // (docs/adr/0014).
+            'payload_schemas' => [
+                'inspect' => InspectQueuesCommand::SCHEMA,
+                'failed_jobs' => FailedJobsCommand::SCHEMA,
+            ],
             'runtime' => [
                 // A --timeout is inert without pcntl, so GoHorizon refuses to spawn one.
                 'pcntl' => extension_loaded('pcntl'),

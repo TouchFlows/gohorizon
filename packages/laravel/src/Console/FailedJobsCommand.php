@@ -18,6 +18,12 @@ use InvalidArgumentException;
  */
 final class FailedJobsCommand extends Command
 {
+    /**
+     * The version of the payload this command prints, reported by `gohorizon:capabilities` so
+     * the service can compare it with the version it reads (docs/adr/0014).
+     */
+    public const SCHEMA = 1;
+
     protected $signature = 'gohorizon:failed:list
                             {--limit=50 : Records to return, 1-200}
                             {--before= : Continue after the next_before of a previous page}
@@ -53,7 +59,7 @@ final class FailedJobsCommand extends Command
         }
 
         $payload = [
-            'schema' => 1,
+            'schema' => self::SCHEMA,
             'application' => $this->keys->application(),
             'environment' => $this->keys->environment(),
             'failed_jobs' => $page['failed_jobs'],

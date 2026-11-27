@@ -16,6 +16,13 @@ use Illuminate\Console\Command;
  */
 final class InspectQueuesCommand extends Command
 {
+    /**
+     * The version of the payload this command prints. GoHorizon reads only this one, and
+     * `gohorizon:capabilities` reports it so the service can compare it with the version it
+     * reads instead of discovering a mismatch from a failed read (docs/adr/0014).
+     */
+    public const SCHEMA = 1;
+
     protected $signature = 'gohorizon:inspect
                             {--connection= : Queue connection name}
                             {--queue=* : Queues to inspect; defaults to the connection configuration}
@@ -39,7 +46,7 @@ final class InspectQueuesCommand extends Command
         ));
 
         $payload = [
-            'schema' => 1,
+            'schema' => self::SCHEMA,
             'application' => $this->keys->application(),
             'environment' => $this->keys->environment(),
             'connection' => $this->inspector->connectionName(is_string($connection) ? $connection : null),

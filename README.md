@@ -80,10 +80,12 @@ Milestones 1 and 2 implemented:
   fill is withheld with the fact that withheld it rather than as a read-only deployment.
   The state is also on `/api/v1/health` (`capabilities`) and in the scrape as
   `gohorizon_capabilities_available` / `gohorizon_capabilities_failed_reads`, so a read-only
-  deployment is alertable without reading the log. `payload_schemas` publishes the versions of
-  the queue-inspection and failed-list payloads this service reads; a payload declaring another
-  is refused with both numbers, so a package upgrade cannot change queue depth or the failed
-  store silently.
+  deployment is alertable without reading the log. The package reports the versions its
+  `gohorizon:inspect` and `gohorizon:failed:list` commands emit, and the descriptor publishes them
+  (`application_payload_schemas`) beside the versions this service reads (`payload_schemas`). A
+  mismatch withholds only the operation that would misread that payload, with both numbers in
+  its reason, and the decoder still refuses such a payload at read time — so a package upgrade
+  cannot change queue depth or the failed store silently.
 - Read-only `GET /api/v1/health`, and `GET /metrics` for a Prometheus scrape of the same
   state: `gohorizon_up`, `gohorizon_lock_held`, `gohorizon_capabilities_available`,
   `gohorizon_capabilities_failed_reads`, telemetry counters by result, queue depth by state, and

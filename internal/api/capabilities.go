@@ -36,8 +36,12 @@ type capabilitiesResponse struct {
 	// service reads. They describe this service, not the application, so they are published
 	// even when the descriptor is unavailable: a client comparing them with what the
 	// application's commands print can tell which side to upgrade.
-	PayloadSchemas payloadSchemas  `json:"payload_schemas"`
-	Operations     map[string]bool `json:"operations"`
+	PayloadSchemas payloadSchemas `json:"payload_schemas"`
+	// ApplicationPayloadSchemas is what the application says its own commands emit, when it
+	// says anything. Published beside the versions this service reads so a mismatch is visible
+	// as two numbers rather than only as the reason an operation was withheld.
+	ApplicationPayloadSchemas *payloadSchemas `json:"application_payload_schemas,omitempty"`
+	Operations                map[string]bool `json:"operations"`
 	// OperationReasons says why each withheld operation is withheld, in the words a refused
 	// action returns. A false entry without one would be a control that disappears with no
 	// explanation, which is the failure the descriptor exists to avoid (docs/adr/0014).
@@ -113,17 +117,30 @@ func capabilityOperations(caps adapter.Capabilities, available bool, unavailable
 		operations["telemetry"] = true
 	}
 
-	if inspectableDrivers(caps) == nil {
+	switch {
+	case !caps.InspectPayloadSupported():
+		// The application's own command prints a payload this service cannot read, so the
+		// depth it would count is not one to publish. A driver without a queue is the other
+		// reason the same screen cannot be filled.
+		withhold("inspect_queues", fmt.Sprintf("the application's inspect command emits schema %d; this GoHorizon reads schema %d",
+			caps.Payloads.Inspect, adapter.InspectionSchema))
+	case inspectableDrivers(caps) == nil:
 		withhold("inspect_queues", noInspectableQueue(caps))
-	} else {
+	default:
 		operations["inspect_queues"] = true
 	}
 
-	// The failed store is the application's own failer, which the payload describes only
-	// through the connection it rides on, so these follow the descriptor being readable.
-	for _, operation := range []string{"failed_jobs_list", "failed_job_retry", "failed_job_delete"} {
-		operations[operation] = true
+	// The failed store is the application's own failer, and its list payload is versioned like
+	// the inspect one. A package that changed that payload withholds the list — and only the
+	// list, because retry and delete run Laravel's own commands rather than that payload.
+	if caps.FailedJobsPayloadSupported() {
+		operations["failed_jobs_list"] = true
+	} else {
+		withhold("failed_jobs_list", fmt.Sprintf("the application's failed-list command emits schema %d; this GoHorizon reads schema %d",
+			caps.Payloads.FailedJobs, adapter.FailedJobsSchema))
 	}
+	operations["failed_job_retry"] = true
+	operations["failed_job_delete"] = true
 
 	return operations, reasons
 }
@@ -210,6 +227,10 @@ func capabilities(provider Provider) http.HandlerFunc {
 			response.PCNTL = caps.Runtime.PCNTL
 			response.TelemetryStream = caps.Telemetry.Stream
 			response.Events = caps.Events
+			if caps.Payloads.Inspect != 0 || caps.Payloads.FailedJobs != 0 {
+				reported := payloadSchemas{Inspect: caps.Payloads.Inspect, FailedJobs: caps.Payloads.FailedJobs}
+				response.ApplicationPayloadSchemas = &reported
+			}
 		}
 		w.Header().Set("Cache-Control", "no-store")
 		writeJSON(w, http.StatusOK, response)

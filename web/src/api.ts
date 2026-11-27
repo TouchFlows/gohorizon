@@ -105,6 +105,9 @@ export interface Capabilities {
   // payloads; each read refuses one that declares another, so a package upgrade is visible here
   // rather than misread.
   payload_schemas?: { inspect: number; failed_jobs: number }
+  // What the application says its own commands emit; a mismatch with `payload_schemas` is why an
+  // operation was withheld.
+  application_payload_schemas?: { inspect: number; failed_jobs: number }
   operations: CapabilityOperations
   // Why a withheld operation is withheld, in the service's own words. A false entry without one
   // would be a control that disappears without saying why.

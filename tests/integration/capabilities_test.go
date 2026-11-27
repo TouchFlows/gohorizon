@@ -68,7 +68,12 @@ type capabilitiesAnswer struct {
 	} `json:"payload_schemas"`
 	// OperationReasons says why a withheld operation is withheld.
 	OperationReasons map[string]string `json:"operation_reasons"`
-	Error            string            `json:"error"`
+	// ApplicationPayloadSchemas is what the application says its own commands emit.
+	ApplicationPayloadSchemas *struct {
+		Inspect    int `json:"inspect"`
+		FailedJobs int `json:"failed_jobs"`
+	} `json:"application_payload_schemas"`
+	Error string `json:"error"`
 }
 
 // capabilitiesPayload runs the documented command in the fixture, so the comparison is against
@@ -278,15 +283,33 @@ func TestCapabilitiesEndpointMatchesTheApplicationsPayload(t *testing.T) {
 		t.Errorf("pcntl = %t, want the application's %t", answer.PCNTL, raw.Runtime.PCNTL)
 	}
 
-	// The other payloads this service reads are versioned too, and the descriptor publishes the
-	// versions it accepts: compare them with what the application's own commands print, so a
-	// package that bumps either payload cannot do it without this test naming the mismatch. The
-	// decoders refuse the payload at read time with those same two numbers.
-	if got, want := answer.PayloadSchemas.Inspect, h.payloadSchema(t, "gohorizon:inspect", "--connection="+testConnection, "--queue="+testQueue); got != want {
-		t.Errorf("payload_schemas.inspect = %d, want the application's %d", got, want)
+	// The other payloads are versioned too, on both sides: the descriptor publishes the versions
+	// this service reads, and the application reports the ones its own commands print. Compare
+	// both with the commands themselves, so a package that bumps either payload cannot do it
+	// without this test naming the mismatch — and the decoders refuse the payload at read time
+	// with those same two numbers.
+	inspectSchema := h.payloadSchema(t, "gohorizon:inspect", "--connection="+testConnection, "--queue="+testQueue)
+	failedSchema := h.payloadSchema(t, "gohorizon:failed:list", "--limit=1")
+	if got := answer.PayloadSchemas.Inspect; got != inspectSchema {
+		t.Errorf("payload_schemas.inspect = %d, want the application's %d", got, inspectSchema)
 	}
-	if got, want := answer.PayloadSchemas.FailedJobs, h.payloadSchema(t, "gohorizon:failed:list", "--limit=1"); got != want {
-		t.Errorf("payload_schemas.failed_jobs = %d, want the application's %d", got, want)
+	if got := answer.PayloadSchemas.FailedJobs; got != failedSchema {
+		t.Errorf("payload_schemas.failed_jobs = %d, want the application's %d", got, failedSchema)
+	}
+	if answer.ApplicationPayloadSchemas == nil {
+		t.Fatal("application_payload_schemas is missing, so the application's report is not published")
+	}
+	if got := answer.ApplicationPayloadSchemas.Inspect; got != inspectSchema {
+		t.Errorf("application_payload_schemas.inspect = %d, want the command's %d", got, inspectSchema)
+	}
+	if got := answer.ApplicationPayloadSchemas.FailedJobs; got != failedSchema {
+		t.Errorf("application_payload_schemas.failed_jobs = %d, want the command's %d", got, failedSchema)
+	}
+	// A package that reports the versions this service reads withholds nothing.
+	for _, operation := range []string{"inspect_queues", "failed_jobs_list"} {
+		if !answer.Operations[operation] {
+			t.Errorf("operations[%q] = false although the application reports a payload this service reads", operation)
+		}
 	}
 
 	// Drivers and reservation windows, per connection. A null retry_after is a driver with no
@@ -434,6 +457,53 @@ func TestCapabilitiesWithholdWhatTheDescriptorCannotSupport(t *testing.T) {
 		if reason, ok := answer.OperationReasons[operation]; ok {
 			t.Errorf("operation_reasons[%q] = %q, want no reason for an offered operation", operation, reason)
 		}
+	}
+}
+
+// TestCapabilitiesWithholdOnlyThePayloadItCannotRead runs the real binary against an application
+// that reports an inspect payload one version ahead of this service. The descriptor is readable
+// and the failed store is untouched, so only queue depth is withheld, with both numbers in the
+// reason a caller reads.
+func TestCapabilitiesWithholdOnlyThePayloadItCannotRead(t *testing.T) {
+	h := newHarness(t)
+	payload := `{"schema":1,"package":"gohorizon/laravel","laravel":"13.0.0","php":"8.4.0",` +
+		`"queue":{"connections":{"redis":{"driver":"redis","retry_after":90}}},` +
+		`"runtime":{"pcntl":true},"telemetry":{"stream":"gohorizon:events"},"events":[],` +
+		`"payload_schemas":{"inspect":2,"failed_jobs":1}}`
+
+	configPath, base := h.writeConfigWithPHP(h.answeringPHP(payload))
+	h.startBinary(h.buildBinary(), configPath)
+	awaitRunning(h, base)
+
+	answer := h.fetchCapabilities(t, base)
+	if !answer.Available {
+		t.Fatalf("available = false (%q), want the descriptor the application answered", answer.Error)
+	}
+
+	if answer.Operations["inspect_queues"] {
+		t.Error("operations[inspect_queues] = true although the application emits a payload this service cannot read")
+	}
+	reason := answer.OperationReasons["inspect_queues"]
+	for _, want := range []string{"schema 2", "schema 1"} {
+		if !strings.Contains(reason, want) {
+			t.Errorf("operation_reasons[inspect_queues] = %q, want it to name %q", reason, want)
+		}
+	}
+
+	// Only the affected operation: the failed list is a different payload, and the deployment
+	// is not read-only.
+	for _, operation := range []string{"failed_jobs_list", "failed_job_retry", "failed_job_delete", "restart_workers"} {
+		if !answer.Operations[operation] {
+			t.Errorf("operations[%q] = false, want only the affected operation withheld", operation)
+		}
+	}
+
+	// Both sides of the comparison are published, so a client can see which one is ahead.
+	if answer.ApplicationPayloadSchemas == nil || answer.ApplicationPayloadSchemas.Inspect != 2 {
+		t.Errorf("application_payload_schemas = %+v, want the application's inspect 2", answer.ApplicationPayloadSchemas)
+	}
+	if answer.PayloadSchemas.Inspect != 1 {
+		t.Errorf("payload_schemas.inspect = %d, want the version this service reads", answer.PayloadSchemas.Inspect)
 	}
 }
 
