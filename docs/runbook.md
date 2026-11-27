@@ -28,5 +28,5 @@ state changed and why it was then).
 
 ## GoHorizonCapabilitiesLoopStale
 
-**Means:** the re-read loop has not got an answer for more than two intervals, so every other capability sample describes an answer that may be minutes old.
+**Means:** the re-read loop got an answer at some point and has not got one for more than two intervals, so every other capability sample describes an answer that may be minutes old — a deployment that has never answered at all is read-only instead, and `GoHorizonCapabilitiesReadOnly` is the alert for it.
 **Do:** check the service log for the re-read's failure (`application capabilities re-read failed`) and for whether the loop is still running at all, then confirm with `gohorizon_capabilities_last_success_timestamp_seconds` that a newer instant appears — a loop that stopped needs a service restart, a PHP command that hangs needs the application fixed.

@@ -77,6 +77,19 @@ jobs:
       - name: go vet
         run: go vet ./...
 
+      # The shipped rules are an artifact an operator's Prometheus loads, so they are checked by
+      # the tool it uses rather than only by the parser our own test reads them with. Pinned, so
+      # a rule written in a syntax only a newer Prometheus accepts fails here first.
+      - name: Check the alerting rules
+        env:
+          PROMTOOL_VERSION: "3.16.0"
+        run: |
+          curl -fsSL -o /tmp/prometheus.tar.gz \
+            "https://github.com/prometheus/prometheus/releases/download/v${PROMTOOL_VERSION}/prometheus-${PROMTOOL_VERSION}.linux-amd64.tar.gz"
+          tar -xzf /tmp/prometheus.tar.gz -C /tmp
+          /tmp/prometheus-${PROMTOOL_VERSION}.linux-amd64/promtool check rules \
+            deployments/prometheus/gohorizon.rules.yml
+
       - name: go test
         run: go test -race -count=1 ./...
 

@@ -182,6 +182,32 @@ func TestAlertingRulesCoverTheAgeFromTheDescriptor(t *testing.T) {
 	}
 }
 
+// TestLoopStaleLeavesANeverAnsweredLoopToReadOnly pins the guard on the stale rule. last_success
+// is 0 until a read answers, and a deployment whose reads never answered is read-only, which the
+// read-only alert already reports: comparing an age from zero would alert twice on one cause and
+// state an age nothing measured. The runbook has to say which alert owns that case, or the two
+// rules read as one gap (docs/adr/0014).
+func TestLoopStaleLeavesANeverAnsweredLoopToReadOnly(t *testing.T) {
+	sections := runbookSections(readRunbook(t))
+
+	for _, rule := range loadAlertingRules(t) {
+		if rule.Alert != "GoHorizonCapabilitiesLoopStale" {
+			continue
+		}
+		if !strings.Contains(rule.Expr, metricCapsLastSuccess+" > 0") {
+			t.Errorf("expression %q has no %s > 0 guard: a loop that never answered has no age", rule.Expr, metricCapsLastSuccess)
+		}
+		if !strings.Contains(rule.Expr, "time() - "+metricCapsLastSuccess) {
+			t.Errorf("expression %q does not compare the instant's age", rule.Expr)
+		}
+		if body := sections[rule.Alert]; !strings.Contains(body, "GoHorizonCapabilitiesReadOnly") {
+			t.Errorf("runbook section %q does not name the alert that covers a loop which never answered", rule.Alert)
+		}
+		return
+	}
+	t.Fatal("GoHorizonCapabilitiesLoopStale is missing")
+}
+
 func readRunbook(t *testing.T) string {
 	t.Helper()
 

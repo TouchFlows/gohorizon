@@ -43,11 +43,15 @@ groups:
           summary: "The application's current answer contradicts the running configuration (a retry_after under a worker timeout, a --timeout without pcntl)."
           runbook: "docs/runbook.md#gohorizoncapabilitiescontradiction"
 
+      # The guard is the never-answered case, not a detail: last_success is 0 until a read
+      # answers, and a deployment whose reads have never answered is read-only, which the first
+      # alert above already reports. Comparing an age from zero would fire a second alert on the
+      # same cause and claim an age nothing measured.
       - alert: GoHorizonCapabilitiesLoopStale
         expr: gohorizon_capabilities_last_success_timestamp_seconds > 0 and time() - gohorizon_capabilities_last_success_timestamp_seconds > 120
         for: 5m
         labels:
           severity: warning
         annotations:
-          summary: "The capabilities re-read loop has not got an answer for more than two intervals."
+          summary: "The capabilities re-read loop has answered before but not for more than two intervals, so every other sample describes an answer that may be minutes old."
           runbook: "docs/runbook.md#gohorizoncapabilitiesloopstale"
