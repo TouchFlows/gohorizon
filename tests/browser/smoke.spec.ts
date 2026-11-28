@@ -50,8 +50,9 @@ import { expect, test, type BrowserContext, type Page, type Route } from '@playw
 // Sign-in is the one state the whole suite needs rather than one case reaching for it: the API
 // answers 401 without a session cookie, so every case is signed in from `beforeEach` and the
 // one case that starts where an operator starts clears its own cookies, one ends its session
-// under a loaded page to read the drop back to the form, one signs in as the administrator of
-// the deployment it repairs, which is the only role the re-read control is drawn for, one signs
+// under a loaded page to read the drop back to the form, two sign in as the administrator of a
+// read-only deployment — one of the deployment it repairs, one of a deployment nothing repairs,
+// whose read is answered as still read-only — and one signs
 // in as the viewer on that same read-only deployment to read that the control is not drawn for
 // it and the route refuses it, two sign in as the viewer the
 // configuration also carries to read the refusal a role below operator gets — once on a worker's
@@ -94,6 +95,11 @@ const nocapsReason = 'the gohorizon/laravel package is not installed in this dep
 // the case that repairs the second deployment leaves behind.
 const adminApplication = 'gohorizon-smoke-admin'
 const adminQueue = 'gohorizon-smoke-admin'
+// A fourth refusing deployment, which nothing repairs: the one whose answer to the administrator's
+// read is that it is still read-only. `admin` cannot be it, because the case that presses the
+// control there repairs it in place, and a repair is one-way.
+const stuckApplication = 'gohorizon-smoke-stuck'
+const stuckQueue = 'gohorizon-smoke-stuck'
 const pollMs = 30_000
 
 // The operator the smoke signs in as. The password is hashed by the binary itself before the
@@ -170,6 +176,10 @@ let nocapsWrapper = ''
 let adminBase = ''
 let adminService: ChildProcess | undefined
 let adminWrapper = ''
+// The deployment nobody repairs: its address and the process serving it. Its user holds the
+// administrator role, so the control is drawn beside an answer that will not change.
+let stuckBase = ''
+let stuckService: ChildProcess | undefined
 // session is the token the suite's direct calls to the API carry. The browser gets its own
 // cookie of the same shape, set on its context before each case.
 let session = ''
@@ -341,6 +351,43 @@ test.describe('the dashboard against the real binary', () => {
       })
       return response.status === 401
     })
+
+    // The deployment nobody repairs: the same refusal, served to an administrator. Its executable
+    // is never rewritten, so what the launch read published is what every re-read of it finds, and
+    // the control's answer is the still-read-only one rather than a repair.
+    const stuckPort = await freePort()
+    stuckBase = `http://127.0.0.1:${stuckPort}`
+    const stuckWrapper = path.join(dir, 'php-stuck')
+    fs.writeFileSync(stuckWrapper, refusingWrapper(php), { mode: 0o755 })
+    const stuckConfig = path.join(dir, 'gohorizon-stuck.yaml')
+    fs.writeFileSync(
+      stuckConfig,
+      refusingConfigYAML(stuckPort, dir, stuckWrapper, passwordHash, {
+        application: stuckApplication,
+        queue: stuckQueue,
+        name: 'GoHorizon smoke fixture that stays read-only',
+        store: 'stuck.db',
+        users: [{ name: smokeUser, role: administratorRole }],
+      }),
+    )
+
+    const stuckLog = fs.openSync(path.join(dir, 'gohorizon-stuck.log'), 'a')
+    stuckService = spawn(binary, ['run', '-config', stuckConfig], {
+      cwd: root,
+      detached: true,
+      stdio: ['ignore', stuckLog, stuckLog],
+      env: { ...process.env, ...fixtureEnv, GOHORIZON_SMOKE_SESSION_KEY: sessionKey },
+    })
+    fs.closeSync(stuckLog)
+
+    // Listening is the 401 its session gate answers with; the case signs in there and reads the
+    // result of the read it asks for.
+    await waitFor('listen on the deployment that stays read-only', async () => {
+      const response = await fetch(`${stuckBase}/api/v1/health`, {
+        signal: AbortSignal.timeout(3_000),
+      })
+      return response.status === 401
+    })
   })
 
   test.afterAll(() => {
@@ -348,6 +395,7 @@ test.describe('the dashboard against the real binary', () => {
       return
     }
     stopService(adminService)
+    stopService(stuckService)
     stopService(nocapsService)
     stopService(service)
     fs.rmSync(dir, { recursive: true, force: true })
@@ -1915,6 +1963,60 @@ test.describe('the dashboard against the real binary', () => {
     expect(after.available).toBe(false)
   })
 
+  test('an administrator re-reads a deployment that is still read-only and keeps that answer', async ({ page, context }) => {
+    // Asking for the read is how an administrator finds out whether a repair worked, and "it did
+    // not" is an answer: the control repeats the deployment's own sentence, the banner that
+    // explains the withheld controls stays, and the controls stay withheld. The deployment is the
+    // one nothing repairs, so this answer cannot be the repair the case below makes.
+    test.setTimeout(120_000)
+
+    await signInAs(page, context, stuckBase, smokeUser)
+    await page.goto(`${stuckBase}/#/workers`)
+    await expect(page.getByRole('heading', { name: 'Workers', exact: true })).toBeVisible()
+
+    // The sentence this deployment gives, read from the deployment the screen is showing, so the
+    // answer the read produces can be compared with the banner it is drawn beside.
+    const described = await page.request.get(`${stuckBase}/api/v1/capabilities`)
+    expect(described.status()).toBe(200)
+    const { available, error } = (await described.json()) as { available: boolean; error?: string }
+    expect(available).toBe(false)
+    const reason = readOnlyBanner(error ?? '')
+    await expect(page.getByText(reason)).toBeVisible({ timeout: 20_000 })
+
+    // The control is offered because this session holds the role that may press it, and the
+    // controls it exists to bring back are still withheld: nothing has been repaired here.
+    const reread = page.getByRole('button', { name: 'Re-read now', exact: true })
+    await expect(reread).toBeEnabled()
+    await expect(page.getByRole('button', { name: 'Restart', exact: true })).toHaveCount(0)
+
+    await reread.click()
+
+    // The read answered, and the answer is the deployment: the service's own still-read-only
+    // sentence, ending in the reason the banner already carries. It is the answer to the call and
+    // not a failure of it, so the page reports it as a result rather than an error.
+    const escaped = nocapsReason.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+    await expect(page.getByRole('status')).toHaveText(
+      new RegExp(`^Still read-only: .*${escaped}$`),
+    )
+
+    // Nothing was repaired, so nothing beside it changed: the banner is still the one the page
+    // read, the worker rows still carry no control and no column for one, and the button is
+    // offered again because the read it started is over — a control left disabled would make the
+    // second attempt impossible.
+    await expect(page.getByText(reason)).toBeVisible()
+    await expect(page.getByRole('button', { name: 'Restart', exact: true })).toHaveCount(0)
+    await expect(page.getByRole('columnheader', { name: 'Action', exact: true })).toHaveCount(0)
+    await expect(reread).toBeEnabled()
+
+    // And the published descriptor is the one the page arrived with: the read ran against this
+    // deployment and found it unchanged, rather than the page keeping an older answer.
+    const answered = await page.request.get(`${stuckBase}/api/v1/capabilities`)
+    expect(answered.status()).toBe(200)
+    const published = (await answered.json()) as { available: boolean; error?: string }
+    expect(published.available).toBe(false)
+    expect(published.error).toBe(error)
+  })
+
   test('an administrator re-reads a repaired deployment and keeps what the read found', async ({ page, context }) => {
     // The control is the administrator's, because it makes the application account for itself
     // again, and what it is for is answering whether a repair worked. That answer is drawn
@@ -2105,9 +2207,10 @@ applications:
 // refusingConfigYAML is a deployment whose PHP refuses the capabilities command: the fixture and
 // Redis database of this smoke, under application and queue names of its own, one idle worker on
 // a queue nothing is dispatched to so it cannot take the work the cases above dispatch, and a
-// store file of its own. Two of them are configured, because a repair is one-way: `nocaps` is
+// store file of its own. Three of them are configured, because a repair is one-way: `nocaps` is
 // repaired on disk and read back by the service's own re-read, `admin` is repaired by the
-// administrator who presses the control, and neither can start from the other's repaired state.
+// administrator who presses the control, and `stuck` is repaired by nobody — it is where the
+// administrator's read finds a deployment that is still read-only.
 // refusingWrapper is a PHP executable that refuses only `gohorizon:capabilities`, with the
 // reason the service is expected to publish; every other command reaches the fixture's own
 // interpreter.
