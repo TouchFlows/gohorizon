@@ -51,8 +51,9 @@ import { expect, test, type BrowserContext, type Page, type Route } from '@playw
 // answers 401 without a session cookie, so every case is signed in from `beforeEach` and the
 // one case that starts where an operator starts clears its own cookies, one ends its session
 // under a loaded page to read the drop back to the form, one signs in as the administrator of
-// the deployment it repairs, which is the only role the re-read control is drawn for, two sign
-// in as the viewer the
+// the deployment it repairs, which is the only role the re-read control is drawn for, one signs
+// in as the viewer on that same read-only deployment to read that the control is not drawn for
+// it and the route refuses it, two sign in as the viewer the
 // configuration also carries to read the refusal a role below operator gets — once on a worker's
 // row and once from a failed attempt's panel — and one reads the audit records a sign-out and a
 // sign-in leave in the service log, the one durable trace of a session action that until now
@@ -277,7 +278,7 @@ test.describe('the dashboard against the real binary', () => {
           queue: nocapsQueue,
           name: 'GoHorizon smoke fixture without a capabilities answer',
           store: 'nocaps.db',
-          role: 'operator',
+          users: [{ name: smokeUser, role: 'operator' }],
         }),
       )
 
@@ -314,7 +315,12 @@ test.describe('the dashboard against the real binary', () => {
         queue: adminQueue,
         name: 'GoHorizon smoke fixture read-only for an administrator',
         store: 'admin.db',
-        role: administratorRole,
+        // The administrator and, below them, the session the case reads the refusal with: a
+        // role that may not ask for the read is never offered the control either.
+        users: [
+          { name: smokeUser, role: administratorRole },
+          { name: viewerUser, role: 'viewer' },
+        ],
       }),
     )
 
@@ -1870,6 +1876,45 @@ test.describe('the dashboard against the real binary', () => {
     await expect(page.getByText(reason)).toHaveCount(0)
   })
 
+  test('a read-only deployment offers the re-read control to nobody but an administrator', async ({ page, context }) => {
+    // The control makes the application account for itself again, so it is the administrator's,
+    // which is the role the route requires; a session below it is offered nothing to press and
+    // is refused by the route itself. The deployment is the one the case below repairs, while it
+    // is still refusing an answer: the read-only state a refusal can be read beside is the state
+    // that repair ends.
+    test.setTimeout(120_000)
+
+    await signInAs(page, context, adminBase, viewerUser)
+    await page.goto(`${adminBase}/#/workers`)
+    await expect(page.getByRole('heading', { name: 'Workers', exact: true })).toBeVisible()
+
+    const described = await page.request.get(`${adminBase}/api/v1/capabilities`)
+    expect(described.status()).toBe(200)
+    const { available, error } = (await described.json()) as { available: boolean; error?: string }
+    expect(available).toBe(false)
+    const reason = readOnlyBanner(error ?? '')
+
+    // The banner is the whole answer this session gets: the page draws no control and no
+    // outcome beside it, because this session was never offered the read.
+    await expect(page.getByText(reason)).toBeVisible({ timeout: 20_000 })
+    await expect(page.getByRole('button', { name: 'Re-read now', exact: true })).toHaveCount(0)
+    await expect(page.getByRole('status')).toHaveCount(0)
+
+    // The same refusal at the route, carrying the token a mutation echoes: without it the
+    // answer would be the CSRF check's rather than the role's, and the service names the role it
+    // wants. The descriptor the deployment publishes is untouched, so the banner stays.
+    const answered = await page.request.post(`${adminBase}/api/v1/capabilities/refresh`, {
+      headers: { 'X-CSRF-Token': await csrfToken(page, adminBase) },
+    })
+    expect(answered.status()).toBe(403)
+    expect((await answered.json()).error).toBe(`${administratorRole} role required`)
+    await expect(page.getByText(reason)).toBeVisible()
+    const after = (await (await page.request.get(`${adminBase}/api/v1/capabilities`)).json()) as {
+      available: boolean
+    }
+    expect(after.available).toBe(false)
+  })
+
   test('an administrator re-reads a repaired deployment and keeps what the read found', async ({ page, context }) => {
     // The control is the administrator's, because it makes the application account for itself
     // again, and what it is for is answering whether a repair worked. That answer is drawn
@@ -2059,7 +2104,13 @@ function refusingConfigYAML(
   dir: string,
   php: string,
   passwordHash: string,
-  deployment: { application: string; queue: string; name: string; store: string; role: string },
+  deployment: {
+    application: string
+    queue: string
+    name: string
+    store: string
+    users: { name: string; role: string }[]
+  },
 ): string {
   return `version: 1
 
@@ -2069,9 +2120,13 @@ server:
     session_key_env: GOHORIZON_SMOKE_SESSION_KEY
     session_hours: 1
     users:
-      - name: ${smokeUser}
+${deployment.users
+  .map(
+    (user) => `      - name: ${user.name}
         password_hash: ${JSON.stringify(passwordHash)}
-        role: ${deployment.role}
+        role: ${user.role}`,
+  )
+  .join('\n')}
 
 storage:
   driver: sqlite
@@ -2164,12 +2219,12 @@ async function signInAs(
 // csrfToken reads the double-submit token the dashboard echoes on a mutation. The session route
 // issues one when the jar has none, and the browser's jar is where the page reads it, so this
 // asks through the browser rather than minting a token of its own.
-async function csrfToken(page: Page): Promise<string> {
-  const response = await page.request.get(`${base}/api/v1/session`)
+async function csrfToken(page: Page, origin = base): Promise<string> {
+  const response = await page.request.get(`${origin}/api/v1/session`)
   if (!response.ok()) {
     throw new Error(`session read returned ${response.status()}`)
   }
-  const cookie = (await page.context().cookies(base)).find(
+  const cookie = (await page.context().cookies(origin)).find(
     (candidate) => candidate.name === csrfCookie,
   )
   if (cookie === undefined) {
