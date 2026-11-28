@@ -1951,14 +1951,36 @@ test.describe('the dashboard against the real binary', () => {
     // the page is never navigated away from.
     fs.writeFileSync(adminWrapper, repairedWrapper(php), { mode: 0o755 })
 
+    // A read of a local deployment lasts milliseconds, so the state the control is in while one
+    // is in flight would be gone before a reader saw it. The request the click makes is parked
+    // at the socket instead: it has provably not reached the service, so the control is read
+    // against an outstanding read rather than a fast one, and the case releases it after.
+    let release!: () => void
+    const held = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    const refresh = await dress(page, '**/api/v1/capabilities/refresh')
+    refresh.answer({ kind: 'through', until: held })
+
     await reread.click()
 
+    // In flight, the control says so and carries no way to press it again: a second read while
+    // the first is outstanding would start a second command on the application's host.
+    await expect.poll(() => refresh.parked()).toBe(1)
+    const busy = page.getByRole('button', { name: 'Re-reading…', exact: true })
+    await expect(busy).toBeDisabled()
+
+    // Released, the request reaches the service, which reads the repaired deployment.
+    release()
+
     // The controls return from the descriptor this read published, not from the next poll and
-    // not from a reload: the request the button made is what the page now draws.
+    // not from a reload: the request the button made is what the page now draws. The control
+    // that was disabled is gone with the banner, and what the read found is in its place.
     await expect(page.getByRole('button', { name: 'Restart', exact: true }).first()).toBeVisible({
       timeout: 30_000,
     })
     await expect(page.getByText(reason)).toHaveCount(0)
+    await expect(busy).toHaveCount(0)
     await expect(reread).toHaveCount(0)
 
     // What the read found stays on screen after the banner and the button it was drawn beside
