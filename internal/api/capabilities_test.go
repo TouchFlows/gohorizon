@@ -1,6 +1,7 @@
 package api
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -43,16 +44,19 @@ func descriptor() adapter.Capabilities {
 // capabilitiesAnswer is the payload the endpoint published, decoded into the fields a client
 // gates its controls on.
 type capabilitiesAnswer struct {
-	Available       bool     `json:"available"`
-	Schema          int      `json:"schema"`
-	Package         string   `json:"package"`
-	Application     string   `json:"application"`
-	Environment     string   `json:"environment"`
-	Laravel         string   `json:"laravel"`
-	PCNTL           bool     `json:"pcntl"`
-	TelemetryStream string   `json:"telemetry_stream"`
-	Events          []string `json:"events"`
-	Connections     map[string]struct {
+	Available         bool     `json:"available"`
+	Schema            int      `json:"schema"`
+	Package           string   `json:"package"`
+	PackageVersion    string   `json:"package_version"`
+	Application       string   `json:"application"`
+	Environment       string   `json:"environment"`
+	Laravel           string   `json:"laravel"`
+	PHP               string   `json:"php"`
+	DefaultConnection string   `json:"default_connection"`
+	PCNTL             bool     `json:"pcntl"`
+	TelemetryStream   string   `json:"telemetry_stream"`
+	Events            []string `json:"events"`
+	Connections       map[string]struct {
 		Driver     string `json:"driver"`
 		RetryAfter *int   `json:"retry_after"`
 	} `json:"connections"`
@@ -582,6 +586,170 @@ func TestCapabilitiesRefreshPublishesTheAnswerItJustRead(t *testing.T) {
 	}
 	if detail := fmt.Sprint(allowed["detail"]); !strings.Contains(detail, "readable") || !strings.Contains(detail, "0.1.0") {
 		t.Errorf("detail = %q, want what the read found", detail)
+	}
+}
+
+// TestCapabilitiesRefreshServesTheSameDocumentAsTheRead is the contract between the two ways of
+// asking one deployment what it supports: the forced re-read answers with the document a GET
+// serves for the same read, field for field. The repair notice names the package identity, which
+// is only readable if everything else travelled with it — the connections and their drivers, the
+// telemetry stream, the events, the operations and the reason for each one withheld — so a field
+// the refresh path lost fails here instead of arriving as a control with nothing to gate on
+// (docs/adr/0014).
+func TestCapabilitiesRefreshServesTheSameDocumentAsTheRead(t *testing.T) {
+	// A readable descriptor that still withholds one screen: the operations map is derived from
+	// the payload, so the contract covers the reasons as well as the booleans.
+	withheld := descriptor()
+	withheld.Payloads.Inspect = adapter.InspectionSchema + 1
+
+	cases := []struct {
+		name          string
+		caps          adapter.Capabilities
+		capsErr       error
+		readOnlySince int64
+	}{
+		{name: "a readable descriptor", caps: withheld},
+		{
+			name:          "a deployment that cannot answer",
+			capsErr:       errors.New("gohorizon/laravel adapter is unavailable: could not open input file: artisan"),
+			readOnlySince: 1763600000,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			provider := &stubProvider{
+				caps:          tc.caps,
+				capsErr:       tc.capsErr,
+				reprobed:      tc.caps,
+				reprobeErr:    tc.capsErr,
+				readOnlySince: tc.readOnlySince,
+			}
+			handler, _, _ := adminRouterFor(t, auth.RoleAdministrator, provider)
+			session, csrf := signInForAdmin(t, handler)
+
+			read := administrativeCall(handler, http.MethodGet, "/api/v1/capabilities", "", session)
+			refreshed := administrativeCall(handler, http.MethodPost, "/api/v1/capabilities/refresh", csrf.Value, session, csrf)
+			if refreshed.Code != http.StatusOK {
+				t.Fatalf("refresh status = %d, want 200 (body %s)", refreshed.Code, refreshed.Body)
+			}
+
+			// One read has one spelling, so the two answers being the same bytes is every field at
+			// once: a field the refresh path dropped, defaulted or invented shows up as a
+			// difference rather than as a field nobody thought to assert.
+			if !bytes.Equal(read.Body.Bytes(), refreshed.Body.Bytes()) {
+				t.Fatalf("the re-read published\n  %s\nwant the document the read serves\n  %s",
+					refreshed.Body, read.Body)
+			}
+
+			// Bytes can only agree on what was written, so the shape is pinned too: every field this
+			// document publishes for this read, and nothing else. `pcntl` is the one runtime fact
+			// without omitempty: a deployment that could not answer still says whether the extension
+			// is there, which is not a field of the descriptor it failed to read.
+			var document map[string]json.RawMessage
+			if err := json.Unmarshal(refreshed.Body.Bytes(), &document); err != nil {
+				t.Fatalf("decode body: %v (%s)", err, refreshed.Body)
+			}
+			want := []string{"available", "payload_schemas", "operations", "operation_reasons", "pcntl"}
+			if tc.capsErr == nil {
+				want = append(want,
+					"schema", "package", "package_version", "laravel", "php", "application",
+					"environment", "default_connection", "connections", "telemetry_stream",
+					"events", "application_payload_schemas")
+			} else {
+				want = append(want, "read_only_since", "error")
+			}
+			published := make(map[string]bool, len(want))
+			for _, field := range want {
+				published[field] = true
+				if _, ok := document[field]; !ok {
+					t.Errorf("the answer the re-read published has no %q", field)
+				}
+			}
+			for field := range document {
+				if !published[field] {
+					t.Errorf("the answer the re-read published has an unexpected %q", field)
+				}
+			}
+
+			var answer capabilitiesAnswer
+			if err := json.Unmarshal(refreshed.Body.Bytes(), &answer); err != nil {
+				t.Fatalf("decode body: %v (%s)", err, refreshed.Body)
+			}
+
+			if tc.capsErr != nil {
+				if answer.Available {
+					t.Error("available = true for a read that failed")
+				}
+				if answer.Error != answer.OperationReasons["restart_workers"] {
+					t.Errorf("error = %q, want the reason each withheld operation carries (%q)",
+						answer.Error, answer.OperationReasons["restart_workers"])
+				}
+				if answer.ReadOnlySince != tc.readOnlySince {
+					t.Errorf("read_only_since = %d, want %d", answer.ReadOnlySince, tc.readOnlySince)
+				}
+				if len(answer.Operations) != len(capabilityOperationNames) {
+					t.Errorf("operations = %v, want one entry per operation", answer.Operations)
+				}
+				return
+			}
+
+			if !answer.Available {
+				t.Fatalf("available = false (%q), want the descriptor the read served", answer.Error)
+			}
+			// The identifiers the repair notice names, and the rest of what the application reported.
+			if answer.Schema != tc.caps.Schema || answer.Package != tc.caps.Package ||
+				answer.PackageVersion != tc.caps.PackageVersion || answer.Laravel != tc.caps.Laravel ||
+				answer.PHP != tc.caps.PHP || answer.Application != tc.caps.Application ||
+				answer.Environment != tc.caps.Environment {
+				t.Errorf("identifiers = %+v, want what the application reported (%+v)", answer, tc.caps)
+			}
+			if answer.DefaultConnection != tc.caps.Queue.DefaultConnection {
+				t.Errorf("default_connection = %q, want %q", answer.DefaultConnection, tc.caps.Queue.DefaultConnection)
+			}
+			// Connections travel with their drivers and reservation windows: a lost connection is a
+			// queue the dashboard cannot name.
+			if len(answer.Connections) != len(tc.caps.Queue.Connections) {
+				t.Errorf("connections = %+v, want %d of them", answer.Connections, len(tc.caps.Queue.Connections))
+			}
+			if redis := answer.Connections["redis"]; redis.Driver != "redis" || redis.RetryAfter == nil || *redis.RetryAfter != 90 {
+				t.Errorf("connections[redis] = %+v, want driver redis and retry_after 90", redis)
+			}
+			if sync := answer.Connections["sync"]; sync.Driver != "sync" || sync.RetryAfter != nil {
+				t.Errorf("connections[sync] = %+v, want the driver and no reservation window", sync)
+			}
+			// Telemetry and events decide whether there is a stream to watch at all.
+			if !answer.PCNTL || answer.TelemetryStream != tc.caps.Telemetry.Stream || len(answer.Events) != len(tc.caps.Events) {
+				t.Errorf("runtime/telemetry = %+v, want what the application reported", answer)
+			}
+			// The operations, and the reason the withheld one carries.
+			if len(answer.Operations) != len(capabilityOperationNames) {
+				t.Errorf("operations = %v, want one entry per operation", answer.Operations)
+			}
+			for _, operation := range capabilityOperationNames {
+				if _, ok := answer.Operations[operation]; !ok {
+					t.Errorf("operations has no entry for %q", operation)
+				}
+			}
+			if answer.Operations["inspect_queues"] {
+				t.Error("operations[inspect_queues] = true although the application emits a payload this service cannot read")
+			}
+			if reason := answer.OperationReasons["inspect_queues"]; !strings.Contains(reason, "schema 2") || !strings.Contains(reason, "schema 1") {
+				t.Errorf("operation_reasons[inspect_queues] = %q, want both schema numbers", reason)
+			}
+			if !answer.Operations["failed_jobs_list"] || !answer.Operations["restart_workers"] {
+				t.Errorf("operations = %v, want only the affected screen withheld", answer.Operations)
+			}
+			// Both payload versions: the ones this service reads, and the ones the application claims.
+			if answer.PayloadSchemas.Inspect != adapter.InspectionSchema || answer.PayloadSchemas.FailedJobs != adapter.FailedJobsSchema {
+				t.Errorf("payload_schemas = %+v, want the versions this service reads", answer.PayloadSchemas)
+			}
+			if answer.ApplicationPayloadSchemas == nil ||
+				answer.ApplicationPayloadSchemas.Inspect != tc.caps.Payloads.Inspect {
+				t.Errorf("application_payload_schemas = %+v, want what the application reported (%+v)",
+					answer.ApplicationPayloadSchemas, tc.caps.Payloads)
+			}
+		})
 	}
 }
 
