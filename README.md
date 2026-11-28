@@ -14,7 +14,8 @@ RabbitMQ and ecosystems beyond Laravel.
 [![Sponsor](https://img.shields.io/badge/Sponsor-GitHub-ea4aaa?logo=github)](https://github.com/sponsors/marktamis)
 [![Buy Me a Coffee](https://img.shields.io/badge/Buy_Me_a_Coffee-Support-FFDD00?logo=buy-me-a-coffee&logoColor=000)](https://buymeacoffee.com/marktamis)
 
-> **Project status:** GoHorizon is under active development. Check
+> **Project status:** GoHorizon is under active development — milestones 1 and 2 are implemented
+> and milestone 3, production hardening, is in progress. Check
 > [implementation status](docs/implementation-status.md) and release notes before using it in
 > production. Planned integrations are not current capabilities.
 

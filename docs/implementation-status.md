@@ -2,7 +2,7 @@
 
 _Extracted from the repository README. Every statement below was checked against the source, tests and CI at the time of writing; see [the roadmap](ROADMAP.md) for what is planned rather than built._
 
-Milestones 1 and 2 implemented:
+Milestones 1 and 2 are implemented, and Milestone 3 is in progress — authentication, roles, administrative actions and audit records are in:
 
 - Configuration loading, environment expansion and full validation (`gohorizon validate`).
 - Redis namespace split with a typed client; the ownership lock with renewal and
