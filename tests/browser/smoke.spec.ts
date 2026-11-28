@@ -50,7 +50,9 @@ import { expect, test, type BrowserContext, type Page, type Route } from '@playw
 // Sign-in is the one state the whole suite needs rather than one case reaching for it: the API
 // answers 401 without a session cookie, so every case is signed in from `beforeEach` and the
 // one case that starts where an operator starts clears its own cookies, one ends its session
-// under a loaded page to read the drop back to the form, two sign in as the viewer the
+// under a loaded page to read the drop back to the form, one signs in as the administrator of
+// the deployment it repairs, which is the only role the re-read control is drawn for, two sign
+// in as the viewer the
 // configuration also carries to read the refusal a role below operator gets — once on a worker's
 // row and once from a failed attempt's panel — and one reads the audit records a sign-out and a
 // sign-in leave in the service log, the one durable trace of a session action that until now
@@ -86,6 +88,11 @@ const nocapsQueue = 'gohorizon-smoke-nocaps'
 // What the wrapper PHP writes to stderr for the capabilities command. The service publishes it
 // as the descriptor's `error`, and both screens must repeat it rather than invent a reason.
 const nocapsReason = 'the gohorizon/laravel package is not installed in this deployment'
+// A third deployment, refusing the same way: the one a case repairs from the browser. A repair
+// is one-way, so the read-only state the administrator's case starts from cannot be the state
+// the case that repairs the second deployment leaves behind.
+const adminApplication = 'gohorizon-smoke-admin'
+const adminQueue = 'gohorizon-smoke-admin'
 const pollMs = 30_000
 
 // The operator the smoke signs in as. The password is hashed by the binary itself before the
@@ -96,6 +103,9 @@ const smokeUser = 'smoke'
 // role gets can be read from the page rather than only from the Go tests. One password is
 // hashed once and serves both.
 const viewerUser = 'viewer'
+// The role the re-read control is drawn for and the service requires of the call. The third
+// deployment's user holds it, so the control beside that deployment's banner is there to press.
+const administratorRole = 'administrator'
 const smokePassword = 'smoke-password'
 const sessionCookie = 'gohorizon_session'
 // The double-submit token a mutation has to echo. It is not HttpOnly, because the page reads it
@@ -154,6 +164,11 @@ let nocapsService: ChildProcess | undefined
 // The executable the second deployment runs, kept so the case that proves a repair can install
 // the package in place: the deployment keeps running against the same path.
 let nocapsWrapper = ''
+// The administrator's deployment: its address, its process, and the executable the case that
+// re-reads from the browser repairs in place.
+let adminBase = ''
+let adminService: ChildProcess | undefined
+let adminWrapper = ''
 // session is the token the suite's direct calls to the API carry. The browser gets its own
 // cookie of the same shape, set on its context before each case.
 let session = ''
@@ -255,7 +270,16 @@ test.describe('the dashboard against the real binary', () => {
 		nocapsWrapper = path.join(dir, 'php-nocaps')
 		fs.writeFileSync(nocapsWrapper, refusingWrapper(php), { mode: 0o755 })
 		const nocapsConfig = path.join(dir, 'gohorizon-nocaps.yaml')
-		fs.writeFileSync(nocapsConfig, noCapsConfigYAML(nocapsPort, dir, nocapsWrapper, passwordHash))
+		fs.writeFileSync(
+        nocapsConfig,
+        refusingConfigYAML(nocapsPort, dir, nocapsWrapper, passwordHash, {
+          application: nocapsApplication,
+          queue: nocapsQueue,
+          name: 'GoHorizon smoke fixture without a capabilities answer',
+          store: 'nocaps.db',
+          role: 'operator',
+        }),
+      )
 
     const nocapsLog = fs.openSync(path.join(dir, 'gohorizon-nocaps.log'), 'a')
     nocapsService = spawn(binary, ['run', '-config', nocapsConfig], {
@@ -274,12 +298,50 @@ test.describe('the dashboard against the real binary', () => {
       })
       return response.status === 401
     })
+
+    // The administrator's deployment, refusing through an executable of its own, which the case
+    // that re-reads from the browser rewrites in place. Its user holds the role that control is
+    // drawn for, and it serves a queue nothing is dispatched to like the one above.
+    const adminPort = await freePort()
+    adminBase = `http://127.0.0.1:${adminPort}`
+    adminWrapper = path.join(dir, 'php-admin')
+    fs.writeFileSync(adminWrapper, refusingWrapper(php), { mode: 0o755 })
+    const adminConfig = path.join(dir, 'gohorizon-admin.yaml')
+    fs.writeFileSync(
+      adminConfig,
+      refusingConfigYAML(adminPort, dir, adminWrapper, passwordHash, {
+        application: adminApplication,
+        queue: adminQueue,
+        name: 'GoHorizon smoke fixture read-only for an administrator',
+        store: 'admin.db',
+        role: administratorRole,
+      }),
+    )
+
+    const adminLog = fs.openSync(path.join(dir, 'gohorizon-admin.log'), 'a')
+    adminService = spawn(binary, ['run', '-config', adminConfig], {
+      cwd: root,
+      detached: true,
+      stdio: ['ignore', adminLog, adminLog],
+      env: { ...process.env, ...fixtureEnv, GOHORIZON_SMOKE_SESSION_KEY: sessionKey },
+    })
+    fs.closeSync(adminLog)
+
+    // Listening is the 401 its session gate answers with; the form on that origin is where the
+    // case signs in, and the descriptor is read through the pages.
+    await waitFor("listen on the administrator's deployment", async () => {
+      const response = await fetch(`${adminBase}/api/v1/health`, {
+        signal: AbortSignal.timeout(3_000),
+      })
+      return response.status === 401
+    })
   })
 
   test.afterAll(() => {
     if (skipReason !== null) {
       return
     }
+    stopService(adminService)
     stopService(nocapsService)
     stopService(service)
     fs.rmSync(dir, { recursive: true, force: true })
@@ -475,7 +537,7 @@ test.describe('the dashboard against the real binary', () => {
   test('a viewer is refused a restart with the service wording', async ({ page, context }) => {
     // The role gates the call rather than the screen, so a viewer is offered the control and
     // gets the service's own refusal; the page has to repeat that wording, not invent one.
-    await signInAsViewer(page, context)
+    await signInAs(page, context, base, viewerUser)
 
     const { target } = idlePoolWorker(await readHealth(page, `${base}/#/workers`))
     const row = page.getByRole('row', { name: new RegExp(target.uuid) })
@@ -1561,7 +1623,7 @@ test.describe('the dashboard against the real binary', () => {
       return store.failed_jobs.some((job) => job.job === 'App\\Jobs\\AlwaysFails')
     })
 
-    await signInAsViewer(page, context)
+    await signInAs(page, context, base, viewerUser)
 
     // The panel acts on the record the screen lists first, which is the row a person would
     // open; which record that is does not matter to a refusal.
@@ -1808,6 +1870,58 @@ test.describe('the dashboard against the real binary', () => {
     await expect(page.getByText(reason)).toHaveCount(0)
   })
 
+  test('an administrator re-reads a repaired deployment and keeps what the read found', async ({ page, context }) => {
+    // The control is the administrator's, because it makes the application account for itself
+    // again, and what it is for is answering whether a repair worked. That answer is drawn
+    // beside the banner — and it outlives the banner, because a successful read is exactly what
+    // removes it: what the read found is still on screen once the controls are back.
+    if (php === null) {
+      throw new Error('php is not on PATH')
+    }
+    test.setTimeout(120_000)
+
+    // The third deployment's user holds the administrator role, and the form on that origin is
+    // where the role is signed in: the session the hook left belongs to the other deployment.
+    await signInAs(page, context, adminBase, smokeUser)
+    await page.goto(`${adminBase}/#/workers`)
+    await expect(page.getByRole('heading', { name: 'Workers', exact: true })).toBeVisible()
+
+    // The reason is the deployment's own, read from the deployment this screen is showing, so
+    // the assertion that it leaves is about the sentence that arrived.
+    const described = await page.request.get(`${adminBase}/api/v1/capabilities`)
+    expect(described.status()).toBe(200)
+    const { available, error } = (await described.json()) as { available: boolean; error?: string }
+    expect(available).toBe(false)
+    const reason = readOnlyBanner(error ?? '')
+    await expect(page.getByText(reason)).toBeVisible({ timeout: 20_000 })
+
+    // The control is offered beside the banner because this session holds the role that may
+    // press it, and the controls themselves are withheld as they were before it existed.
+    const reread = page.getByRole('button', { name: 'Re-read now', exact: true })
+    await expect(reread).toBeEnabled()
+    await expect(page.getByRole('button', { name: 'Restart', exact: true })).toHaveCount(0)
+
+    // The repair, in place: the executable the running deployment already invokes starts
+    // answering the probe, which is what installing the package does. Nothing is restarted and
+    // the page is never navigated away from.
+    fs.writeFileSync(adminWrapper, repairedWrapper(php), { mode: 0o755 })
+
+    await reread.click()
+
+    // The controls return from the descriptor this read published, not from the next poll and
+    // not from a reload: the request the button made is what the page now draws.
+    await expect(page.getByRole('button', { name: 'Restart', exact: true }).first()).toBeVisible({
+      timeout: 30_000,
+    })
+    await expect(page.getByText(reason)).toHaveCount(0)
+    await expect(reread).toHaveCount(0)
+
+    // What the read found stays on screen after the banner and the button it was drawn beside
+    // are gone: it is the confirmation the administrator clicked for, and a notice unmounted
+    // with the banner would blank it at the moment it became the answer (docs/adr/0014).
+    await expect(page.getByRole('status')).toHaveText(/^Readable: schema \d+/)
+  })
+
   test('a deep link outside the navigation loads the shell instead of a 404', async ({ page }) => {
     const response = await page.goto(`${base}/queues/anything`)
 
@@ -1921,10 +2035,12 @@ applications:
 `
 }
 
-// noCapsConfigYAML is the second deployment: the same fixture and Redis database under its
-// own application and queue names, through a PHP that refuses the capabilities command. Its
-// one worker serves a queue nothing is dispatched to, so it cannot take the work the case
-// above dispatches, and its store is its own file beside the service's.
+// refusingConfigYAML is a deployment whose PHP refuses the capabilities command: the fixture and
+// Redis database of this smoke, under application and queue names of its own, one idle worker on
+// a queue nothing is dispatched to so it cannot take the work the cases above dispatch, and a
+// store file of its own. Two of them are configured, because a repair is one-way: `nocaps` is
+// repaired on disk and read back by the service's own re-read, `admin` is repaired by the
+// administrator who presses the control, and neither can start from the other's repaired state.
 // refusingWrapper is a PHP executable that refuses only `gohorizon:capabilities`, with the
 // reason the service is expected to publish; every other command reaches the fixture's own
 // interpreter.
@@ -1938,7 +2054,13 @@ function repairedWrapper(php: string): string {
   return `#!/bin/sh\nexec ${JSON.stringify(php)} "$@"\n`
 }
 
-function noCapsConfigYAML(port: number, dir: string, php: string, passwordHash: string): string {
+function refusingConfigYAML(
+  port: number,
+  dir: string,
+  php: string,
+  passwordHash: string,
+  deployment: { application: string; queue: string; name: string; store: string; role: string },
+): string {
   return `version: 1
 
 server:
@@ -1949,11 +2071,11 @@ server:
     users:
       - name: ${smokeUser}
         password_hash: ${JSON.stringify(passwordHash)}
-        role: operator
+        role: ${deployment.role}
 
 storage:
   driver: sqlite
-  path: ${JSON.stringify(path.join(dir, 'nocaps.db'))}
+  path: ${JSON.stringify(path.join(dir, deployment.store))}
 
 redis:
   address: "${redis.host}:${redis.port}"
@@ -1961,8 +2083,8 @@ redis:
   db: ${redis.db}
 
 applications:
-  - id: ${nocapsApplication}
-    name: GoHorizon smoke fixture without a capabilities answer
+  - id: ${deployment.application}
+    name: ${deployment.name}
     path: ${JSON.stringify(fixture)}
     php: ${JSON.stringify(php)}
     artisan: artisan
@@ -1971,7 +2093,7 @@ applications:
     supervisors:
       - id: idle
         queues:
-          - ${nocapsQueue}
+          - ${deployment.queue}
         balance:
           strategy: fixed
         workers:
@@ -2020,13 +2142,20 @@ async function signIn(): Promise<string> {
   return cookie.slice(sessionCookie.length + 1).split(';')[0]
 }
 
-// signInAsViewer starts a case as the user the configuration puts below the operator role. The
-// form is where a person would start, so the case signs in there rather than borrowing the
-// operator session the hook left on the context.
-async function signInAsViewer(page: Page, context: BrowserContext): Promise<void> {
+// signInAs starts a case as one of a deployment's users, on the origin it is given. The form is
+// where a person would start, so the case signs in there rather than borrowing the session the
+// hook left on the context: the viewer's refusal and the administrator's control are both
+// answers to the role the form issued, and the third deployment holds that role under the name
+// the first one carries as operator.
+async function signInAs(
+  page: Page,
+  context: BrowserContext,
+  origin: string,
+  name: string,
+): Promise<void> {
   await context.clearCookies()
-  await page.goto(`${base}/`)
-  await page.getByLabel('Name').fill(viewerUser)
+  await page.goto(`${origin}/`)
+  await page.getByLabel('Name').fill(name)
   await page.getByLabel('Password').fill(smokePassword)
   await page.getByRole('button', { name: 'Sign in', exact: true }).click()
   await expect(page.getByRole('heading', { name: 'Overview', exact: true })).toBeVisible()
