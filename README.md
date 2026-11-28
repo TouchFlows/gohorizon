@@ -1,249 +1,139 @@
 # GoHorizon
 
-Laravel queue supervision, powered by Go.
+**Universal queue operations and worker orchestration — built in Go.**
 
-GoHorizon is an independent, lightweight control plane for existing Laravel queue infrastructure. It supervises Laravel queue workers, monitors Redis-backed queues, collects job lifecycle telemetry, and provides historical metrics through a modern web dashboard.
+GoHorizon is an independent, open-source control plane for observing, supervising, and
+operating background-job infrastructure. It gives teams one operational view across queues,
+workers, executions, and failures without replacing the applications or message brokers that
+already do the work.
 
-Laravel continues to execute jobs. Redis remains the queue transport. GoHorizon provides the operational visibility and process supervision around them.
+**Starting point:** Laravel 13 + Redis.<br>
+**Long-term direction:** a modular platform for multiple brokers and worker runtimes, including
+RabbitMQ and ecosystems beyond Laravel.
 
 [![Sponsor](https://img.shields.io/badge/Sponsor-GitHub-ea4aaa?logo=github)](https://github.com/sponsors/marktamis)
 [![Buy Me a Coffee](https://img.shields.io/badge/Buy_Me_a_Coffee-Support-FFDD00?logo=buy-me-a-coffee&logoColor=000)](https://buymeacoffee.com/marktamis)
 
-The specification lives in [`handoff.md`](handoff.md); the verified Laravel 13 behaviour
-that adjusts it is in [`docs/laravel-13-recon.md`](docs/laravel-13-recon.md).
+> **Project status:** GoHorizon is under active development. Check
+> [implementation status](docs/implementation-status.md) and release notes before using it in
+> production. Planned integrations are not current capabilities.
 
-## Status
+## Why GoHorizon?
 
-Milestones 1 and 2 implemented:
+Background jobs are essential infrastructure, but their operational tooling is often tied to a
+particular framework or broker. GoHorizon separates the operational control plane from the
+systems that execute and transport jobs.
 
-- Configuration loading, environment expansion and full validation (`gohorizon validate`).
-- Redis namespace split with a typed client; the ownership lock with renewal and
-  fencing: an instance whose lock is definitively gone or taken over, or whose renewals
-  have gone unconfirmed for longer than the lock's TTL, stops its workers gracefully (an
-  in-flight job still finishes) and exits non-zero, so the pool is never supervised by two
-  services.
-- Capabilities preflight: startup refuses a `worker.timeout` that PHP cannot enforce
-  (no `pcntl`) or that is not below the queue connection's `retry_after`.
-- Process supervisor: explicit state machine, per-queue fixed allocation (`workers.min`
-  is the pool size and validation requires `workers.max` to match it until balancing
-  arrives; a pool shorter than its queue list logs one startup warning naming the
-  queues that get no worker), crash backoff,
-  graceful SIGTERM with bounded SIGKILL escalation, adoption of processes left by a
-  previous supervisor, exit-code classification (0/12 recycle vs crash). A worker that
-  keeps crashing before it can do any work is flagged `crash_looping` in the health body,
-  with one escalation log per streak; the status stays `ok`, because the pool is already
-  replacing it and a flapping health check would only restart the supervisor.
-- Telemetry ingestion: a consumer group on the events stream that deduplicates by
-  event id, validates the job identity each record carries (id, or the uuid when Laravel
-  assigned one, plus its class, attempts and an exception's class when there is one),
-  acknowledges what it handles and retries Redis failures without touching the workers. Its counters and live failure state are on `GET /api/v1/health`.
-- Historical metrics: every consumed `job.finished` event is stored as one `jobs` row
-  (identity, class, queue, attempts, duration and exception) and aggregated into per-queue
-  minute buckets in SQLite at `storage.path`, deduplicated by event id, so history
-  survives a restart. Job rows share the raw retention window and are pruned with it.
-  Each pass (startup and hourly) folds closed minutes into hourly buckets and closed
-  hours into daily ones before pruning event ids, job rows, minutes, hours and days past
-  their windows. The windows follow handoff §9 and are configurable under
-  `storage.retention` (defaults: raw 72 h, minutes 7 d, hours 30 d, days 365 d).
-  `GET /api/v1/metrics?resolution=…` reads any of the three levels back, and
-  `GET /api/v1/jobs` / `GET /api/v1/jobs/{id}` read the attempts themselves.
-- Queue depth: every 15 seconds the service runs `gohorizon:inspect` for the queues
-  its supervisors launch and reports each queue's `pending`, `reserved` and `delayed`
-  counts on `GET /api/v1/health`, plus `oldest_pending_at` (the unix time of the oldest
-  waiting job, so a stalled queue is visible even when its depth looks small) and
-  `oldest_pending_error` when the driver could not answer that. Counts a driver cannot
-  report are `null`, and a missing package or failing command only fills in
-  `queues.error` — the status stays `ok`, so a health check cannot restart healthy
-  workers over a failed inspection.
-- Failed jobs: `php artisan gohorizon:failed:list --json` reads the application's own
-  failed store through its configured failer, and `GET /api/v1/failed` pages it newest first,
-  so the screen and the retry/delete actions name the same records (docs/adr/0013). A database
-  store is paged with a keyset query on `failed_at` and its id, one page per request; the file
-  failer is read whole but Laravel caps that file at its own configured limit. Laravel's
-  `failed_jobs` table has no index in that order, so a large store should add one —
-  `(failed_at, id)`, or `(failed_at, uuid)` for the `database-uuids` driver — and the page
-  becomes a seek instead of a sort (`docs/adr/0013`). The job payload
-  is never returned; `exception` is the redacted first line of the stored trace.
-- Capabilities: `GET /api/v1/capabilities` publishes what the application said about itself
-  before the workers started — package, Laravel and PHP versions, connections with their
-  drivers and `retry_after`, `pcntl`, the telemetry stream and the lifecycle events — together
-  with an `operations` map saying which actions this deployment can actually offer. The
-  dashboard gates `Retry`, `Delete` and `Restart` on that map, so an application that cannot
-  answer offers no action it could not perform and says why (docs/adr/0014). The service re-reads
-  the descriptor every 30 s and the dashboard refreshes it with the health poll, so a deployment
-  repaired while it runs gets its controls back without a restart or a page reload. The page is
-  not the only gate: the retry, delete and restart routes   answer 503 with that same reason when
-  the descriptor is unavailable, so a caller that kept a control is refused it by the service.
-  The map is derived from what the payload says, not only from whether it parsed: `telemetry`
-  follows the reported stream and `inspect_queues` follows the connections' drivers, and every
-  withheld entry carries its reason in `operation_reasons`, so a screen the deployment cannot
-  fill is withheld with the fact that withheld it rather than as a read-only deployment.
-  The state is also on `/api/v1/health` (`capabilities`) and in the scrape as
-  `gohorizon_capabilities_available` / `gohorizon_capabilities_failed_reads`, so a read-only
-  deployment is alertable without reading the log. The package reports the versions its
-  `gohorizon:inspect` and `gohorizon:failed:list` commands emit, and the descriptor publishes them
-  (`application_payload_schemas`) beside the versions this service reads (`payload_schemas`). A
-  mismatch withholds only the operation that would misread that payload, with both numbers in
-  its reason, and the service stops making the read it cannot use: the queue loop skips
-  `gohorizon:inspect` (publishing the reason as `queues.error`) and the failed-list endpoint
-  answers 503 with that reason, rather than starting PHP to fail decoding on every tick or
-  request. The decoder still refuses such a payload at read time — so a package upgrade cannot
-  change queue depth or the failed   store silently. A descriptor transition — read-only, readable again, or a package upgrade — is
-  written to the audit log as `capability-change`, so "when did this go read-only, and why" is
-  answerable from the log rather than only from a warning nobody kept. The transition also
-  stamps `read_only_since` in health, and a service that starts against a deployment it cannot
-  read stamps it at launch and records `started read-only`, so a restart into the read-only
-  state publishes an age instead of waiting for a change that already happened. The descriptor
-  publishes the same instant (`read_only_since`), and the dashboard's read-only banner reads it,
-  so a withheld control says how long the deployment has been read-only as well as why.
-- Read-only `GET /api/v1/health`, and `GET /metrics` for a Prometheus scrape of the same
-  state: `gohorizon_up`, `gohorizon_lock_held`, `gohorizon_capabilities_available`,
-  `gohorizon_capabilities_failed_reads`, `gohorizon_capabilities_contradiction` (a re-read that
-  contradicts the running configuration, such as a `retry_after` lowered under a worker's
-  timeout, with the sentence in health),   `gohorizon_capabilities_last_success_timestamp_seconds`
-  (when the re-read loop last answered, so a loop that stopped is alertable on its age —
-  `last_read_at` in health), `gohorizon_capabilities_read_only_since_timestamp_seconds` (when the
-  deployment went read-only, so a state nobody repaired is alertable on its age —
-  `read_only_since` in health), telemetry counters by result, queue depth by state, and workers by
-  state and crash loops per supervisor. The rules themselves ship with the metrics in
-  `deployments/prometheus/gohorizon.rules.yml`: one per capability state, each naming a section of
-  `docs/runbook.md` that says what it means and what to do. A test checks every expression against
-  the families `/metrics` writes and every alert against its runbook entry, so a renamed sample
-  fails the build instead of leaving a rule that quietly never fires. The rules ship with their own
-  `promtool test rules` cases (`deployments/prometheus/gohorizon.rules.test.yml`), which pin what
-  the guards decide — a loop that has never answered does not fire the stale alert, and the
-  read-only age ignores the zero it writes while the deployment is readable — and CI runs both
-  `promtool check rules` and `promtool test rules` on them.
-- Dashboard served at `/`: overview, queues, workers, jobs, failed jobs and metrics screens.
-  The first three read `/api/v1/health` every 5 s, where a 503 is shown as a degraded service
-  rather than an error page and a count the driver could not report reads `unknown`, not `0`;
-  metrics charts the service's own minute, hourly and daily aggregates from
-  `/api/v1/metrics`, drawn as inline SVG with no chart dependency and a window with no rows
-  shown as "no data in this window", with the average duration of an attempt drawn under
-  the outcome columns from the same bucket; jobs reads `/api/v1/jobs` with queue and outcome filters,
-  cursor paging and a detail panel, and failed jobs reads the application's own store from
-  `/api/v1/failed` with the same cursor paging, the redacted exception in the row itself and
-  `Retry` and `Delete` in the record's detail panel. The two actions go through the failed-job
-  endpoints below, echoing the CSRF token the page reads from its own cookie; a worker row's
-  `Restart` posts the restart endpoint below and the supervisor recycles the process in its
-  slot, so the job in flight finishes instead of being killed. Those three controls are also
-  gated on `/api/v1/capabilities`: one the deployment does not advertise is disabled and the
-  screen says why (docs/adr/0014). Without `server.auth.users` there are no administrative
-  routes to call, so the failed screen and the worker rows stay read-only. The Vite bundle under `web/` is embedded in the binary, hashed assets are
-  cached forever, `index.html` is not cached, and a client route falls back to it
-  (docs/adr/0008).
-- `gohorizon/laravel` package: configuration, job lifecycle telemetry to a Redis Stream,
-  `gohorizon:capabilities`, `gohorizon:inspect`, `gohorizon:failed:list`.
-- Sign-in (Milestone 3, docs/adr/0009): `server.auth.users` turns authentication on, with
-  PBKDF2 password hashes minted by `gohorizon passwd` and a session cookie signed with the
-  key named by `server.auth.session_key_env`. `/api/v1/*` then requires a session (the
-  session routes and the Prometheus scrape do not), sign-out revokes the token, a session
-  naming a user the configuration no longer has is refused, and five failed sign-ins lock
-  an address for a minute. With the proxy named in `server.trusted_proxies`, the cookie is
-  `Secure` when its `X-Forwarded-Proto` says the browser is on HTTPS and the limiter counts
-  the client it forwards for rather than the proxy itself; one list decides both, so a
-  forwarded header is never trusted more than its sender. The dashboard opens on a sign-in
-  screen and offers a sign-out; without users it stays open, as before. A user carries a
-  role (`viewer`, `operator`, `administrator`; the default is `viewer`) which is read from
-  the configuration on every request, so changing it takes effect at the operator's next
-  request rather than when their session expires, and every session action — sign-in
-  allowed, refused or limited, and sign-out — is written to the service log as a
-  `msg=audit` record naming the actor, their role and the client address
-  (docs/adr/0010). A role also decides what may be done: restarting a worker needs `operator`
-  or above, and every administrative call needs the CSRF token (docs/adr/0011).
+- **Observe:** inspect queue depth, workers, job activity, failures, and historical metrics.
+- **Supervise:** manage worker processes and their lifecycle.
+- **Operate:** investigate failed jobs and perform supported operational actions.
+- **Integrate:** connect framework telemetry and broker capabilities through explicit adapters.
+- **Extend:** build toward a common operational experience across application runtimes and brokers.
 
-`GET /api/v1/metrics?queue=default[&resolution=minute|hourly|daily][&from=…&to=…]`
-returns one queue's persisted buckets as `{queue, resolution, from, to, buckets: [{start,
-processed, released, failed, timed_out, duration_ms}]}`, oldest first.
-`resolution` defaults to `minute`; the range is `[from, to)` in RFC 3339 and defaults to the last
-hour, 24 hours or 30 days respectively. A missing
-queue, an unknown resolution or a malformed range is a 400, unavailable history is a
-503, and a store failure is a 500 that keeps the database path out of the response.
+GoHorizon is not a message broker and does not replace Laravel's queue execution model. Laravel
+continues to execute jobs, Redis remains the queue transport, and GoHorizon provides the
+operational visibility and process supervision around them.
 
-`GET /api/v1/jobs?[queue=…][outcome=…][limit=…][before=…]` returns one page of finished
-attempts, newest first, as `{jobs: [{id, job_id, uuid, class, queue, connection, outcome,
-attempts, duration_ms, finished_at, exception: {class, message} | null}], next_before}`.
-`limit` defaults to 50 and may not exceed 200, `outcome` must be one of `processed`,
-`released`, `failed` or `timed_out`, and `before` is the `next_before` of the previous page —
-empty on the last page, so paging never needs a count. `GET /api/v1/jobs/{id}` returns one
-job's newest attempt by identity: the uuid when Laravel published one, otherwise `id:` plus
-the queue job id (the same `id:` fallback the recorder uses). A malformed query is a 400, an
-unknown identity a 404, unavailable history a 503, and a store failure a 500 without the
-database path.
+## What it does today
 
-`POST /api/v1/workers/{worker}/restart` asks one worker to stop gracefully, so its supervisor
-starts a replacement in the same slot and the job in flight finishes instead of being killed;
-the answer is 202 with `{worker, supervisor}`. The id is one `GET /api/v1/health` reports — the
-API never takes a command, a path or a PID. It needs a session with the `operator` role or
-above, and the `X-CSRF-Token` header repeating the value of the `gohorizon_csrf` cookie the
-service sets at sign-in (readable by the bundle, `SameSite`, not `HttpOnly`). A worker nobody
-runs is a 404 before anything reaches the pool, one that exits in between is a 409, and either
-failed check is a 403 with an audit record saying what was missing. Without
-`server.auth.users` the route is not mounted at all (docs/adr/0011).
+Verified against the current source and tests; [implementation status](docs/implementation-status.md)
+carries the detail and the architecture decisions behind each item.
 
-`POST /api/v1/failed/{job}/retry` pushes one failed job back onto its queue under the same
-session, role and token, and `DELETE /api/v1/failed/{job}` deletes it. The retry answers 202 with
-`{job, queue}` because the work is queued; the delete answers 200 with the same body because the
-record is already gone. Both are the application's own commands (`php artisan queue:retry` and
-`queue:forget`), so GoHorizon neither writes a queue key nor re-publishes a payload itself
-(docs/adr/0012). The application's store decides whether the record exists: a failed job it no
-longer stores is a 404. Attempt history is read only to name the queue in the answer and the
-audit record, never to refuse, so a failed record older than the history window is still
-actionable and a deployment without history still retries and deletes.
-
-`GET /api/v1/failed?[limit=…][before=…]` lists the application's own failed store as
-`{failed_jobs: [{id, uuid, connection, queue, job, failed_at, exception}], next_before}`, newest
-first, so the list names the records the two actions above act on instead of GoHorizon's pruned
-attempt history (docs/adr/0013). The command behind it is
-`php artisan gohorizon:failed:list --json`, which reads the configured failer; the payload is
-never returned and `exception` is the redacted first line of the stored trace. `limit` defaults
-to 50 and may not exceed 200, `before` is the `next_before` of the previous page and is empty on
-the last page, and either being malformed is a 400. An application that cannot answer is a 503,
-an empty store is `[]`, and any signed-in role may read it. Paging a database store is a keyset
-query, so it stays one page per request; give the store an index on `(failed_at, id)` (or
-`(failed_at, uuid)` for `database-uuids`) and the database seeks the page instead of sorting
-the table (`docs/adr/0013`, decision 4).
-
-`GET /api/v1/capabilities` publishes the descriptor startup read from
-`php artisan gohorizon:capabilities --json`, as `{available, schema, package, package_version,
-laravel, php, application, environment, default_connection, connections: {name: {driver,
-retry_after}}, pcntl, telemetry_stream, events, operations}`. `available` is false when the
-application could not answer or answered a schema this service does not understand; `error`
-then says which, the descriptor fields are omitted, and the answer is still a 200. Either case
-still supervises the pool: the deployment loses its controls, not its workers. `operations`
-names what this service can do: `inspect_queues`, `telemetry`, `failed_jobs_list`,
-`failed_job_retry` and `failed_job_delete` follow `available` because they run the package's
-commands, and so does `restart_workers`: a deployment whose descriptor cannot be read is
-presented as read-only until it is repaired. Any signed-in role may read it; it is read-only
-and not cached (docs/adr/0014).
-
-`POST /api/v1/capabilities/refresh` re-reads the descriptor now and answers with the same
-document, so a repair can be confirmed without waiting out the 30-second interval or restarting
-the service. It needs the administrator role and the token, because it starts a PHP command on
-the application's host, it is recorded under `capability-refresh` with what the read found
-(`readable: …` or `still read-only: …`), and it is deliberately not gated on the descriptor: the
-deployment presented as read-only is exactly the one worth re-reading. A read that fails is
-still a 200 with `available: false` and the reason (docs/adr/0014).
-
-The dashboard draws that call as `Re-read now` beside the read-only banner on the workers and
-failed-jobs screens: an administrator sees it, it is disabled while the request is in flight,
-and the outcome sits beside it (`Readable: schema 1, package gohorizon/laravel 0.1.0`,
-`Still read-only: …`, or the refusal). The controls on the page then follow the answer without a
-reload.
-
-`GET /metrics` serves the state `/api/v1/health` reports in the Prometheus text format
-(`text/plain; version=0.0.4; charset=utf-8`), without a client library:
-`gohorizon_up`, `gohorizon_lock_held`,
-`gohorizon_telemetry_events_total{result="event|duplicate|invalid|error"}`,
-`gohorizon_queue_jobs{queue,state="pending|reserved|delayed"}`,
-`gohorizon_workers{supervisor,state}` and `gohorizon_crash_looping_workers{supervisor}`.
-The `error` result counts Redis failures that were retried, not failed jobs. A count the
-driver could not report has no sample rather than a zero, and label values are escaped as
-the format requires. `/metrics` stays unauthenticated, because Prometheus scrapes it without
-a session; keep it behind the reverse proxy. `/api/v1/health` is behind the gate like the
-rest of the API once `server.auth.users` is configured.
+- **Worker supervision:** an explicit state machine, per-queue allocation, crash backoff, exit-code
+  classification, graceful SIGTERM with bounded SIGKILL escalation, and adoption of processes left
+  by a previous supervisor.
+- **Single supervisor guarantee:** a Redis ownership lock with renewal and fencing stops a worker
+  pool from ever being supervised by two services.
+- **Capabilities preflight:** startup refuses a `worker.timeout` that PHP cannot enforce (no
+  `pcntl`) or that is not below the queue connection's `retry_after`.
+- **Telemetry ingestion:** a Redis Stream consumer group that deduplicates by event id, validates
+  job identity, and retries Redis failures without touching the workers.
+- **Historical metrics:** SQLite job rows and per-queue minute, hourly and daily aggregates, pruned
+  on configurable retention windows, read back through `GET /api/v1/metrics` and `GET /api/v1/jobs`.
+- **Queue depth:** every 15 seconds `gohorizon:inspect` reports each supervised queue's pending,
+  reserved and delayed counts, plus the age of its oldest waiting job.
+- **Failed jobs:** the application's own failed store, paged through `GET /api/v1/failed`, with
+  `Retry` and `Delete` actions that run the application's own commands.
+- **Capability descriptor:** `GET /api/v1/capabilities` publishes what the application says about
+  itself and an `operations` map; the dashboard and the API both withhold an action this deployment
+  cannot perform, with the reason.
+- **Health and metrics:** read-only `GET /api/v1/health` and a Prometheus scrape at `/metrics`,
+  shipping with alerting rules and `promtool` tests.
+- **Dashboard:** a React dashboard at `/` with overview, queues, workers, jobs, failed jobs and
+  metrics screens.
+- **Laravel package:** `gohorizon/laravel` with configuration, lifecycle telemetry,
+  `gohorizon:capabilities`, `gohorizon:inspect` and `gohorizon:failed:list`.
+- **Sign-in and roles:** session authentication with PBKDF2 hashes and `gohorizon passwd`, roles
+  (`viewer`, `operator`, `administrator`), CSRF protection, and an audit record for every session
+  and administrative action.
+- **Tests:** integration tests against a real Laravel application and Redis, and a Playwright
+  browser acceptance test.
 
 Not implemented yet: per-action administrator rights, queryable audit history, balancing.
+
+## Architecture at a glance
+
+```text
+Laravel application
+       |
+       | queue execution + integration telemetry
+       v
+Redis queue infrastructure <----> GoHorizon Go control plane
+                                      |
+                                      +-- worker supervision
+                                      +-- metrics and health APIs
+                                      +-- historical persistence
+                                      +-- React dashboard
+```
+
+The supported deployment is a single GoHorizon deployment. These concerns stay separate:
+
+- **Broker adapters** — broker-specific inspection and operations.
+- **Runtime/framework adapters** — framework-specific metadata and worker integration.
+- **Control plane** — lifecycle, coordination, API, persistence, and authorization.
+- **Dashboard** — a web interface over the documented APIs.
+
+Broker semantics differ. GoHorizon exposes capabilities explicitly instead of pretending every
+broker supports identical operations or guarantees.
+
+## Supported integrations and roadmap
+
+| Integration | Status |
+|---|---|
+| Laravel 13 | Initial integration target |
+| Redis | Initial broker/backend target |
+| RabbitMQ | Planned; not supported until an adapter and its tests exist |
+| Other worker runtimes | Long-term direction; not currently supported |
+
+GoHorizon does not claim exactly-once processing. Delivery, acknowledgement, retry, ordering and
+visibility semantics remain broker-specific.
+
+[docs/ROADMAP.md](docs/ROADMAP.md) describes the intended sequence — hardening, first stable
+release, the adapter contract, then RabbitMQ and further runtimes. It describes direction, not a
+promise or a delivery schedule.
+
+## Quick start
+
+Requires Go, PHP with `pcntl` for worker supervision, and a Redis instance.
+
+```sh
+go build ./...
+go test -race ./...
+
+GOHORIZON_REDIS_PASSWORD=secret go run ./cmd/gohorizon validate -config examples/gohorizon.yaml
+GOHORIZON_REDIS_PASSWORD=secret go run ./cmd/gohorizon run -config examples/gohorizon.yaml
+curl -s localhost:8090/api/v1/health | jq
+```
+
+`examples/gohorizon.yaml` points at `/var/www/application`; adjust the application path and PHP
+binary before running the service. The specification lives in [`handoff.md`](handoff.md); the
+verified Laravel 13 behaviour that adjusts it is in
+[`docs/laravel-13-recon.md`](docs/laravel-13-recon.md).
+
+Configuration is loaded from YAML with environment expansion and validated by
+`gohorizon validate`. Authentication is off until `server.auth.users` is configured; pass hashes
+are minted with `gohorizon passwd`. Operational guidance and alert meanings are in
+[`docs/runbook.md`](docs/runbook.md).
 
 ## Layout
 
@@ -261,6 +151,8 @@ web                    Vite + React dashboard, built into web/dist
 packages/laravel       Composer package (gohorizon/laravel)
 docs/adr               architecture decision records
 ```
+
+The HTTP API is documented in [docs/api.md](docs/api.md).
 
 ## Dashboard
 
@@ -291,20 +183,6 @@ vitest suite over the pure functions: report to screen, age formatting, unreport
 staying `unknown`, the bucket-to-column transform (including gaps and an all-zero window),
 the history query the range picker builds, and the jobs screen's query, cursor trail and the
 `null` exception that must read `none` rather than blank.
-
-## Running locally
-
-```sh
-go build ./...
-go test -race ./...
-
-GOHORIZON_REDIS_PASSWORD=secret go run ./cmd/gohorizon validate -config examples/gohorizon.yaml
-GOHORIZON_REDIS_PASSWORD=secret go run ./cmd/gohorizon run -config examples/gohorizon.yaml
-curl -s localhost:8090/api/v1/health | jq
-```
-
-`examples/gohorizon.yaml` points at `/var/www/application`; adjust the application path
-and PHP binary before running the service.
 
 ## Acceptance run
 
@@ -360,10 +238,49 @@ These are enforced by tests, not just documented:
 - One worker serves one queue, so queue-level allocation is real.
 - A graceful stop waits `shutdown_grace`, then escalates to SIGKILL on the process group
   and records the escalation.
-  
-## Support this project
 
-If you find this project useful, consider supporting its development.
+## Design principles
 
-[![Sponsor](https://img.shields.io/badge/Sponsor-GitHub-ea4aaa?logo=github)](https://github.com/sponsors/marktamis)
-[![Buy Me a Coffee](https://img.shields.io/badge/Buy_Me_a_Coffee-Support-FFDD00?logo=buy-me-a-coffee&logoColor=000)](https://buymeacoffee.com/marktamis)
+1. **Do not replace the broker.** GoHorizon operates around existing queue infrastructure.
+2. **Preserve native semantics.** Adapters expose real capabilities and limitations.
+3. **Keep integrations modular.** Framework integration and broker integration are separate concerns.
+4. **Prefer observable, recoverable operations.** Lifecycle transitions and administrative actions
+   are auditable.
+5. **Be honest about guarantees.** No exactly-once promises, no uniform behaviour across brokers.
+6. **Ship incrementally.** Protect the working Laravel/Redis path while adding capabilities.
+7. **Secure by default.** Authentication, authorization, CSRF protection, secret handling and
+   auditability are core product concerns.
+
+## Sponsorship
+
+GoHorizon is an independent open-source project. Sponsorship helps fund the time and
+infrastructure required to make it reliable, useful, and sustainable.
+
+Your support helps with:
+
+- Core GoHorizon development and maintenance.
+- Compatibility testing across supported Laravel, PHP, and Redis versions.
+- Broker adapters, beginning with the planned RabbitMQ integration.
+- Worker-runtime integrations and adapter documentation.
+- Security, reliability, and observability improvements.
+- Documentation, examples, releases, and community support.
+
+- [Sponsor on GitHub](https://github.com/sponsors/marktamis)
+- [Buy Me a Coffee](https://buymeacoffee.com/marktamis)
+
+Sponsorship supports ongoing open-source development. It does not purchase a commercial SLA,
+guaranteed response times, or guaranteed feature delivery.
+
+## Contributing
+
+Contributions, issue reports, documentation improvements, and thoughtful feature proposals are
+welcome. Please read [CONTRIBUTING.md](CONTRIBUTING.md) before opening a pull request. For
+security-sensitive reports, follow [SECURITY.md](SECURITY.md) rather than publishing exploit
+details in a public issue.
+
+## License
+
+The repository does not contain a `LICENSE` file yet, and the maintainer has not selected a
+license. Until a license is added, do not assume that public visibility grants permission to use,
+modify, or redistribute the code. [LICENSE-DECISION.md](LICENSE-DECISION.md) records the decision
+that has to be made and the options considered.
