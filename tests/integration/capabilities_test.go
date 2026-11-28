@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"slices"
+	"sort"
 	"strconv"
 	"strings"
 	"testing"
@@ -43,6 +44,11 @@ type rawCapabilities struct {
 		Stream string `json:"stream"`
 	} `json:"telemetry"`
 	Events []string `json:"events"`
+	// Payloads are the versions the application reports for its own commands' payloads.
+	Payloads struct {
+		Inspect    int `json:"inspect"`
+		FailedJobs int `json:"failed_jobs"`
+	} `json:"payload_schemas"`
 }
 
 // capabilitiesAnswer is the published descriptor as a client reads it.
@@ -50,6 +56,7 @@ type capabilitiesAnswer struct {
 	Available       bool   `json:"available"`
 	Schema          int    `json:"schema"`
 	Package         string `json:"package"`
+	PackageVersion  string `json:"package_version"`
 	Laravel         string `json:"laravel"`
 	PHP             string `json:"php"`
 	Application     string `json:"application"`
@@ -1037,5 +1044,194 @@ func TestCapabilitiesRefreshConfirmsARepairWithoutWaitingForTheTick(t *testing.T
 	}
 	if record["user"] != testOperator || record["role"] != auth.RoleAdministrator {
 		t.Errorf("record = %v, want %s as administrator", record, testOperator)
+	}
+}
+
+// descriptorDifferences lists every path at which two decoded JSON documents disagree, so a
+// field the re-read loses is named — `descriptor.connections.redis.retry_after: absent, want
+// 10` — instead of the whole documents being reported as different.
+func descriptorDifferences(path string, want, got any) []string {
+	wantMap, wantIsMap := want.(map[string]any)
+	gotMap, gotIsMap := got.(map[string]any)
+	if wantIsMap || gotIsMap {
+		if !wantIsMap || !gotIsMap {
+			return []string{fmt.Sprintf("%s: got %v, want %v", path, got, want)}
+		}
+		keys := make([]string, 0, len(wantMap)+len(gotMap))
+		for key := range wantMap {
+			keys = append(keys, key)
+		}
+		for key := range gotMap {
+			if _, ok := wantMap[key]; !ok {
+				keys = append(keys, key)
+			}
+		}
+		sort.Strings(keys)
+
+		var diffs []string
+		for _, key := range keys {
+			wantValue, inWant := wantMap[key]
+			gotValue, inGot := gotMap[key]
+			switch {
+			case !inWant:
+				diffs = append(diffs, fmt.Sprintf("%s.%s: got %v, want the field absent", path, key, gotValue))
+			case !inGot:
+				diffs = append(diffs, fmt.Sprintf("%s.%s: absent, want %v", path, key, wantValue))
+			default:
+				diffs = append(diffs, descriptorDifferences(path+"."+key, wantValue, gotValue)...)
+			}
+		}
+		return diffs
+	}
+
+	wantList, wantIsList := want.([]any)
+	gotList, gotIsList := got.([]any)
+	if wantIsList || gotIsList {
+		if !wantIsList || !gotIsList {
+			return []string{fmt.Sprintf("%s: got %v, want %v", path, got, want)}
+		}
+		var diffs []string
+		if len(wantList) != len(gotList) {
+			diffs = append(diffs, fmt.Sprintf("%s: got %d entries, want %d (%v)", path, len(gotList), len(wantList), wantList))
+		}
+		for i := 0; i < len(wantList) && i < len(gotList); i++ {
+			diffs = append(diffs, descriptorDifferences(fmt.Sprintf("%s[%d]", path, i), wantList[i], gotList[i])...)
+		}
+		return diffs
+	}
+
+	if want != got {
+		return []string{fmt.Sprintf("%s: got %v, want %v", path, got, want)}
+	}
+	return nil
+}
+
+// TestCapabilitiesRefreshPublishesTheSameDescriptorAsTheLaunchRead is the real-binary half of
+// the descriptor contract. The stub test can only prove that both routes serialize one answer,
+// because they share writeDescriptor; this runs the command, reads the launch document, asks for
+// a forced re-read — which runs the application again and rebuilds the descriptor from what it
+// answers now — and requires the published document to be the same one, field by field.
+//
+// Every field the fixture proves is checked against the application's own payload first, so the
+// two documents cannot agree by both having lost a field: the connection map with its drivers
+// and reservation windows, the telemetry stream, the event list and the operations are all
+// required to be there with the application's values before the documents are compared.
+func TestCapabilitiesRefreshPublishesTheSameDescriptorAsTheLaunchRead(t *testing.T) {
+	h := newHarness(t)
+	hash, err := auth.HashPassword(testOperatorPassword)
+	if err != nil {
+		t.Fatalf("hash the test password: %v", err)
+	}
+	configPath, base := h.writeConfigWithRole(h.php, hash, auth.RoleAdministrator)
+	h.startBinary(h.buildBinary(), configPath)
+	cookies := h.signIn(t, base, testOperator, testOperatorPassword)
+	awaitRunning(h, base, cookies...)
+
+	// The launch read's document: what a client saw of this deployment before anybody asked for
+	// a re-read.
+	status, launchBody := h.call(t, base, http.MethodGet, "/api/v1/capabilities", cookies)
+	if status != http.StatusOK {
+		t.Fatalf("GET /api/v1/capabilities = %d, want 200 (body %s)", status, launchBody)
+	}
+	status, refreshBody := h.call(t, base, http.MethodPost, "/api/v1/capabilities/refresh", cookies)
+	if status != http.StatusOK {
+		t.Fatalf("POST /api/v1/capabilities/refresh = %d, want 200 (body %s)", status, refreshBody)
+	}
+
+	// The launch document has to carry the application's answer, not merely be the document the
+	// re-read happens to repeat.
+	var launch capabilitiesAnswer
+	if err := json.Unmarshal([]byte(launchBody), &launch); err != nil {
+		t.Fatalf("decode the launch document: %v (%s)", err, launchBody)
+	}
+	if !launch.Available || launch.Error != "" {
+		t.Fatalf("available=%t error=%q, want the application's descriptor", launch.Available, launch.Error)
+	}
+	raw := h.capabilitiesPayload(t)
+	identifiers := []struct {
+		field string
+		got   any
+		want  any
+	}{
+		{"schema", launch.Schema, raw.Schema},
+		{"package", launch.Package, raw.Package},
+		{"laravel", launch.Laravel, raw.Laravel},
+		{"php", launch.PHP, raw.PHP},
+		{"application", launch.Application, raw.Application},
+		{"environment", launch.Environment, raw.Environment},
+		{"telemetry_stream", launch.TelemetryStream, raw.Telemetry.Stream},
+		{"pcntl", launch.PCNTL, raw.Runtime.PCNTL},
+	}
+	for _, id := range identifiers {
+		if fmt.Sprint(id.want) == "" {
+			t.Errorf("the application reported no %s; the fixture no longer proves the field", id.field)
+			continue
+		}
+		if fmt.Sprint(id.got) != fmt.Sprint(id.want) {
+			t.Errorf("launch %s = %v, want the application's %v", id.field, id.got, id.want)
+		}
+	}
+
+	if len(launch.Connections) != len(raw.Queue.Connections) || len(launch.Connections) == 0 {
+		t.Errorf("launch connections = %d, want the application's %d", len(launch.Connections), len(raw.Queue.Connections))
+	}
+	var windows, silent int
+	for name, want := range raw.Queue.Connections {
+		got, ok := launch.Connections[name]
+		if !ok {
+			t.Errorf("connection %q is missing from the launch document", name)
+			continue
+		}
+		if got.Driver != want.Driver {
+			t.Errorf("connection %q driver = %q, want the application's %q", name, got.Driver, want.Driver)
+		}
+		switch {
+		case want.RetryAfter == nil && got.RetryAfter != nil:
+			t.Errorf("connection %q retry_after = %d, want null for a driver with no window", name, *got.RetryAfter)
+		case want.RetryAfter != nil && got.RetryAfter == nil:
+			t.Errorf("connection %q retry_after = null, want the application's %d", name, *want.RetryAfter)
+		case want.RetryAfter != nil && *want.RetryAfter != *got.RetryAfter:
+			t.Errorf("connection %q retry_after = %d, want the application's %d", name, *got.RetryAfter, *want.RetryAfter)
+		}
+		if want.RetryAfter != nil {
+			windows++
+		} else {
+			silent++
+		}
+	}
+	if windows == 0 || silent == 0 {
+		t.Errorf("the fixture reports %d windows and %d nulls, want both so the distinction is proven", windows, silent)
+	}
+	if len(raw.Events) == 0 {
+		t.Error("the application reported no lifecycle events; the fixture no longer proves the field")
+	}
+	if !slices.Equal(launch.Events, raw.Events) {
+		t.Errorf("launch events = %v, want the application's %v", launch.Events, raw.Events)
+	}
+	if launch.ApplicationPayloadSchemas == nil {
+		t.Error("application_payload_schemas is missing, so the application's report is not published")
+	}
+	if len(launch.Operations) == 0 {
+		t.Error("operations is empty, so the document says nothing about what the deployment can do")
+	}
+	for operation, offered := range launch.Operations {
+		if !offered {
+			t.Errorf("operations[%q] = false, want every operation on a readable descriptor (reasons %v)",
+				operation, launch.OperationReasons)
+		}
+	}
+
+	// Field by field over the whole document: identifiers, the connection map with its drivers
+	// and windows, the telemetry stream, the event list, the payload versions, the operations and
+	// their reasons. Equality is deep, so a field only one document has is a difference too.
+	var want, got map[string]any
+	if err := json.Unmarshal([]byte(launchBody), &want); err != nil {
+		t.Fatalf("decode the launch document as a map: %v", err)
+	}
+	if err := json.Unmarshal([]byte(refreshBody), &got); err != nil {
+		t.Fatalf("decode the re-read document as a map: %v", err)
+	}
+	if diffs := descriptorDifferences("descriptor", want, got); len(diffs) > 0 {
+		t.Errorf("the forced re-read published a document the launch read did not:\n%s", strings.Join(diffs, "\n"))
 	}
 }
